@@ -48,6 +48,8 @@ typedef struct mod2entry /* Structure representing a non-zero entry, or
 
   double pr, lr;	  /* Probability and likelihood ratios - not used  */
 			  /*   by the mod2sparse module itself             */
+  int pr_F;
+  int shift;
 } mod2entry;
 
 #define Mod2sparse_block 10  /* Number of entries to block together for

@@ -16,6 +16,9 @@
 
 /* STATE OF RANDOM NUMBER GENERATOR. */
 
+#ifndef _RANDH_
+#define _RANDH_
+
 #define N_tables 5		/* Number of tables of real random numbers */
 
 typedef struct
@@ -52,3 +55,10 @@ double rand_cauchy (void);	/* Cauchy centred at zero with unit width */
 double rand_gamma (double);	/* Gamma with given shape parameter */
 double rand_exp (void);		/* Exponential with mean one */
 double rand_beta (double, double); /* Beta with given parameters */
+
+// ADDED FUNCTIONS
+void randomSubset(int *subset, int n, int N);
+void randomError(int *random_vec, int *err_pos, int vec_len, int err_num, int erasure_num, int q);
+void randomBinError(int *random_vec, int *err_pos, int vec_len, int err_num);
+
+#endif

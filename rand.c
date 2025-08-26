@@ -449,6 +449,72 @@ double rand_beta
   return r;
 }
 
+// Generate a random subset of size N from the integers 0, 1, ..., n-1.
+void randomSubset(int *subset, int n, int N)
+{
+  int  t = 0, m = 0;
+  double U;
+
+  while (m < N)
+  {
+    U = rand_uniform();
+    if (((N - t) * U) >= (n - m))
+    {
+      t++;
+    }
+    else {
+      subset[m] = t;
+      m++;
+      t++;
+    }
+  }
+}
+
+void randomBinError(int *random_vec, int *err_pos, int vec_len, int err_num)
+{
+  int i;
+
+  memset(random_vec, 0, vec_len*sizeof(*random_vec));
+  randomSubset(err_pos, err_num, vec_len);
+
+  i = 0;
+  while (i < err_num)
+  {
+    random_vec[err_pos[i]] = 1;
+    i++;
+  }
+}
+
+// Generate a random error vector with given number of errors and erasures.
+void randomError(int *random_vec, int *era_pos, int vec_len, int err_num, int erasure_num, int q)
+{
+  int i;
+  int *err_pos;
+  int err;
+
+  for(i = 0; i < vec_len; i++)
+  {
+    random_vec[i] = 0;
+  }
+  
+  err_pos = (int *)calloc(err_num, sizeof(*err_pos));
+
+  randomSubset(err_pos, err_num, vec_len);
+  randomSubset(era_pos, erasure_num, vec_len);
+
+  i = 0;
+  while(i < err_num)
+  {
+    err = (int) floor(q * rand_uniform());
+    if (err != 0 )
+    {
+      random_vec[err_pos[i]] = err;
+      i++;
+    }
+  }
+
+  free(err_pos);
+}
 
 /* ROUTINES FROM THE GNU C LIBRARY.  These were modified to extract 
    only the routines used here, and to allow them to be included in 
