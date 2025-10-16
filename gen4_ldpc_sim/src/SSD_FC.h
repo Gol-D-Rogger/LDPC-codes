@@ -2,14 +2,16 @@
 enum fc_sim_mode {FC_SIM=0, LDPC_SIM=1};
 
 // Simulation
-enum fc_sim_mode sim_mode;
-int max_sim_num;
-int max_err_num;
-int sim_step;
+enum fc_sim_mode sim_mode = LDPC_SIM;
+int max_sim_num = 1000;   // 默认值：1000 个数据包
+int max_err_num = 10;     // 默认值：10 个错误
+int sim_step = 100;        // 默认值：每 100 个包更新一次
 
 char *config_file;
 char pchk_file[500];
 char drop_file[500];
+char mask_file[500];
+char matrix_dir[500];
 int h_m;
 int h_n;
 int h_sc;

@@ -28,10 +28,27 @@ int gen_ldpc_matrix( mod2sparse *basePCH,   // place to store the base parity-ch
                      int minimum_girth,     // minimum girth of the expanded matrix
                      int** mask_matrix );
 
+int gen4_ldpc_matrix(mod2sparse *basePCH,   // place to store the base parity-check matrix 
+                     mod2sparse *exPCH,     // place to store the expanded parity-check matrix
+                     int rownum,            // number of rows in the base parity-check matrix
+                     int colnum,            // number of columns in the base parity-check matrix
+                     int ex_factor,         // expansion factor
+                     int t_size,            // Identity matrix T size
+                     WD_vector *row_dt,     // row weight distribution of the base matrix
+                     WD_vector *col_dt,     // column weight distribution of the base matrix
+                     int maximum_girth,     // maximum girth of the expanded matrix
+                     int minimum_girth );   // minimum girth of the expanded matrix
+
 // generate irregular LDPC codes files using back padding scheme
 void gen_ldpc_files (char *codefile, char* maskfile, char *cyclefile, int filenum,
                      WD_vector *row_dt, WD_vector *col_dt,
                      int ex_factor, int pad_bit, int g,
+                     int start_girth, int end_girth,
+                     float expected_avg_girth);
+
+void gen4_ldpc_files(char *codefile,  int filenum,
+                     WD_vector *row_dt, WD_vector *col_dt,
+                     int ex_factor, int g,
                      int start_girth, int end_girth,
                      float expected_avg_girth);
 

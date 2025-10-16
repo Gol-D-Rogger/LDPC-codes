@@ -224,6 +224,7 @@ void dsp_packet::dsp_pckt_clean()
     free(rd_rand_blk);
     rd_rand_blk = NULL;
     free(rcv_blk);
+    rcv_blk = NULL;
 }
 
 void dsp_packet::meta_insert()

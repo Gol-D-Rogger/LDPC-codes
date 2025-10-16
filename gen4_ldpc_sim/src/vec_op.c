@@ -2,7 +2,9 @@
 
 // Clear a vector (set all elements to 0)
 void vec_clr(char *vec, int len) {
-    memset(vec, 0, len * sizeof(char));
+    for (int i = 0; i < len; i++) {
+        vec[i] = 0;
+    }
 }
 
 // Clear an integer vector (set all elements to 0)
@@ -16,14 +18,24 @@ void vec_set(char *vec, int len) {
 }
 
 // Copy a portion of one vector to another
-void vec_copy(char *dest, char *src, int dest_offset, int src_offset, int len) {
-    memmove(dest + dest_offset, src + src_offset, len * sizeof(char));
+void vec_copy(char *vs, char *vd, int vs_si, int vd_si, int d) {
+    for (int i = 0; i < d; i++) {
+        vd[vd_si + i] = vs[vs_si + i];
+    }
 }
 
 // Compare two vectors
 // Returns <0 if vec1 < vec2, 0 if equal, >0 if vec1 > vec2 (same as memcmp)
-int vec_cmp(char *vec1, char *vec2, int offset1, int offset2, int len) {
-    return memcmp(vec1 + offset1, vec2 + offset2, len * sizeof(char));
+int vec_cmp(char *vs, char *vd, int vs_si, int vd_si, int d) {
+    int mismatch = 0;
+
+    for (int i = 0; i < d; i++) {
+        if (vd[vd_si + i] != vs[vs_si + i]) {
+            mismatch = 1;
+            break;
+        }
+    }
+    return mismatch;
 }
 
 // Add two vectors element-wise
@@ -48,9 +60,9 @@ void vec_incr_int(int *vec1, char *vec2, int len) {
 }
 
 // Perform element-wise modulo-2 addition
-void vec_mod2_add(char *result, char *vec1, char *vec2, int len) {
+void vec_mod2_add(char *va, char *vb, char *vs, int len) {
     for (int i = 0; i < len; i++) {
-        result[i] = (vec1[i] + vec2[i]) % 2;
+        vs[i] = (va[i] + vb[i]) % 2;
     }
 }
 
@@ -115,4 +127,23 @@ int vec_find(char *vec, int len, int target_val, int *positions) {
         }
     }
     return count;
+}
+
+void vec_copy_fill(char *vs, int vs_sz, char* vd, int vs_si, int vd_si, int d, char fill_val)
+{
+    for (int i = 0; i < d; i++)
+    {
+        if (vs_si + i < vs_sz)
+            vd[vd_si + i] = vs[vs_si + i];
+        else
+            vd[vd_si + i] = fill_val;
+    }
+}
+
+void vec_mask(char *vec, int start, int mask_len, char mask_val)
+{
+    for (int i = 0; i < mask_len; i++)
+    {
+        vec[start + i] = mask_val;
+    }
 }

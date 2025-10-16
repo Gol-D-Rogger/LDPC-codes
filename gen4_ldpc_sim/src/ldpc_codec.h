@@ -33,6 +33,107 @@ struct cn_msg
 
 struct ldpc_packet : ch_packet
 {
+    ldpc_packet()
+        : ch_packet(),
+          cir_sz(0),
+          bm_m(0),
+          bm_n(0),
+          bm_k(0),
+          tm_sz(0),
+          col_wt(0),
+          hm_m(0),
+          hm_n(0),
+          hm_k(0),
+          pad_len(0),
+          pad_bit(0),
+          rdec_cmem_cont_thrshd(0),
+          rdec_hdmem_cont_thrshd(0),
+          qc_bm(NULL),
+          qc_hm(NULL),
+          qc_a(NULL),
+          qc_b(NULL),
+          qc_c(NULL),
+          qc_d(NULL),
+          qc_e(NULL),
+          qc_fi(NULL),
+          qc_g(NULL),
+          qc_f1(NULL),
+          qc_f2(NULL),
+          drop_col(NULL),
+          drop_col_bit_map(NULL),
+          wit_drop(NULL),
+          k_val(0),
+          awon(0),
+          fdec_max_itr(0),
+          tbfdec_max_itr(0),
+          fdec_early_term_en(0),
+          ldec_max_itr(0),
+          ldec_early_term_en(0),
+          flp_thrshd0(NULL),
+          flp_thrshd1(NULL),
+          tbbf_thrshd0(NULL),
+          tbbf_thrshd1(NULL),
+          flp_thrshd0_s(NULL),
+          flp_thrshd0_w(NULL),
+          flp_thrshd1_s(NULL),
+          flp_thrshd1_w(NULL),
+          sb_thrshd0_s0(NULL),
+          sb_thrshd0_s1(NULL),
+          sb_thrshd0_w0(NULL),
+          sb_thrshd0_w1(NULL),
+          sb_thrshd1_s0(NULL),
+          sb_thrshd1_s1(NULL),
+          sb_thrshd1_w0(NULL),
+          sb_thrshd1_w1(NULL),
+          fpd_flp_thrshd0_s(NULL),
+          fpd_flp_thrshd0_w(NULL),
+          fpd_flp_thrshd1_s(NULL),
+          fpd_flp_thrshd1_w(NULL),
+          fpd_sb_thrshd0_s0(NULL),
+          fpd_sb_thrshd0_s1(NULL),
+          fpd_sb_thrshd0_w0(NULL),
+          fpd_sb_thrshd0_w1(NULL),
+          fpd_sb_thrshd1_s0(NULL),
+          fpd_sb_thrshd1_s1(NULL),
+          fpd_sb_thrshd1_w0(NULL),
+          fpd_sb_thrshd1_w1(NULL),
+          alpha(0.0f),
+          finite_mode(0),
+          finite_q_num(0),
+          finite_r_num(0),
+          finite_c_num(0),
+          finite_f_num(0),
+          finite_q_max(0.0f),
+          finite_q_min(0.0f),
+          finite_r_max(0.0f),
+          finite_r_min(0.0f),
+          finite_c_max(0.0f),
+          finite_c_min(0.0f),
+          reg_fp_flg(0),
+          usr_blk(NULL),
+          enc_di_blk(NULL),
+          enc_do_blk(NULL),
+          dec_di_blk(NULL),
+          dec_do_blk(NULL),
+          dec_blk(NULL),
+          cw_fail(0),
+          cw_miscorr(0),
+          cor_err_num(0),
+          dec_err_num(0),
+          col_skip_itr(0),
+          init_synd_wt(0),
+          init_synd_wt_max(0),
+          init_synd_wt_min(0),
+          fina_synd_wt(0),
+          cnvg_itr(0),
+          cnvg_lyr(0),
+          fdec_cyc_num(0),
+          fdec_cyc_org(0),
+          drop_len(0),
+          mask_len(0),
+          pad_bit_num(0),
+          mask_matrix(NULL)
+    {}
     // QC matrix config
     int cir_sz; // size of the circulant matrix
     int bm_m; // number of rows in the base matrix
@@ -137,15 +238,25 @@ struct ldpc_packet : ch_packet
     int fdec_cyc_num;
     int fdec_cyc_org;
 
+    // pad 2Byte size new by hdq
+    int drop_len;
+    int mask_len;
+    int pad_bit_num;
+    int** mask_matrix;
+
     // alloc/cleanup packet
     void ldpc_pckt_alloc();
     void ldpc_pckt_clean();
 
     // QC-LDPC config & clean up
+    void ldpc_config_dq(int, int, int, int, int, int, char *, char *);
+    void ldpc_dec_config_dq(int, int, int, float, int, int, int, int);
+
     void ldpc_config(int, int, int, int, int, int, int, char *, char *);
     void ldpc_dec_config(int, int, int, int, float, int, int, int, int, int);
     void ldpc_rd_phck(char *, char *);
     void ldpc_gen_gm();
+    void ldpc_gen_gm_dq();
     void ldpc_clean();
 
     void print_hm();
@@ -162,6 +273,7 @@ struct ldpc_packet : ch_packet
     void ldpc_dec_bf2_nopadding();
     // LDPC layer decoder
     void ldpc_dec_layer();
+    void ldpc_dec_layer3();
     // LDPC 2bit BF decoder
     void ldpc_dec_2bit_bf(int p_num, int col_skip_itr);
     // LDPC enhance BF decoder with flip memory

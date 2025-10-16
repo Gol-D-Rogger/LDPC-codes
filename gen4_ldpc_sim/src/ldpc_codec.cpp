@@ -160,7 +160,6 @@ void ldpc_packet::ldpc_rd_phck(char *pchk_file, char *drop_file)
     printf("[LDPC] H matrix porting ready!\n");
 }
 
-
 // Generate G matrices from H
 void ldpc_packet::ldpc_gen_gm()
 {
@@ -344,7 +343,6 @@ void ldpc_packet::ldpc_config(int m, int n, int sc, int pdbit, int st, int wt, i
         // print_hm();
 #endif
 } // ldpc_config
-
 
 // LDPC decoder config
 void ldpc_packet::ldpc_dec_config(int max_fdec_itr, int max_tbfdec_itr, int fdec_col_skip, int max_ldec_itr, float dec_alpha, int fin_mode, int fin_q_num, int fin_r_num, int fin_f_num, int fp_flg)
@@ -1556,7 +1554,7 @@ void ldpc_packet::ldpc_dec_bf2(int p_num, int col_skip_itr)
                                 else
                                     vn_flp_sel[0][j] = 0;
 
-                                if ((vn_synd_cnt[j] >= sb_thrshd1_s1[itr - 1]) && (vn_synd_cnt[j] < sb_thrshd1_s1[itr - 1]))
+                                if ((vn_synd_cnt[j] >= sb_thrshd1_s0[itr - 1]) && (vn_synd_cnt[j] < sb_thrshd1_s1[itr - 1]))
                                     vn_sb_sel[j] = 0;
                             }
                             else // weak
@@ -1890,11 +1888,11 @@ void ldpc_packet::ldpc_dec_layer()
     struct cn_msg *cn_c_sel_pre;   // previous layer check node msg
     float **cn_q_mem;       // Q mem in CN order of previous layer
     float *cn_q_sel_pre;    // Q msg of the select circulant from previous layer
-    float *cn_q_sel_cur;    // Q msg of the select circulant from current layer
     float *cn_r_new_pre;    // New R msg in CN order of previous layer
-    float *cn_r_old_cur;    // old R msg in CN order of previous layer
     float *cn_app_pre;      // APP = Q + R_new in CN order of previous layer
     float *cn_app_cur;      // APP = Q + R_new in CN order of current layer
+    float *cn_q_sel_cur;    // Q msg of the select circulant from current layer
+    float *cn_r_old_cur;    // old R msg in CN order of previous layer
     float *cn_q_updt_cur;   // Updated Q msg of the select circulant in current layer
     int **cn_q_sign;      // Q sign
 
@@ -1908,12 +1906,27 @@ void ldpc_packet::ldpc_dec_layer()
     char *drop_wit_now;
     
     // allocation
-    dec_init = (char *)calloc(hm_n, sizeof(*dec_init));
+    dec_init = (char *)calloc(bm_n, sizeof(*dec_init));
     drop_wit_now = (char *)calloc(bm_m, sizeof(*drop_wit_now));
     vec_set(dec_init, bm_n);
 
     cn_c_mem = (struct cn_msg **)calloc(bm_m, sizeof(*cn_c_mem));
-    for (int i = 0; i<bm_m*col_wt; i++)
+    for (int i = 0; i < bm_m; i++)
+        cn_c_mem[i] = (struct cn_msg *)calloc(cir_sz, sizeof(*cn_c_mem[i]));
+    cn_c_updt_cur = (struct cn_msg *)calloc(cir_sz, sizeof(*cn_c_updt_cur));
+
+    cn_q_mem = (float **)calloc(bm_n, sizeof(*cn_q_mem));
+    for (int i = 0; i < bm_n; i++)
+        cn_q_mem[i] = (float *)calloc(cir_sz, sizeof(*cn_q_mem[i]));
+
+    cn_r_new_pre = (float *)calloc(cir_sz, sizeof(*cn_r_new_pre));
+    cn_app_pre = (float *)calloc(cir_sz, sizeof(*cn_app_pre));
+    cn_app_cur = (float *)calloc(cir_sz, sizeof(*cn_app_cur));
+    cn_r_old_cur = (float *)calloc(cir_sz, sizeof(*cn_r_old_cur));
+    cn_q_updt_cur = (float *)calloc(cir_sz, sizeof(*cn_q_updt_cur));
+
+    cn_q_sign = (int **)calloc(bm_n*col_wt, sizeof(*cn_q_sign));
+    for (int i = 0; i<bm_n*col_wt; i++)
         cn_q_sign[i] = (int*)calloc(cir_sz, sizeof(*cn_q_sign[i]));
 
     layer_synd = (char *)calloc(cir_sz, sizeof(*layer_synd));
@@ -2025,7 +2038,7 @@ void ldpc_packet::ldpc_dec_layer()
                     }
                     else
                     {
-                        mem_app_start = (e_pre->col - e_pre->row) / (bm_m - 1) * pad_bit % cir_sz;
+                        mem_app_start = e_pre->col / (bm_m - 1) * pad_bit % cir_sz;
                         mem_app_length = pad_bit;
                     }
                     min_app_ind = (mem_app_start + mem_app_length);
@@ -2051,18 +2064,14 @@ void ldpc_packet::ldpc_dec_layer()
                     else
                     {
                         if (cn_c_sel_pre[i].min1_pos == e->col)
-                        {
                             cn_r_new_pre[i] = cn_c_sel_pre[i].min2_val * cn_c_sel_pre[i].sign_tot * sign_tmp;
-                        }
                         else
-                        {
                             cn_r_new_pre[i] = cn_c_sel_pre[i].min1_val * cn_c_sel_pre[i].sign_tot * sign_tmp;
-                        }
                     }
 
                     // Rnew
                     // APP in CN order of previous layer
-                    cn_app_pre[i] = cn_q_sel_pre[i] + cn_r_new_pre[i];
+                    cn_app_pre[i] = cn_r_new_pre[i] + cn_q_sel_pre[i];
 
                     if (finite_mode == 1)
                     {
@@ -2087,7 +2096,7 @@ void ldpc_packet::ldpc_dec_layer()
                 for (int i = 0; i < cir_sz; i++)
                 {
                     cn_app_cur[i] = cn_app_pre[(i+shift_val1 + cir_sz) % cir_sz];
-                    vn_dec_hd[i] = cn_app_pre[(i+shift_val2 + cir_sz) % cir_sz] > 0 ? 0 : 1;
+                    vn_dec_hd[i] = cn_app_pre[(i+shift_val2 + cir_sz) % cir_sz] >= 0 ? 0 : 1;
                 }
 
 #ifdef _LDPC_DEBUG_DUMP
@@ -2222,13 +2231,9 @@ void ldpc_packet::ldpc_dec_layer()
                     else
                     {
                         if (cn_c_sel_cur[i].min1_pos == e->col)
-                        {
                             cn_r_old_cur[i] = cn_c_sel_cur[i].min2_val * cn_c_sel_cur[i].sign_tot * cn_q_sign[cir_cnt][i];
-                        }
                         else
-                        {
                             cn_r_old_cur[i] = cn_c_sel_cur[i].min1_val * cn_c_sel_cur[i].sign_tot * cn_q_sign[cir_cnt][i];
-                        }
                     }
 
                     // Q -= Rold
@@ -2247,7 +2252,7 @@ void ldpc_packet::ldpc_dec_layer()
                     }
                     else
                     {
-                        sign_tmp = (cn_q_updt_cur[i] < 0) ? -1 : 1;
+                        sign_tmp = (cn_q_updt_cur[i] >= 0) ? 1 : -1;
                         val_tmp = cn_q_updt_cur[i] * sign_tmp;
                         cn_c_updt_cur[i].sign_tot *= sign_tmp;
 
@@ -2323,8 +2328,8 @@ void ldpc_packet::ldpc_dec_layer()
 
                 if (finite_mode == 1)
                 {
-                    cn_c_mem[layer][i].min1_val = (float)Sat_Quan((double)cn_c_mem[layer][i].min1_val, finite_q_max, finite_q_min, finite_q_num, finite_f_num);
-                    cn_c_mem[layer][i].min2_val = (float)Sat_Quan((double)cn_c_mem[layer][i].min2_val, finite_q_max, finite_q_min, finite_q_num, finite_f_num);
+                    cn_c_mem[layer][i].min1_val = (float)Sat_Quan((double)cn_c_mem[layer][i].min1_val, finite_c_max, finite_c_min, finite_c_num, finite_f_num);
+                    cn_c_mem[layer][i].min2_val = (float)Sat_Quan((double)cn_c_mem[layer][i].min2_val, finite_c_max, finite_c_min, finite_c_num, finite_f_num);
                 }
 
                 cn_c_mem[layer][i].min1_pos = cn_c_updt_cur[i].min1_pos;
@@ -2355,13 +2360,9 @@ void ldpc_packet::ldpc_dec_layer()
             {
                 hd_stable_cnt = 0;
                 synd_pass_cnt = 0;
-
-#ifdef _LDPC_DEBUG
-                printf("[LDPC DEBUG] HD stable and syndrome passed @ iteration %d, layer %d\n", itr, layer);
-#endif
-#ifdef _LDPC_DEBUG_DUMP
-                fprintf(lfp, "ITR%d/LAYER%d: HD stable for %d and syndrome passed for %d layers\n", itr, layer, hd_stable_cnt, synd_pass_cnt);
-#endif
+            }
+            else if ((hd_updated == 0) && (layer_synd_wt == 0))
+            {
                 hd_stable_cnt++;
                 synd_pass_cnt++;
             }
@@ -2381,7 +2382,7 @@ void ldpc_packet::ldpc_dec_layer()
                 printf("[LDPC DEBUG] HD stable and syndrome passed @ iteration %d, layer %d\n", hd_stable_cnt, synd_pass_cnt);
 #endif
 
-            if ((hd_stable_cnt >= bm_m -1) && (synd_pass_cnt >= bm_m))
+            if ((synd_pass_cnt >= bm_m) && (hd_stable_cnt >= bm_m -1))
             {
                 cw_fail = 0;
                 cnvg_itr = itr;
@@ -2389,6 +2390,316 @@ void ldpc_packet::ldpc_dec_layer()
 #ifdef _LDPC_DEBUG
                 printf("[LDPC DEBUG] Layer decoding converged @ iteration %d, layer %d\n", itr, layer);
 #endif
+            }
+        }
+    }
+
+    if ((cw_fail == 1) || (ldec_early_term_en == 0))
+    {
+        cnvg_itr = ldec_max_itr - 1;
+        cnvg_lyr = bm_m - 1;
+    }
+
+    // free all
+    free(dec_init);
+    for (int i=0; i<bm_m; i++)
+        free(cn_c_mem[i]);
+    free(cn_c_mem);
+    free(cn_c_updt_cur);
+    for (int i=0; i<bm_n; i++)
+        free(cn_q_mem[i]);
+    free(cn_q_mem);
+    free(cn_r_new_pre);
+    free(cn_app_pre);
+    free(cn_app_cur);
+    free(cn_q_sel_cur);
+    free(cn_r_old_cur);
+    free(cn_q_updt_cur);
+    for (int i=0; i<bm_n*col_wt; i++)
+        free(cn_q_sign[i]);
+    free(cn_q_sign);
+    free(layer_synd);
+    free(cn_dec_hd);
+    free(vn_dec_hd);
+    free(drop_wit_now);
+
+#ifdef _LDPC_DEBUG_DUMP
+    fclose(cfp);
+    fclose(sfp);
+    fclose(hdfp);
+    fclose(lfp);
+#endif
+} // ldpc_dec_layer
+
+// gen3 layer decoder
+void ldpc_packet::ldpc_dec_layer3()
+{
+#ifdef _LDPC_DEBUG_DUMP
+    FILE *cfp, *sfp, *hdfp, *lfp;
+    int stmp, vtmp;
+    char cmem_dump[50] = "./output/rdec_cmem_dump.txt";
+    char stot_dump[50] = "./output/rdec_stot_dump.txt";
+    char hdmem_dump[50] = "./output/rdec_hdmem_dump.txt";
+    char log_dump[50] = "./output/rdec_log_dump.txt";
+    cfp = fopen(cmem_dump, "w");
+    sfp = fopen(stot_dump, "w");
+    hdfp = fopen(hdmem_dump, "w");
+    lfp = fopen(log_dump, "w");
+#endif
+
+    mod2entry *e, *e_pre;
+    char *dec_init;
+    int shift_val1;
+    int shift_val2;
+    int cir_cnt;
+    int sign_tmp;
+    float val_tmp;
+    int hd_init;
+
+    struct cn_msg **cn_c_mem;
+    struct cn_msg *cn_c_updt_cur;   // current layer check node msg to be updt
+    struct cn_msg *cn_c_sel_cur;    // current layer check node msg
+    struct cn_msg *cn_c_sel_pre;   // previous layer check node msg
+    float **cn_q_mem;       // Q mem in CN order of previous layer
+    float *cn_q_sel_pre;    // Q msg of the select circulant from previous layer
+    float *cn_r_new_pre;    // New R msg in CN order of previous layer
+    float *cn_app_pre;      // APP = Q + R_new in CN order of previous layer
+    float *cn_app_cur;      // APP = Q + R_new in CN order of current layer
+    float *cn_q_sel_cur;    // Q msg of the select circulant from current layer
+    float *cn_r_old_cur;    // old R msg in CN order of previous layer
+    float *cn_q_updt_cur;   // Updated Q msg of the select circulant in current layer
+    int **cn_q_sign;      // Q sign
+
+    char *layer_synd;
+    char *cn_dec_hd;
+    char *vn_dec_hd;
+    int hd_updated;
+    int layer_synd_wt;
+    int synd_pass_cnt = 0;
+    int hd_stable_cnt = 0;
+    
+    // allocation
+    dec_init = (char *)calloc(bm_n, sizeof(*dec_init));
+    vec_set(dec_init, bm_n);
+
+    cn_c_mem = (struct cn_msg **)calloc(bm_m, sizeof(*cn_c_mem));
+    for (int i = 0; i<bm_m; i++)
+        cn_c_mem[i] = (struct cn_msg *)calloc(cir_sz, sizeof(*cn_c_mem[i]));
+    cn_c_updt_cur = (struct cn_msg *)calloc(cir_sz, sizeof(*cn_c_updt_cur));
+
+    cn_q_mem = (float **)calloc(bm_n, sizeof(*cn_q_mem));
+    for (int i = 0; i<bm_n; i++)
+        cn_q_mem[i] = (float*)calloc(cir_sz, sizeof(*cn_q_mem[i]));
+
+    cn_r_new_pre = (float *)calloc(cir_sz, sizeof(*cn_r_new_pre));
+    cn_app_pre = (float *)calloc(cir_sz, sizeof(*cn_app_pre));
+    cn_app_cur = (float *)calloc(cir_sz, sizeof(*cn_app_cur));
+    cn_q_sel_cur = (float *)calloc(cir_sz, sizeof(*cn_q_sel_cur));
+    cn_r_old_cur = (float *)calloc(cir_sz, sizeof(*cn_r_old_cur));
+    cn_q_updt_cur = (float *)calloc(cir_sz, sizeof(*cn_q_updt_cur));
+
+    cn_q_sign = (int **)calloc(bm_m*col_wt, sizeof(*cn_q_sign));
+    for (int i = 0; i<bm_m*col_wt; i++)
+        cn_q_sign[i] = (int*)calloc(cir_sz, sizeof(*cn_q_sign[i]));
+
+    layer_synd = (char *)calloc(cir_sz, sizeof(*layer_synd));
+    vn_dec_hd = (char *)calloc(cir_sz, sizeof(*vn_dec_hd));
+    cn_dec_hd = (char *)calloc(cir_sz, sizeof(*cn_dec_hd));
+
+    // initialize decoder
+    cw_fail = 1;
+    cw_miscorr = 0;
+    vec_copy(dec_di_blk, dec_do_blk, 0, 0, hm_n);
+
+    for (int i = 0; i < bm_n; i++)
+        for (int j=0; j<cir_sz; j++)
+            cn_q_mem[i][j] = (float)llr_tbl[dec_di_blk[i*cir_sz+j]];
+
+    // iterative decoding
+    for(int itr=0;(itr<=ldec_max_itr)&&((ldec_early_term_en==0)||(cw_fail==1));itr++)
+    {
+        // Q sign mem index
+        cir_cnt = 0;
+
+        // layer decoding
+        for(int layer=0;layer<bm_m &&((ldec_early_term_en==0)||(cw_fail==1));layer++)
+        {
+            // initilize HD mem
+            hd_init = (vec_sum(dec_init, bm_n)!=0);
+
+#ifdef _LDPC_DEBUG_DUMP
+            printf("[LDPC DEBUG] Layer decoding @ iteration %d, layer %d ...\n", itr, layer);
+#endif                        
+
+            // init current layer C-MSG
+            // C-MSG of previous iteration
+
+            cn_c_sel_cur = cn_c_mem[layer];
+            // C-MSG to be updt
+            for (int i = 0; i < cir_sz; i++)
+            {
+                cn_c_updt_cur[i].min1_val = 100000;
+                cn_c_updt_cur[i].min2_val = 100000;
+                cn_c_updt_cur[i].min1_pos = 0;
+                cn_c_updt_cur[i].sign_tot = 1;
+            }
+
+            // Earlier termination init
+            hd_updated = 0;
+            vec_clr(layer_synd, cir_sz);
+
+            // Per circulant of the layer
+            for (e = mod2sparse_first_in_row(qc_bm, layer);
+                !mod2sparse_at_end(e) &&((ldec_early_term_en==0)||(cw_fail==1));
+                e = mod2sparse_next_in_row(e))
+            {
+                // read Q from the previous layer of the selected column
+                cn_q_sel_pre = cn_q_mem[e->col];
+
+                // find out the previous layer of select column
+                e_pre = mod2sparse_prev_in_col(e);
+                if (mod2sparse_at_end(e_pre))
+                    e_pre = mod2sparse_last_in_col(qc_bm, e->col);
+                
+                cn_c_sel_pre = cn_c_mem[e_pre->row];    // read previous layer C msg
+
+                // cal Rnew and APP
+                for (int i = 0; i < cir_sz; i++)
+                {
+                    // Qmsg sign
+                    sign_tmp = (cn_q_sel_pre[i] >= 0) ? 1 : -1;
+
+                    // Rnew
+                    if (cn_c_sel_pre[i].min1_pos == e->col)
+                        cn_r_new_pre[i] = cn_c_sel_pre[i].min2_val * cn_c_sel_pre[i].sign_tot * sign_tmp;
+                    else
+                        cn_r_new_pre[i] = cn_c_sel_pre[i].min1_val * cn_c_sel_pre[i].sign_tot * sign_tmp;
+
+                    // APP in CN order of previous layer
+                    cn_app_pre[i] = cn_r_new_pre[i] + cn_q_sel_pre[i];
+
+                    // Quantization
+                    if (finite_mode == 1)
+                    {
+                        cn_app_pre[i] = (float)Sat_Quan((double)cn_app_pre[i], finite_q_max, finite_q_min, finite_q_num, finite_f_num);
+                    }
+                }
+
+                // APP shift
+                // when decoder initilized, Q msg are in VN order
+                if (dec_init[e->col] == 1)
+                {
+                    shift_val1 = e->shift;
+                    shift_val2 = 0;
+                    dec_init[e->col] = 0;
+                }
+                else 
+                {
+                    shift_val1 = -1 * e_pre->shift + e->shift;
+                    shift_val2 = -1 * e_pre->shift;
+                }
+
+                for (int i = 0; i < cir_sz; i++)
+                {
+                    cn_app_cur[i] = cn_app_pre[(i+shift_val1 + cir_sz) % cir_sz];
+                    vn_dec_hd[i] = cn_app_pre[(i+shift_val2 + cir_sz) % cir_sz] >= 0 ? 0 : 1;
+                }
+
+                // CW converge check logic per circulant
+                // 1. check if HD updated
+                if (hd_updated == 0)
+                    if (vec_cmp(dec_do_blk, vn_dec_hd, e->col*cir_sz, 0, cir_sz) == 1)
+                        hd_updated = 1;
+
+                vec_copy(vn_dec_hd, dec_do_blk, 0, e->col*cir_sz, cir_sz);
+
+                // 2. accumulate syndrome
+                vec_shift(vn_dec_hd, cn_dec_hd, cir_sz, -1 * e->shift);
+                vec_mod2_add(cn_dec_hd, layer_synd, layer_synd, cir_sz);
+
+                // calculate R_old and current Q, update current layer C and Q
+                for (int i=0; i<cir_sz; i++)
+                {
+                    if (cn_c_sel_cur[i].min1_pos == e->col)
+                        cn_r_old_cur[i] = cn_c_sel_cur[i].min2_val * cn_c_sel_cur[i].sign_tot * cn_q_sign[cir_cnt][i];
+                    else
+                        cn_r_old_cur[i] = cn_c_sel_cur[i].min1_val * cn_c_sel_cur[i].sign_tot * cn_q_sign[cir_cnt][i];
+
+                    // Q -= Rold
+                    cn_q_updt_cur[i] = cn_app_cur[i] - cn_r_old_cur[i];
+                    // Quantization
+                    if (finite_mode == 1)
+                    {
+                        cn_q_updt_cur[i] = (float)Sat_Quan((double)cn_q_updt_cur[i], finite_q_max, finite_q_min, finite_q_num, finite_f_num);
+                    }
+
+                    // update C
+                    sign_tmp = (cn_q_updt_cur[i] >= 0) ? 1 : -1;
+                    val_tmp = cn_q_updt_cur[i] * sign_tmp;
+                    cn_c_updt_cur[i].sign_tot *= sign_tmp;
+
+                    if (val_tmp < cn_c_updt_cur[i].min1_val)
+                    {
+                        cn_c_updt_cur[i].min2_val = cn_c_updt_cur[i].min1_val;
+                        cn_c_updt_cur[i].min1_val = val_tmp;
+                        cn_c_updt_cur[i].min1_pos = e->col;
+                    }
+                    else if (val_tmp < cn_c_updt_cur[i].min2_val)
+                    {
+                        cn_c_updt_cur[i].min2_val = val_tmp;
+                    }
+
+                    cn_q_sign[cir_cnt][i] = sign_tmp;
+                }
+
+                // update Q memory
+                for (int i=0; i<cir_sz; i++)
+                {
+                    cn_q_mem[e->col][i] = cn_q_updt_cur[i];
+                }
+  
+                cir_cnt++;
+            } // per circulant
+
+            // update C_MSG per layer
+            for (int i=0; i<cir_sz; i++)
+            {
+                cn_c_mem[layer][i].min1_val = cn_c_updt_cur[i].min1_val * alpha;
+                cn_c_mem[layer][i].min2_val = cn_c_updt_cur[i].min2_val * alpha;
+
+                if (finite_mode == 1)
+                {
+                    cn_c_mem[layer][i].min1_val = (float)Sat_Quan((double)cn_c_mem[layer][i].min1_val, finite_c_max, finite_c_min, finite_c_num, finite_f_num);
+                    cn_c_mem[layer][i].min2_val = (float)Sat_Quan((double)cn_c_mem[layer][i].min2_val, finite_c_max, finite_c_min, finite_c_num, finite_f_num);
+                }
+
+                cn_c_mem[layer][i].min1_pos = cn_c_updt_cur[i].min1_pos;
+                cn_c_mem[layer][i].sign_tot = cn_c_updt_cur[i].sign_tot;
+            }
+
+            // check converage checking
+            layer_synd_wt = vec_sum(layer_synd, cir_sz);
+            if (hd_init == 1)
+            {
+                hd_stable_cnt = 0;
+                synd_pass_cnt = 0;
+            }
+            else if ((hd_updated == 0) && (layer_synd_wt == 0))
+            {
+                hd_stable_cnt++;
+                synd_pass_cnt++;
+            }
+            else
+            {
+                hd_stable_cnt = 0;
+                synd_pass_cnt = 0;
+            }
+
+            if ((synd_pass_cnt >= bm_m) && (hd_stable_cnt >= bm_m -1))
+            {
+                cw_fail = 0;
+                cnvg_itr = itr;
+                cnvg_lyr = layer;
             }
         }
     }
@@ -2405,30 +2716,22 @@ void ldpc_packet::ldpc_dec_layer()
         free(cn_c_mem[i]);
     free(cn_c_mem);
     free(cn_c_updt_cur);
-    for (int i=0; i<bm_m*col_wt; i++)
-        free(cn_q_sign[i]);
     for (int i=0; i<bm_n; i++)
         free(cn_q_mem[i]);
     free(cn_q_mem);
     free(cn_r_new_pre);
-    free(cn_r_old_cur);
     free(cn_app_pre);
     free(cn_app_cur);
     free(cn_q_sel_cur);
-    free(cn_q_sel_pre);
+    free(cn_r_old_cur);
     free(cn_q_updt_cur);
+    for (int i=0; i<bm_n*col_wt; i++)
+        free(cn_q_sign[i]);
+    free(cn_q_sign);
+    free(layer_synd);
     free(cn_dec_hd);
     free(vn_dec_hd);
-    free(layer_synd);
-    free(drop_wit_now);
-
-#ifdef _LDPC_DEBUG_DUMP
-    fclose(cfp);
-    fclose(sfp);
-    fclose(hdfp);
-    fclose(lfp);
-#endif
-} // ldpc_dec_layer
+} // ldpc_dec_layer3
 
 
 void ldpc_packet::ldpc_dec_skip()
@@ -2490,10 +2793,18 @@ void ldpc_packet::ldpc_dec_ppbf(int p_num, double *p)
     // Calculate initial syndrome
     mod2sparse_mulvec(qc_hm, hard, syndrome);
     int syndrome_weight = vec_sum(syndrome, hm_m);
-    
-    while ((syndrome_weight != 0) && (iteration < fdec_max_itr))
+
+    if (syndrome_weight == 0)
     {
-        iteration++;
+        cw_fail = 0;
+        cnvg_itr = 0;
+        cnvg_lyr = 0;
+    }
+    else
+    {
+        while ((syndrome_weight != 0) && (iteration < fdec_max_itr))
+        {
+            iteration++;
         
         // Calculate energy function: Ej = mod(hard+hard0, 2) + syndrome*H
         // First part: mod(hard+hard0, 2)
@@ -2540,20 +2851,23 @@ void ldpc_packet::ldpc_dec_ppbf(int p_num, double *p)
         syndrome_weight = vec_sum(syndrome, hm_m);
         
         // Check for convergence
-        if (syndrome_weight == 0) {
-            cw_fail = 0;
-            cnvg_itr = iteration;
-            cnvg_lyr = 0; // Not applicable for PGDBF
-            break;
+            if (syndrome_weight == 0)
+            {
+                cw_fail = 0;
+                cnvg_itr = iteration - 1;
+                cnvg_lyr = 0; // Not applicable for PGDBF
+                break;
+            }
+        }
+
+        if (cw_fail == 1)
+        {
+            cnvg_itr = (fdec_max_itr > 0) ? (fdec_max_itr - 1) : 0;
+            cnvg_lyr = 0;
+            fina_synd_wt = syndrome_weight;
         }
     }
-    
-    if (cw_fail == 1) {
-        cnvg_itr = fdec_max_itr;
-        cnvg_lyr = 0;
-        fina_synd_wt = syndrome_weight;
-    }
-    
+
     // Copy result to output
     vec_copy(hard, dec_do_blk, 0, 0, hm_n);
     
@@ -2895,9 +3209,14 @@ void ldpc_packet::ldpc_dec_pgdbf_simple(double p_flip)
 
     int iteration = 0;
 
-    while (syndrome_weight != 0 && iteration < fdec_max_itr) {
-        iteration++;
-        fdec_cyc_org++;
+    if (syndrome_weight == 0) {
+        cw_fail = 0;
+        cnvg_itr = 0;
+        cnvg_lyr = 0;
+    } else {
+        while (syndrome_weight != 0 && iteration < fdec_max_itr) {
+            iteration++;
+            fdec_cyc_org++;
 
         int max_energy = -1;
         int num_flip = 0;
@@ -2933,20 +3252,21 @@ void ldpc_packet::ldpc_dec_pgdbf_simple(double p_flip)
         }
         if (flipped) fdec_cyc_num++;
 
-        mod2sparse_mulvec(qc_hm, hard, syndrome);
-        syndrome_weight = vec_sum(syndrome, hm_m);
-        if (syndrome_weight == 0) {
-            cw_fail = 0;
-            cnvg_itr = iteration;
-            cnvg_lyr = 0;
-            break;
+            mod2sparse_mulvec(qc_hm, hard, syndrome);
+            syndrome_weight = vec_sum(syndrome, hm_m);
+            if (syndrome_weight == 0) {
+                cw_fail = 0;
+                cnvg_itr = iteration - 1;
+                cnvg_lyr = 0;
+                break;
+            }
         }
-    }
 
-    if (cw_fail) {
-        cnvg_itr = fdec_max_itr;
-        cnvg_lyr = 0;
-        fina_synd_wt = syndrome_weight;
+        if (cw_fail) {
+            cnvg_itr = (fdec_max_itr > 0) ? (fdec_max_itr - 1) : 0;
+            cnvg_lyr = 0;
+            fina_synd_wt = syndrome_weight;
+        }
     }
 
     free(hard0);
@@ -2987,9 +3307,14 @@ void ldpc_packet::ldpc_dec_mbf(int Fx, int threshold)
 
     int iteration = 0;
 
-    while (syndrome_weight != 0 && iteration < fdec_max_itr) {
-        iteration++;
-        fdec_cyc_org++;
+    if (syndrome_weight == 0) {
+        cw_fail = 0;
+        cnvg_itr = 0;
+        cnvg_lyr = 0;
+    } else {
+        while (syndrome_weight != 0 && iteration < fdec_max_itr) {
+            iteration++;
+            fdec_cyc_org++;
 
         int candidate_count = 0;
 
@@ -3028,20 +3353,21 @@ void ldpc_packet::ldpc_dec_mbf(int Fx, int threshold)
         if (flipped)
             fdec_cyc_num++;
 
-        mod2sparse_mulvec(qc_hm, hard, syndrome);
-        syndrome_weight = vec_sum(syndrome, hm_m);
-        if (syndrome_weight == 0) {
-            cw_fail = 0;
-            cnvg_itr = iteration;
-            cnvg_lyr = 0;
-            break;
+            mod2sparse_mulvec(qc_hm, hard, syndrome);
+            syndrome_weight = vec_sum(syndrome, hm_m);
+            if (syndrome_weight == 0) {
+                cw_fail = 0;
+                cnvg_itr = iteration - 1;
+                cnvg_lyr = 0;
+                break;
+            }
         }
-    }
 
-    if (cw_fail) {
-        cnvg_itr = fdec_max_itr;
-        cnvg_lyr = 0;
-        fina_synd_wt = syndrome_weight;
+        if (cw_fail) {
+            cnvg_itr = (fdec_max_itr > 0) ? (fdec_max_itr - 1) : 0;
+            cnvg_lyr = 0;
+            fina_synd_wt = syndrome_weight;
+        }
     }
 
     free(syndrome);

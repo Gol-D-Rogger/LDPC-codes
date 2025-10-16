@@ -1,0 +1,56 @@
+# Build directories
+build/
+build_dq/
+
+# Executable files
+gen4_ldpc_sim/ssd_fc
+gen4_ldpc_sim/ssd_fc_dq
+GenLDPC/ldpc_gen
+
+# Output directories
+GenLDPC/output/
+gen4_ldpc_sim/output/
+output/
+runs/
+
+# Compiled Object files
+*.o
+*.obj
+*.elf
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Compiled Static libraries
+*.a
+*.lib
+
+# Dependency files
+*.d
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Logs
+*.log
+perf/*.log
+
+# Temporary files
+*~
+*.swp
+*.swo
+.DS_Store
+
+# IDE specific
+.vscode/
+.idea/
+*.code-workspace
+
+# Backup files
+*.bak
+*.backup

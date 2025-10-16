@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #ifndef _CH_PACKET_H
 #define _CH_PACKET_H
 
@@ -6,6 +7,39 @@ enum sd_mode {DIRECT=0, MANUAL=1, VENDOR0=2, VENDOR1=3};
 enum ch_model {CLEAN=0, AWGN=1, BSC=2, ERR_INJ=3, MAX_ERR=4};
 
 struct ch_packet{
+    ch_packet()
+        : ch_sel(CLEAN),
+          info_len(0),
+          blk_len(0),
+          real_len(0),
+          snr(0.0f),
+          ber(0.0f),
+          raw_err_num(0),
+          tx_blk(NULL),
+          rx_blk(NULL),
+          det_blk(NULL),
+          sd_blk(NULL),
+          snr_code(0.0f),
+          awgn_sigma(0.0f),
+          err_num(0),
+          sd_type(DIRECT),
+          sd_num(0),
+          rd_num(0),
+          bin_num(0),
+          vref(NULL),
+          llr_tbl(NULL),
+          bin_split(NULL),
+          bin_asc_ord(NULL),
+          vref_asc_ord(NULL),
+          llr_asc_ord(NULL),
+          sd_asc_ord(NULL),
+          bin_distr(NULL),
+          max_llr_bin(0),
+          llr_tot_num(0),
+          llr_frac_num(0),
+          llr_max(0.0f),
+          llr_min(0.0f)
+    {}
     enum ch_model ch_sel;
     int    info_len;
     int    blk_len;

@@ -25,6 +25,41 @@ enum fc_dec_mode
 
 struct dsp_packet : ldpc_packet
 {
+    dsp_packet()
+        : ldpc_packet(),
+          rand_poly(NULL),
+          mcrc_poly(NULL),
+          rseed_num(0),
+          rseed_tbl(NULL),
+          agit_num(0),
+          agit_tbl(NULL),
+          agit_page_cycle(0),
+          remap_ofst_init(0),
+          remap_ofst_diff_init(0),
+          cycle_init(0),
+          cycle_diff_init(0),
+          d1(0),
+          d2(0),
+          page_cw_num(0),
+          meta_size(0),
+          lba_size(0),
+          lba_num(0),
+          lba_len(0),
+          src_len(0),
+          wr_meta_blk(NULL),
+          wr_lba_blk(NULL),
+          src_blk(NULL),
+          wr_rand_blk(NULL),
+          rd_rand_blk(NULL),
+          rcv_blk(NULL),
+          rd_meta_blk(NULL),
+          rd_lba_blk(NULL),
+          mcrc_err(0),
+          lba_err(0),
+          meta_err(0),
+          rdec_used(0)
+    {}
+
     // randminzer & MCRC configuration
     int *rand_poly;
     int *mcrc_poly;

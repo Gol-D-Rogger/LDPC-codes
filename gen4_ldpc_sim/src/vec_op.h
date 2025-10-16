@@ -20,3 +20,6 @@ int vec_sum(char*, int);
 void vec_print(char *, int , FILE *);
 int vec_max(char*, int);
 int vec_find(char*, int, int, int*);
+
+void vec_copy_fill(char*, int, char*, int, int, int, char);
+void vec_mask(char*, int, int, char);

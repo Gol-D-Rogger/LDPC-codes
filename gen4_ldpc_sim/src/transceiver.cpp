@@ -16,9 +16,13 @@ void ch_packet::ch_config(int w, int x, int storage_len, ch_model y, float z)
 {
     info_len = w;
     blk_len = storage_len;
-
+    
     ch_sel = y;
+#ifdef DQ_SIM
+    real_len = blk_len;
+#else
     real_len = x;
+#endif
     if (ch_sel == CLEAN)
     {
         printf("[CH_TRX] Clean channel selected.\n");
@@ -50,22 +54,23 @@ void ch_packet::ch_config(int w, int x, int storage_len, ch_model y, float z)
 // Allocate memory for the channel packet
 void ch_packet::ch_pckt_alloc()
 {
-    rx_blk = new float[blk_len];
-    det_blk = new char[blk_len];
-    tx_blk = new char[blk_len];
+    tx_blk = (char*)calloc(blk_len, sizeof(*tx_blk));
+    rx_blk = (float*)calloc(blk_len, sizeof(*rx_blk));
+    det_blk = (char*)calloc(blk_len, sizeof(*det_blk));
 }
 
 void ch_packet::ch_pckt_clean()
 {
-    delete(rx_blk);
+    free(rx_blk);
     rx_blk = NULL;
-    delete(det_blk);
+    free(det_blk);
     det_blk = NULL;
-    delete(tx_blk);
+    free(tx_blk);
     tx_blk = NULL;
 
 #ifdef _ASIC_DUMP
     free(sd_blk);
+    sd_blk = NULL;
 #endif
 }
 
@@ -121,6 +126,10 @@ void ch_packet::ch_llr_clean()
 // transmit data with selected channel model
 void ch_packet::ch_transmit()
 {
+#ifdef DQ_SIM
+    real_len = blk_len;
+#endif
+
     int *err_vec;
     int *err_pos;
     if ((ch_sel == ERR_INJ) || (ch_sel == MAX_ERR))
@@ -406,6 +415,9 @@ void ch_packet::ch_llr_gen(float hd0_llr, float hd1_llr, int llr_tot_bit, int ll
 
 void ch_packet::ch_detector()
 {
+#ifdef DQ_SIM
+    real_len = blk_len;
+#endif
     int err_cnt = 0;
 
     for (int i = 0; i < real_len; i++)

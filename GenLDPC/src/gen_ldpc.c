@@ -454,7 +454,8 @@ int gen_ldpc_matrix(mod2sparse *basePCH, mod2sparse *exPCH, int rownum, int coln
     int num_cyc4, num_cyc6;
     int num_cyc6_tmp;
     int shift_initial, shift_tmp;
-    for (int ii=0; ii<6 ; ii++)
+    int free_cycle6_round = 1; // 消环次数
+    for (int ii=0; ii<free_cycle6_round ; ii++)
     {
         for (int i=colnum-2; i>=0 ; i--)
         {
@@ -501,6 +502,290 @@ int gen_ldpc_matrix(mod2sparse *basePCH, mod2sparse *exPCH, int rownum, int coln
     return tmp_max_girth;
 }
 
+int gen4_ldpc_matrix(mod2sparse *basePCH, mod2sparse *exPCH, int rownum, int colnum, int ex_factor, int t_size, WD_vector *row_dt, WD_vector *col_dt, int maximum_girth, int minimum_girth)
+{
+    int i, j, k, p, index, temp, try_cnt;
+    int current_col, current_row;   
+    int row_ones; // the number of 1's in all rows of base matrix
+    int col_ones; // the number of 1's in all columns of base matrix
+    int tot_rows, tot_cols;
+    int count1, count2, ones_inserted, pseudo_weight, temp_counter;
+    int tmp_girth, tmp_max_girth;
+
+    int *row_cnt;
+    int offset_pos;
+
+    tanner_graph *ex_g;
+    mod2entry *e;
+    int inserted;
+    int shift;
+    int cycle_deg_constraint;
+
+    // Matrix Parameter check:
+    // 1. Check if the number of "1" in rows is equal to the number of "1" in columns
+    // 2. Check if the number of rows(cols) in distribution vector is equal to the matrix
+
+    row_ones = 0;
+    col_ones = 0;
+    tot_rows = 0;
+    tot_cols = 0;
+    for (i = 0; i < row_dt->n; i++)
+    {
+        row_ones += row_dt->wd[i].weight * row_dt->wd[i].num;
+        tot_rows += row_dt->wd[i].num;
+    }
+    for (i = 0; i < col_dt->n; i++)
+    {
+        col_ones += col_dt->wd[i].weight * col_dt->wd[i].num;
+        tot_cols += col_dt->wd[i].num;
+    }
+
+    if (row_ones != col_ones)
+    {
+        fprintf(stderr, "Error: The number of 1's in rows is not equal to the number of 1's in columns!\n");
+        exit(1);
+    }
+    if (tot_rows != rownum)
+    {
+        fprintf(stderr, "Error: The number of rows in row distribution vector is not equal to the number of rows in base matrix!\n");
+        exit(1);
+    }
+    if (tot_cols != colnum)
+    {
+        fprintf(stderr, "Error: The number of columns in column distribution vector is not equal to the number of columns in base matrix!\n");
+        exit(1);
+    }
+
+    // Initialize tanner graph for BFS in checking cycle and cycle degree
+    ex_g = chk_alloc(1, sizeof(tanner_graph));
+    ex_g->bit_node = chk_alloc(colnum * ex_factor, sizeof(node_entry));
+    ex_g->check_node = chk_alloc(rownum * ex_factor, sizeof(node_entry));
+    ex_g->matrix = exPCH;
+
+    for (i=0; i < floor(col_dt->n/2); i++) {
+        temp = col_dt->wd[i].weight;
+        col_dt->wd[i].weight = col_dt->wd[col_dt->n - 1 - i].weight;
+        col_dt->wd[col_dt->n - 1 - i].weight = temp;
+        temp = col_dt->wd[i].num;
+        col_dt->wd[i].num = col_dt->wd[col_dt->n - 1 - i].num;
+        col_dt->wd[col_dt->n - 1 - i].num = temp;
+    }
+
+    // assign node degree for each bit node, to be used in counting cycle degree
+    offset_pos = 0;
+    for (i = 0; i< col_dt->n; i++) {
+        for (j = 0; j < col_dt->wd[i].num; j++) {
+            for (k = 0; k < ex_factor; k++)
+                if (col_dt->wd[i].weight != 2)
+                    ex_g->bit_node[offset_pos * ex_factor + k].node_degree = col_dt->wd[i].weight;
+                else
+                    ex_g->bit_node[offset_pos * ex_factor + k].node_degree = 0;
+            offset_pos++;
+        }
+    }
+
+    for (i = 0; i < rownum * ex_factor; i++)
+        ex_g->check_node[i].node_degree = 0;
+
+    // Init counters of rows
+    row_cnt = chk_alloc(rownum, sizeof(int));
+    current_row = 0;
+
+    for (i = 0; i < row_dt->n; i++) {
+        for (j=0; j<row_dt->wd[i].num; j++) {
+            if (current_row < t_size)
+                row_cnt[current_row] = row_dt->wd[i].weight - 1;
+            else
+                row_cnt[current_row] = row_dt->wd[i].weight;
+
+            current_row++;
+        }
+    }
+
+    // Insert T in matrix
+    mod2sparse_clear(basePCH);
+    for (i = 0; i < t_size; i++)
+    {
+        mod2sparse_insert(basePCH, i, colnum - t_size + i);
+        shift = 0;
+        insert_sub_matrix(exPCH, i*ex_factor, (colnum-t_size+i)*ex_factor, ex_factor, shift);
+    }
+
+    // Based on frame matrix, construct the LDPC matrix by inserting "1" to each
+    // column. The number of "1" is equal to the weight of the column. The row 
+    // position must be choosen from the given queue created previously.
+    current_col = colnum - 1; // start form the last column
+    ones_inserted = 0;
+    tmp_max_girth = maximum_girth;
+    temp_counter = 0;
+
+    for (i= col_dt->n - 1 ; i>=0; i--) {
+        for(j = 0; j < col_dt->wd[i].num; j++) {
+            if (temp_counter < t_size)
+                pseudo_weight = col_dt->wd[i].weight - 1; // already insert the T matrix
+            else
+                pseudo_weight = col_dt->wd[i].weight;
+
+            for (k=0; k<pseudo_weight; k++) {
+
+                inserted = 0;
+
+                // select row
+                temp = 0;
+                for (index = 0; index < rownum; index++) {
+                    if (row_cnt[index] > current_col) {
+                        current_row = index;
+                        temp=1;
+                        break;
+                    }
+                }
+
+                if (temp==0)
+                {
+                    current_row = rand() % rownum;
+                    while(row_cnt[current_row] == 0)
+                        current_row = rand() % rownum;
+                }
+
+                row_cnt[current_row]--;
+
+                for (tmp_girth = tmp_max_girth; tmp_girth >= minimum_girth; tmp_girth -= 2) {
+                    count2 = 0;
+                    while (!inserted) {
+                        count1 = 0;
+                        while (mod2sparse_find(basePCH, current_row, current_col)  || ((current_row < t_size)&&(current_col > (colnum-1-t_size))))
+                        {
+                            // if it has '1' in current position or in T matrix region
+                            // re-find row
+                            row_cnt[current_row]++;
+
+                            // select row
+                            temp = 0;
+                            for (index=0; index<rownum; index++) {
+                                if (row_cnt[index] > current_col) {
+                                    temp=1;
+                                    current_row = index;
+                                    break;
+                                }
+                            }
+
+                            if (temp==0) {
+                                current_row = rand() % rownum;
+
+                                while(row_cnt[current_row] == 0)
+                                    current_row = rand() % rownum;
+                            }
+
+                            row_cnt[current_row]--;
+
+                            count1++;
+                            if (count1 > row_ones - t_size - ones_inserted)
+                            {
+                                free(row_cnt);
+                                free(ex_g->bit_node);
+                                free(ex_g->check_node);
+                                free(ex_g);
+                                return -1;
+                            }
+                        }
+
+                        mod2sparse_insert(basePCH, current_row, current_col);
+                        count2++;
+
+                        try_cnt = (current_row == 0) ? ex_factor-1 : 0;
+                        cycle_deg_constraint = 1;
+
+                        // select shift
+                        while ((try_cnt < ex_factor) && (cycle_deg_constraint == 1)) {
+                            if (current_row == 0)
+                                shift = 0;
+                            else
+                                shift = rand() % ex_factor;
+                                
+                            insert_sub_matrix(exPCH, current_row*ex_factor, current_col*ex_factor, ex_factor, shift);
+                            count2++;
+        
+                            cycle_deg_constraint = 0;
+
+                            for (p = 0; p<ex_factor; p++)
+                            {
+                                if(check_cycle_deg(ex_g, current_row*ex_factor+p, tmp_girth))
+                                {
+                                    cycle_deg_constraint = 1;
+                                    break;
+                                }
+                            }
+             
+                            if (cycle_deg_constraint)
+                            {
+                                remove_sub_matrix(exPCH, current_row*ex_factor, current_col*ex_factor, ex_factor, shift);
+                            }
+                            try_cnt++;
+                        }
+                        
+                        if (cycle_deg_constraint)
+                        {
+                            mod2sparse_delete(basePCH, mod2sparse_find(basePCH, current_row, current_col));
+
+                            // change a row
+                            row_cnt[current_row]++;
+
+                            // select row
+                            temp = 0;
+                            for (index = 0; index < rownum; index++)
+                            {
+                                if (row_cnt[index] > current_col) // row_weight > unoperated col
+                                {
+                                    temp = 1;
+                                    current_row = index;
+                                    break;
+                                }
+                            }
+
+                            if (temp == 0)
+                            {
+                                current_row = rand() % rownum;
+
+                                while(row_cnt[current_row] == 0)
+                                    current_row = rand() % rownum;
+                            }
+                            row_cnt[current_row]--;
+
+                            if (count2 > row_ones - t_size - ones_inserted)
+                            {
+                                tmp_max_girth -= 2;
+                                break;
+                            }
+                        } else {
+                            inserted = 1;
+                            e = mod2sparse_find(basePCH, current_row, current_col);
+                            e->shift = shift;
+                        }
+                    }
+                }
+
+                if (!inserted) {
+                    free(row_cnt);
+                    free(ex_g->bit_node);
+                    free(ex_g->check_node);
+                    free(ex_g);
+                    return -2;
+                }
+                ones_inserted++;
+            }
+
+            current_col--;
+            temp_counter++;
+        }
+    }
+
+    free(row_cnt);
+    free(ex_g->bit_node);
+    free(ex_g->check_node);
+    free(ex_g);
+
+    return tmp_max_girth;
+}
 
 
 void insert_sub_matrix(mod2sparse *mainMatrix, int startRow, int startCol, int subDim, int shift)
@@ -689,6 +974,15 @@ void gen_ldpc_files(char *codefile, char *maskfile, char *cyclefile, int filenum
 
             inv = check_PHI_inv_pad(exMatrix, b_rows, b_cols, ex_factor,g*ex_factor, pad_bit);
 
+            // TEST MODE: allow saving even if PHI is not invertible
+            const char *env_allow_noninv = getenv("LDPC_GEN_ALLOW_NONINV");
+            const char *env_force_save = getenv("LDPC_GEN_FORCE_SAVE");
+            if ((env_allow_noninv && atoi(env_allow_noninv)!=0) || (env_force_save && atoi(env_force_save)!=0))
+            {
+                printf("| [TEST MODE] Forcing PHI invertible acceptance.\n");
+                inv = 1;
+            }
+
             if (!inv)
                 printf("PHI in not invertible\n");
         }
@@ -703,9 +997,12 @@ void gen_ldpc_files(char *codefile, char *maskfile, char *cyclefile, int filenum
 
             // Only save the expanded matrices with high average girth
             cur_avg_girth = avg_girth(ex_g);
+            int force_save = 0;
+            const char *env_force_save2 = getenv("LDPC_GEN_FORCE_SAVE");
+            if (env_force_save2 && atoi(env_force_save2)!=0) force_save = 1;
 
             // col rand
-            if (cur_avg_girth >= expected_avg_girth)
+            if (force_save || cur_avg_girth >= expected_avg_girth)
             {
                 printf("Col randomizing ... \n");
                 int rand_loc[b_cols-b_rows];
@@ -761,7 +1058,7 @@ void gen_ldpc_files(char *codefile, char *maskfile, char *cyclefile, int filenum
                 }
             }
 
-            if (cur_avg_girth >= expected_avg_girth)
+            if (force_save || cur_avg_girth >= expected_avg_girth)
             {
                 printf("# Matrix average girth %f \n", cur_avg_girth);
                 printf("# Writing matrix to file ...\n");
@@ -847,6 +1144,146 @@ void gen_ldpc_files(char *codefile, char *maskfile, char *cyclefile, int filenum
     free(H_matrix_tmp);
 }
 
+void gen4_ldpc_files(char *codefile, int filenum, WD_vector *row_dt, WD_vector *col_dt, int ex_factor, int g, int start_girth, int end_girth, float expected_avg_girth)
+{
+    char file[60];
+    int b_rows, b_cols;
+    mod2sparse *baseMatrix, *exMatrix;
+
+    int i, j, file_counter, t_size;
+    int gen, inv;
+    FILE *temp_f;
+    char postfix[5];
+
+    tanner_graph *ex_g;
+    float cur_avg_girth;
+    mod2entry *e;
+    int pre_col;
+    int index;
+
+    b_rows = 0;
+    b_cols = 0;
+    for (i = 0; i < row_dt->n; i++)
+        b_rows += row_dt->wd[i].num;
+    for (i = 0; i < col_dt->n; i++)
+        b_cols += col_dt->wd[i].num;
+
+    t_size = b_rows - g;
+
+    baseMatrix = mod2sparse_allocate(b_rows, b_cols);
+    exMatrix = mod2sparse_allocate(b_rows * ex_factor, b_cols * ex_factor);
+
+    file_counter = 0;
+    index = 0;
+    printf("%d LDPC codes to be generated \n", filenum);
+    while (file_counter < filenum)
+    {
+        if (index == 0)
+            printf("Matrix %d construction ... \n", file_counter);
+
+        printf("# Round %d ... \n", index+1);
+
+        gen = gen4_ldpc_matrix(baseMatrix, exMatrix, b_rows, b_cols,
+                         ex_factor, t_size, row_dt, col_dt, start_girth, end_girth);
+        
+        if (gen > 0)
+            printf("Matrix is ready\n");
+        else if (gen == -1)
+            printf("Construction failed due to placement! \n");
+        else if (gen == -2)
+            printf("Construction failed due to minimum girth! \n");
+
+        if (gen > 0)
+        {
+            printf("PHI invertible checking ...\n");
+
+            inv = check_PHI_inv(exMatrix, b_rows, b_cols, ex_factor,g * ex_factor);
+
+            if (!inv)
+                printf("PHI in not invertible\n");
+        }
+
+        if ((gen > 0) && (inv == 1))
+        {
+            printf("Girth checking ... \n");
+            ex_g = chk_alloc(1, sizeof(tanner_graph));
+            ex_g->bit_node = chk_alloc(mod2sparse_cols(exMatrix), sizeof(node_entry));
+            ex_g->check_node = chk_alloc(mod2sparse_rows(exMatrix), sizeof(node_entry));
+            ex_g->matrix = exMatrix;
+
+            // Only save the expanded matrices with high average girth
+            cur_avg_girth = avg_girth(ex_g);
+
+            if (cur_avg_girth >= expected_avg_girth)
+            {
+                sprintf(postfix, "%d", file_counter + 1);
+                sprintf(file, "%s", codefile);
+                sprintf(file + strlen(codefile), "%s", postfix);
+
+                printf("# Matrix average girth %f \n", cur_avg_girth);
+                printf("# Writing matrix to file %s ...\n", file);
+
+                temp_f = open_file_std(file, "wb");
+
+                if (temp_f == NULL)
+                {
+                    fprintf(stderr, "Can't create files to store shift keys");
+                    exit(1);
+                }
+
+                for (i = 0; i < b_rows; i++)
+                {
+                    pre_col = -1;
+
+                    for (e = mod2sparse_first_in_row(baseMatrix, i); !mod2sparse_at_end(e); e = mod2sparse_next_in_row(e))
+                    {
+                        for (j = pre_col + 1; j < e->col; j++)
+                            fprintf(temp_f, "  -1");
+
+                        fprintf(temp_f, "%4d", e->shift);
+
+                        pre_col = e->col;
+                    }
+
+                    for (j = (pre_col + 1); j < b_cols; j++)
+                        fprintf(temp_f, "  -1");
+
+                    fprintf(temp_f, "\n");
+                }
+
+                if (ferror(temp_f) || fclose(temp_f))
+                {
+                    fprintf(stderr, "Error writing to shift keys to file %s\n", file);
+                    exit(1);
+                }
+
+                file_counter++;
+                index = 0;
+            }
+            else
+            {
+                index++;
+            }
+
+            free(ex_g->bit_node);
+            free(ex_g->check_node);
+            free(ex_g);
+        }
+        else
+        {
+            index++;
+        }
+
+        mod2sparse_free(baseMatrix);
+        mod2sparse_free(exMatrix);
+
+        baseMatrix = mod2sparse_allocate(b_rows, b_cols);
+        exMatrix = mod2sparse_allocate(b_rows * ex_factor, b_cols * ex_factor);
+    }
+
+    mod2sparse_free(baseMatrix);
+    mod2sparse_free(exMatrix);
+}
 
 int check_PHI_inv(mod2sparse *H, int m, int n, int p, int g)
 {
