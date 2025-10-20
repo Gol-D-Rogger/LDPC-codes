@@ -274,6 +274,7 @@ struct ldpc_packet : ch_packet
     // LDPC layer decoder
     void ldpc_dec_layer();
     void ldpc_dec_layer3();
+    void ldpc_dec_lbp();
     // LDPC 2bit BF decoder
     void ldpc_dec_2bit_bf(int p_num, int col_skip_itr);
     // LDPC enhance BF decoder with flip memory

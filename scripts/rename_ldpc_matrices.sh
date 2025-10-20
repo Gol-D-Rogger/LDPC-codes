@@ -32,7 +32,8 @@ if [[ $# -lt 2 ]]; then
 参数:
   M        矩阵行数 (M = N - K)
   N        矩阵列数
-  --apply  执行重命名（默认仅预览）
+  --apply        执行重命名（默认仅预览）
+  --base-dir DIR 指定输出根目录（默认使用仓库内 GenLDPC/output）
 
 功能:
   - 扫描 GenLDPC/output/<M>x<N> 目录
@@ -44,8 +45,11 @@ if [[ $# -lt 2 ]]; then
   # 预览
   ./rename_ldpc_matrices.sh 20 149
 
-  # 执行
+  # 执行（默认目录）
   ./rename_ldpc_matrices.sh 20 149 --apply
+
+  # 指定输出根目录
+  ./rename_ldpc_matrices.sh 20 149 --apply --base-dir /path/to/output
 
   # 目录已有 _1.txt, _2.txt
   # 新文件 _1_3.txt, _1_4.txt 会被重命名为 _3.txt, _4.txt
@@ -56,18 +60,26 @@ fi
 M="$1"
 N="$2"
 APPLY=0
+BASE_OVERRIDE=""
 
 shift 2
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --apply) APPLY=1; shift;;
+        --base-dir)
+            BASE_OVERRIDE="$2"
+            shift 2;;
         *) log_error "未知选项: $1"; exit 1;;
     esac
 done
 # ==================== 路径设置 ====================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-BASE_DIR="${WORKSPACE_ROOT}/GenLDPC/output/${M}x${N}"
+if [[ -n "$BASE_OVERRIDE" ]]; then
+    BASE_DIR="${BASE_OVERRIDE%/}/${M}x${N}"
+else
+    BASE_DIR="${WORKSPACE_ROOT}/GenLDPC/output/${M}x${N}"
+fi
 MATRIX_DIR="${BASE_DIR}/matrix"
 MASK_DIR="${BASE_DIR}/mask_matrix"
 CYCLE_DIR="${BASE_DIR}/cycle_record"

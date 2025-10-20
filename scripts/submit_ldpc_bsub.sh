@@ -41,25 +41,28 @@ to_abs_path() {
 # 默认值
 EXEC="gen4_ldpc_sim/ssd_fc_dq"
 CONFIG="gen4_ldpc_sim/config/sdec_dq.cnfg"
+GEN_JOB_NAME=""
 MATRIX_DIR="gen4_ldpc_sim/matrix"
 OUT_DIR="runs/ldpc_batch"
 QUEUE="${LSF_QUEUE:-regr_q}"
 JOB_PREFIX="ldpc"
 CWD=""          # 默认不指定，由命令内自己 cd
-SNR_LIST=""
+SNR_LIST="4.9 5.0"
 SNR_SEQ=""
 DRY_RUN=0
 
 # 生成矩阵相关（可选）
-GEN_N="5"
-GEN_K="20"
+GEN_N="149"
+GEN_K="129"
 GEN_COUNT="1"
 GEN_QUEUE=""
 GEN_MODE="lsf"   # lsf|local
 GEN_BIN="GenLDPC/ldpc_gen"
+GEN_OUT_BASE_SET=0
 BUILD=0
 GENERATED=0
 declare -a NEW_MATRIX_IDS=()
+SIM_MATRIX_DIR_DEFAULT=""
 
 # 重命名相关（可选）
 RENAME_ENABLE=1
@@ -72,6 +75,7 @@ usage() {
   echo "Usage: $0 [options]"
   echo "  --exec PATH            模拟器可执行文件 (默认: ${EXEC})"
   echo "  --config PATH          配置文件 .cnfg (默认: ${CONFIG})"
+  echo "  --gen-job-name STR     生成矩阵 job 名称前缀 (默认: ${GEN_JOB_NAME:-<JOB_PREFIX>_gen_<N>x<K>})"
   echo "  --matrix-dir DIR       矩阵目录 (默认: ${MATRIX_DIR})"
   echo "  --out-dir DIR          性能输出目录 (默认: ${OUT_DIR})"
   echo "  --queue NAME           LSF 队列 (默认: ${QUEUE})"
@@ -99,6 +103,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --exec) EXEC="$2"; shift 2;;
     --config) CONFIG="$2"; shift 2;;
+    --gen-job-name) GEN_JOB_NAME="$2"; shift 2;;
     --matrix-dir) MATRIX_DIR="$2"; MATRIX_DIR_SET=1; shift 2;;
     --out-dir) OUT_DIR="$2"; shift 2;;
     --queue) QUEUE="$2"; shift 2;;
@@ -113,7 +118,7 @@ while [[ $# -gt 0 ]]; do
     --gen-count) GEN_COUNT="$2"; shift 2;;
     --gen-queue) GEN_QUEUE="$2"; shift 2;;
     --gen-mode) GEN_MODE="$2"; shift 2;;
-    --gen-out-base) GEN_OUT_BASE="$2"; shift 2;;
+    --gen-out-base) GEN_OUT_BASE="$2"; GEN_OUT_BASE_SET=1; shift 2;;
     --rename-enable) RENAME_ENABLE=1; shift;;
     --no-rename) RENAME_ENABLE=0; shift;;
     --sim-matrix-dir) SIM_MATRIX_DIR="$2"; shift 2;;
@@ -136,11 +141,16 @@ EXEC="$EXEC_ABS"
 CONFIG="$CONFIG_ABS"
 GEN_BIN="$GEN_BIN_ABS"
 GEN_OUT_BASE="$GEN_OUT_BASE_ABS"
+SIM_MATRIX_DIR_DEFAULT="$GEN_OUT_BASE"
 if [[ -n "${SIM_MATRIX_DIR:-}" ]]; then
   SIM_MATRIX_DIR="$(to_abs_path "$SIM_MATRIX_DIR")"
 fi
 if [[ -n "${MATRIX_DIR:-}" ]]; then
   MATRIX_DIR="$(to_abs_path "$MATRIX_DIR")"
+  SIM_MATRIX_DIR_DEFAULT="$(dirname "$MATRIX_DIR")"
+  if [[ $GEN_OUT_BASE_SET -eq 0 ]]; then
+    GEN_OUT_BASE="$SIM_MATRIX_DIR_DEFAULT"
+  fi
 fi
 OUT_DIR="$(to_abs_path "$OUT_DIR")"
 
@@ -171,35 +181,41 @@ if [[ -n "$GEN_N" || -n "$GEN_K" || -n "$GEN_COUNT" ]]; then
   else
     MATRIX_DIR="$(to_abs_path "$MATRIX_DIR")"
   fi
+  SIM_MATRIX_DIR_DEFAULT="$(dirname "$MATRIX_DIR")"
 
   # 源目录（用于重命名前后差集）
   GEN_SRC_H_DIR="$(to_abs_path "GenLDPC/output/${mk}x${GEN_N}/matrix")"
   GEN_SRC_MASK_DIR="$(to_abs_path "GenLDPC/output/${mk}x${GEN_N}/mask_matrix")"
-  mkdir -p "$GEN_SRC_H_DIR" "$GEN_SRC_MASK_DIR"
-  mapfile -t FILES_BEFORE_NEWFMT < <(find "$GEN_SRC_H_DIR" -maxdepth 1 -type f -name "*_QC_H_*.txt" -print 2>/dev/null | sort)
+  if ((DRY_RUN == 0)); then
+    mkdir -p "$GEN_SRC_H_DIR" "$GEN_SRC_MASK_DIR"
+  fi
+  declare -a FILES_BEFORE_NEWFMT=()
+  mapfile -t FILES_BEFORE_NEWFMT < <(find "$GEN_SRC_H_DIR" -maxdepth 1 -type f -name "*_QC_H_*.txt" -print 2>/dev/null | sort || printf '')
 
   if [[ "$GEN_MODE" == "lsf" ]]; then
     GEN_QUEUE_USE="${GEN_QUEUE:-$QUEUE}"
-    GEN_JOB_NAME="${JOB_PREFIX}_gen_${GEN_N}x${GEN_K}"
+    job_name="${GEN_JOB_NAME:-${JOB_PREFIX}_gen_${GEN_N}x${GEN_K}}"
     GEN_LOG_DIR="${OUT_DIR}/logs_gen"
-    mkdir -p "$GEN_LOG_DIR"
+    if ((DRY_RUN == 0)); then
+      mkdir -p "$GEN_LOG_DIR"
+    fi
     # 导出 GENLDPC_OUT_DIR，并传递为第4参数以保持最大兼容
     gen_inner_cmd="export GENLDPC_OUT_DIR=\"$GEN_OUT_BASE\"; \"$GEN_BIN\" $GEN_N $GEN_K \$LSB_JOBINDEX \"$GEN_OUT_BASE\""
-    bsub_gen=(bsub -q "$GEN_QUEUE_USE" -J "${GEN_JOB_NAME}[1-${GEN_COUNT}]" \
+    bsub_gen=(bsub -q "$GEN_QUEUE_USE" -J "${job_name}[1-${GEN_COUNT}]" \
                    -o "${GEN_LOG_DIR}/gen_%I.out" -e "${GEN_LOG_DIR}/gen_%I.err" -- bash -lc "$gen_inner_cmd")
     if ((DRY_RUN)); then
       printf "[DRY-RUN] "; printf "%q " "${bsub_gen[@]}"; echo
     else
-      echo "Submitting generator job array: ${GEN_JOB_NAME}[1-${GEN_COUNT}]"
+      echo "Submitting generator job array: ${job_name}[1-${GEN_COUNT}]"
       "${bsub_gen[@]}"
       if command -v bwait >/dev/null 2>&1; then
         echo "Waiting for generator jobs to finish (bwait)..."
-        bwait -w "ended(${GEN_JOB_NAME})"
+        bwait -w "ended(${job_name})"
       else
         echo "Waiting for generator jobs to finish (polling bjobs)..."
         while true; do
           if command -v bjobs >/dev/null 2>&1; then
-            bjobs_output=$(bjobs -J "${GEN_JOB_NAME}" 2>/dev/null || true)
+            bjobs_output=$(bjobs -J "${job_name}" 2>/dev/null || true)
             rem=$(echo "$bjobs_output" | awk 'NR>1{c++} END{print c+0}')
             if [[ -z "$bjobs_output" || -z "$rem" || "$rem" -eq 0 ]]; then
               break
@@ -226,9 +242,9 @@ if [[ -n "$GEN_N" || -n "$GEN_K" || -n "$GEN_COUNT" ]]; then
   if ((RENAME_ENABLE)); then
     rename_script="$WORKSPACE_ROOT/scripts/rename_ldpc_matrices.sh"
     if ((DRY_RUN)); then
-      echo "[DRY-RUN] bash \"$rename_script\" $mk $GEN_N --apply"
+      echo "[DRY-RUN] bash \"$rename_script\" $mk $GEN_N --apply --base-dir \"$GEN_OUT_BASE\""
     else
-      if bash "$rename_script" "$mk" "$GEN_N" --apply; then
+      if bash "$rename_script" "$mk" "$GEN_N" --apply --base-dir "$GEN_OUT_BASE"; then
         echo "矩阵重命名完成"
       else
         echo "矩阵重命名失败" >&2
@@ -238,30 +254,38 @@ if [[ -n "$GEN_N" || -n "$GEN_K" || -n "$GEN_COUNT" ]]; then
   fi
 
   # 统计新增矩阵（重命名后格式化）
-  mapfile -t FILES_AFTER_NEWFMT < <(find "$GEN_SRC_H_DIR" -maxdepth 1 -type f -name "*_QC_H_*.txt" -print 2>/dev/null | sort)
+  declare -a FILES_AFTER_NEWFMT=()
+  mapfile -t FILES_AFTER_NEWFMT < <(find "$GEN_SRC_H_DIR" -maxdepth 1 -type f -name "*_QC_H_*.txt" -print 2>/dev/null | sort || printf '')
   declare -A seen_before=()
   for f in "${FILES_BEFORE_NEWFMT[@]}"; do seen_before["$f"]=1; done
   NEW_MATRIX_FILES=()
-  for f in "${FILES_AFTER_NEWFMT[@]}"; do
-    [[ -z "${seen_before[$f]+x}" ]] && NEW_MATRIX_FILES+=("$f")
-  done
+  if [[ ${#FILES_AFTER_NEWFMT[@]} -gt 0 ]]; then
+    for f in "${FILES_AFTER_NEWFMT[@]}"; do
+      [[ -z "${seen_before[$f]+x}" ]] && NEW_MATRIX_FILES+=("$f")
+    done
+  fi
 
   NEW_MATRIX_IDS=()
-  for f in "${NEW_MATRIX_FILES[@]}"; do
-    base="$(basename "$f")"
-    if [[ "$base" =~ _([0-9]+)\.txt$ ]]; then
-      NEW_MATRIX_IDS+=("${BASH_REMATCH[1]}")
-    fi
-  done
-
-  if [[ ${#NEW_MATRIX_IDS[@]} -eq 0 ]]; then
-    mapfile -t FILES_AFTER_OLD < <(find "$GEN_SRC_H_DIR" -maxdepth 1 -type f -name "*_QC_H_*_*.txt" -print 2>/dev/null | sort)
-    for f in "${FILES_AFTER_OLD[@]}"; do
+  if [[ ${#NEW_MATRIX_FILES[@]} -gt 0 ]]; then
+    for f in "${NEW_MATRIX_FILES[@]}"; do
       base="$(basename "$f")"
-      if [[ "$base" =~ _([0-9]+)_([0-9]+)\.txt$ ]]; then
-        NEW_MATRIX_IDS+=("${BASH_REMATCH[1]}_${BASH_REMATCH[2]}")
+      if [[ "$base" =~ _([0-9]+)\.txt$ ]]; then
+        NEW_MATRIX_IDS+=("${BASH_REMATCH[1]}")
       fi
     done
+  fi
+
+  if [[ ${#NEW_MATRIX_IDS[@]} -eq 0 ]]; then
+    declare -a FILES_AFTER_OLD=()
+    mapfile -t FILES_AFTER_OLD < <(find "$GEN_SRC_H_DIR" -maxdepth 1 -type f -name "*_QC_H_*_*.txt" -print 2>/dev/null | sort || printf '')
+    if [[ ${#FILES_AFTER_OLD[@]} -gt 0 ]]; then
+      for f in "${FILES_AFTER_OLD[@]}"; do
+        base="$(basename "$f")"
+        if [[ "$base" =~ _([0-9]+)_([0-9]+)\.txt$ ]]; then
+          NEW_MATRIX_IDS+=("${BASH_REMATCH[1]}_${BASH_REMATCH[2]}")
+        fi
+      done
+    fi
   fi
 
   if [[ ${#NEW_MATRIX_IDS[@]} -gt 0 ]]; then
@@ -326,13 +350,17 @@ echo "Matrix:$MATRIX_DIR"
 echo "Out:   $OUT_DIR"
 echo ""
 
-mkdir -p "$OUT_DIR"
+if ((DRY_RUN == 0)); then
+  mkdir -p "$OUT_DIR"
+fi
 
 # 生成 bsub 命令并提交
 for id in "${MATRIX_IDS[@]}"; do
   for snr in "${SNR_ARR[@]}"; do
     mat_dir="${OUT_DIR}/matrix${id}"
-    mkdir -p "$mat_dir"
+    if ((DRY_RUN == 0)); then
+      mkdir -p "$mat_dir"
+    fi
     log_o="${mat_dir}/snr${snr}.out"
     log_e="${mat_dir}/snr${snr}.err"
 
@@ -344,25 +372,18 @@ for id in "${MATRIX_IDS[@]}"; do
     # 在命令内部 cd 到 exec 所在目录，以满足相对路径的 ./matrix/ 访问
     exec_dir="$(cd "$(dirname "$EXEC")" && pwd)"
     exec_bin="$(basename "$EXEC")"
-    # 导出矩阵目录并作为第6参数传递，便于 ssd_fc 定位矩阵
-    if [[ -n "${SIM_MATRIX_DIR:-}" ]]; then
-      inner_cmd="cd \"$exec_dir\" && export LDPC_MATRIX_DIR=\"$SIM_MATRIX_DIR\"; ./\"$exec_bin\" LDPC \"$CONFIG_ABS\" AWGN $snr $id \"$SIM_MATRIX_DIR\""
+    sim_dir="${SIM_MATRIX_DIR:-$SIM_MATRIX_DIR_DEFAULT}"
+    if [[ -n "$sim_dir" ]]; then
+      inner_cmd="cd \"$exec_dir\" && export LDPC_MATRIX_DIR=\"$sim_dir\"; ./\"$exec_bin\" LDPC \"$CONFIG_ABS\" AWGN $snr $id \"$sim_dir\""
     else
-      # 若启用重命名，则默认用重命名后的目录；否则不传第6参，让程序用默认
-      if [[ $MATRIX_DIR_SET -eq 1 ]]; then
-        inner_cmd="cd \"$exec_dir\" && export LDPC_MATRIX_DIR=\"$MATRIX_DIR\"; ./\"$exec_bin\" LDPC \"$CONFIG_ABS\" AWGN $snr $id \"$MATRIX_DIR\""
-      else
-        inner_cmd="cd \"$exec_dir\" && ./\"$exec_bin\" LDPC \"$CONFIG_ABS\" AWGN $snr $id"
-      fi
+      inner_cmd="cd \"$exec_dir\" && ./\"$exec_bin\" LDPC \"$CONFIG_ABS\" AWGN $snr $id"
     fi
 
     if [[ -n "$CWD" ]]; then
-      BSUB_CWD=(-cwd "$CWD")
+      bsub_cmd=(bsub -q "$QUEUE" -J "${JOB_PREFIX}_M${id}_S${snr}" -o "$log_o" -e "$log_e" -cwd "$CWD" -- bash -lc "$inner_cmd")
     else
-      BSUB_CWD=()
+      bsub_cmd=(bsub -q "$QUEUE" -J "${JOB_PREFIX}_M${id}_S${snr}" -o "$log_o" -e "$log_e" -- bash -lc "$inner_cmd")
     fi
-
-    bsub_cmd=(bsub -q "$QUEUE" -J "${JOB_PREFIX}_M${id}_S${snr}" -o "$log_o" -e "$log_e" "${BSUB_CWD[@]}" -- bash -lc "$inner_cmd")
 
     if ((DRY_RUN)); then
       printf "[DRY-RUN] "; printf "%q " "${bsub_cmd[@]}"; echo

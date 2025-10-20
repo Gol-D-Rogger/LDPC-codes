@@ -20,9 +20,9 @@ bash scripts/submit_ldpc_bsub.sh \
 
 **执行顺序（非 dry-run）：**
 
-1. 若指定 `--gen-n / --gen-k / --gen-count`，先提交 `ldpc_gen` 数组任务 `[1-GEN_COUNT]` 并等待全部完成。
-2. 调用 `scripts/rename_ldpc_matrices.sh M N --apply` 重命名矩阵文件（与 `test_ldpc_sim.sh` 保持一致），记录新增矩阵编号。
-3. 对新增编号（若无新增则回退扫描目录全部矩阵）与 SNR 列表生成 `bsub` 命令，并通过第 6 参数 + `LDPC_MATRIX_DIR` 传递矩阵目录给仿真器。
+1. 若指定 `--gen-n / --gen-k / --gen-count`，先提交 `ldpc_gen` 数组任务 `[1-GEN_COUNT]` 并等待全部完成（优先 `bwait`，否则轮询 `bjobs`，缺少命令会提示后继续）。
+2. 调用 `scripts/rename_ldpc_matrices.sh M N --apply` 重命名矩阵文件（与 `test_ldpc_sim.sh` 保持一致），记录新增矩阵编号；即使没有新增文件也不会报错。该脚本支持 `--base-dir` 参数，会自动由 `--gen-out-base` 或 `--matrix-dir` 推导。
+3. 对新增编号（若无新增则回退扫描目录全部矩阵）与 SNR 列表生成 `bsub` 命令，并通过第 6 参数 + `LDPC_MATRIX_DIR` 传递矩阵根目录给仿真器。
 
 ## 核心选项
 
@@ -31,11 +31,12 @@ bash scripts/submit_ldpc_bsub.sh \
 | `--exec PATH` | 仿真器可执行文件，默认 `gen4_ldpc_sim/ssd_fc_dq`。切换 `ssd_fc` 时写 `--exec gen4_ldpc_sim/ssd_fc`。 |
 | `--config PATH` | 仿真配置；`ssd_fc_dq` 默认 `gen4_ldpc_sim/config/sdec_dq.cnfg`，`ssd_fc` 常用 `config/sdec.cnfg`。 |
 | `--gen-bin PATH` | 矩阵生成器，默认 `GenLDPC/ldpc_gen`。 |
+| `--gen-job-name STR` | 自定义矩阵生成 job 名称前缀，避免多个任务互相等待。 |
 | `--gen-n / --gen-k / --gen-count` | 传递给 `ldpc_gen` 的 N、K、phase（job array 大小）。 |
 | `--gen-mode MODE` | `lsf`（默认）/`local`，决定生成阶段的执行方式。 |
 | `--gen-out-base DIR` | 生成输出根目录，默认 `GenLDPC/output`，同时导出 `GENLDPC_OUT_DIR`。 |
-| `--matrix-dir DIR` | 仿真用矩阵目录；未指定时若执行过生成，默认 `GenLDPC/output/<m>x<n>/matrix`。 |
-| `--sim-matrix-dir DIR` | 额外指定传给仿真器的目录，并导出 `LDPC_MATRIX_DIR`。 |
+| `--matrix-dir DIR` | 仿真用矩阵目录；未指定时若执行了生成，则自动使用 `--gen-out-base/<m>x<n>/matrix`，否则回退到 `gen4_ldpc_sim/matrix`。传入后会自动更新 `LDPC_MATRIX_DIR` 默认值。 |
+| `--sim-matrix-dir DIR` | 显式指定仿真器使用的矩阵“根目录”（默认取上面矩阵目录的父目录，如 `GenLDPC/output`），并导出 `LDPC_MATRIX_DIR`。 |
 | `--out-dir DIR` | 仿真输出目录（默认 `runs/ldpc_batch`），每个矩阵单独落在 `matrix<ID>/snr<SNR>.{out,err}`。 |
 | `--rename-enable / --no-rename` | 是否执行标准重命名（默认开启，与 `test_ldpc_sim.sh` 一致）。 |
 | `--build` | 提交前自动执行 `make -C GenLDPC` 与 `make -C gen4_ldpc_sim`。 |
@@ -69,7 +70,7 @@ bash scripts/submit_ldpc_bsub.sh \
 | `GEN_BIN` | `GenLDPC/ldpc_gen` | `/workspaces/LDPC-codes/GenLDPC/ldpc_gen` |
 | `GEN_OUT_BASE` | `GenLDPC/output` | `/workspaces/LDPC-codes/GenLDPC/output` |
 | `MATRIX_DIR`（默认） | `GenLDLC/output/<m>x<n>/matrix` | `/workspaces/LDPC-codes/GenLDPC/output/20x149/matrix` |
-| `SIM_MATRIX_DIR` | 自定义 | `/workspaces/LDPC-codes/...` |
+| `SIM_MATRIX_DIR` | 默认 `GenLDPC/output` 或显式指定 | `/workspaces/LDPC-codes/GenLDPC/output` |
 | `OUT_DIR` | `runs/ldpc_batch` | `/workspaces/LDPC-codes/runs/ldpc_batch` |
 | `rename_ldpc_matrices.sh` | `scripts/rename_ldpc_matrices.sh` | `/workspaces/LDPC-codes/scripts/rename_ldpc_matrices.sh` |
 
@@ -80,5 +81,11 @@ bash scripts/submit_ldpc_bsub.sh \
 - **复用既有矩阵**：无需再生成，直接提供 `--matrix-dir` 或 `--sim-matrix-dir` 即可。  
 - **多 SNR 批量**：`--snr` 列出或 `--snr-seq` 生成浮点序列，避免手动输入大量值。  
 - **切换仿真器**：`ssd_fc`/`ssd_fc_dq` 仅需调整 `--exec` 与 `--config`；其余流程保持一致。  
+
+## 可靠性说明
+
+- dry-run 或目录为空时，脚本会初始化所有数组并跳过差集计算，不会触发 `set -u` 的“unbound variable”。
+- 如果使用 `--matrix-dir`，会自动推导父目录作为默认 `LDPC_MATRIX_DIR`，避免传入 `.../matrix/matrix/...`。
+- `bwait` / `bjobs` 均能安全退出；若缺少 `bjobs` 命令，会打印警告并直接进入下一阶段。
 
 只要按照上述规则设置路径和参数，即可在 LSF 环境中快速完成矩阵生成、重命名与仿真提交流水。如需扩展到其它 channel（如 BSC/ERR_INJ），只需调整脚本内 `inner_cmd` 的 `<channel>` 和 `<snr>` 即可。

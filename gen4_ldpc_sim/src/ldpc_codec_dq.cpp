@@ -2293,6 +2293,207 @@ void ldpc_packet::ldpc_dec_layer()
     free(vn_dec_hd);
 } // ldpc_dec_layer
 
+// layered belief propagation decoder
+void ldpc_packet::ldpc_dec_lbp()
+{
+#ifdef _LDPC_DEBUG_DUMP
+    FILE *cfp, *sfp, *hdfp, *lfp;
+    int stmp, vtmp;
+    char cmem_dump[50] = "./output/rdec_cmem_dump.txt";
+    char stot_dump[50] = "./output/rdec_stot_dump.txt";
+    char hdmem_dump[50] = "./output/rdec_hdmem_dump.txt";
+    char log_dump[50] = "./output/rdec_log_dump.txt";
+    cfp = fopen(cmem_dump, "w");
+    sfp = fopen(stot_dump, "w");
+    hdfp = fopen(hdmem_dump, "w");
+    lfp = fopen(log_dump, "w");
+#endif
+
+    mod2entry *e;
+    char *dec_init;
+    int cir_cnt;
+    int hd_init;
+
+    float **cn_r_mem;       // C2V MSG memory
+    float **vn_app_mem;     // posterior probability memory in VN order
+    float **cn_q_mem;       // V2C MSG memory in CN order
+    float *cn_c_prod;  // C prod of V2C MSG in CN order
+
+    char *layer_synd;
+    char *cn_dec_hd;
+    char *vn_dec_hd;
+    int hd_updated;
+    int layer_synd_wt;
+    int synd_pass_cnt = 0;
+    int hd_stable_cnt = 0;
+    int rowoffset;
+    
+    // allocation
+    dec_init = (char *)calloc(bm_n, sizeof(*dec_init));
+    vec_set(dec_init, bm_n);
+
+    cn_c_prod = (float *)calloc(cir_sz, sizeof(*cn_c_prod));
+
+    cn_r_mem = (float **)calloc(bm_n*col_wt, sizeof(*cn_r_mem));
+    for (int i = 0; i < bm_n*col_wt; i++)
+        cn_r_mem[i] = (float *)calloc(cir_sz, sizeof(*cn_r_mem[i]));
+
+    cn_q_mem = (float **)calloc(bm_n*col_wt, sizeof(*cn_q_mem));
+    for (int i = 0; i < bm_n*col_wt; i++)
+        cn_q_mem[i] = (float *)calloc(cir_sz, sizeof(*cn_q_mem[i]));
+    
+    vn_app_mem = (float **)calloc(bm_n, sizeof(*vn_app_mem));
+    for (int i = 0; i < bm_n; i++)
+        vn_app_mem[i] = (float *)calloc(cir_sz, sizeof(*vn_app_mem[i]));
+
+    layer_synd = (char *)calloc(cir_sz, sizeof(*layer_synd));
+    vn_dec_hd = (char *)calloc(cir_sz, sizeof(*vn_dec_hd));
+    cn_dec_hd = (char *)calloc(cir_sz, sizeof(*cn_dec_hd));
+
+    // initialize decoder
+    cw_fail = 1;
+    cw_miscorr = 0;
+    vec_copy(dec_di_blk, dec_do_blk, 0, 0, hm_n + mask_len);
+
+    for (int i = 0; i < bm_n; i++)
+        for (int j=0; j<cir_sz; j++)
+            vn_app_mem[i][j] = (float)llr_tbl[dec_di_blk[i*cir_sz+j]];
+
+    // iterative decoding
+    for(int itr=0; itr<ldec_max_itr && ((ldec_early_term_en==0)||(cw_fail==1));itr++)
+    {
+        // Q sign mem index
+        cir_cnt = 0;
+
+        // layer decoding
+        for(int layer=0; layer < bm_m &&((ldec_early_term_en==0)||(cw_fail==1)); layer++)
+        {
+            // initilize HD mem
+            hd_init = (vec_sum(dec_init, bm_n)!=0);
+
+            for (int i = 0; i < cir_sz; i++)
+                cn_c_prod[i] = 1.0f;
+
+            rowoffset = 0;
+
+            // Earlier termination init
+            hd_updated = 0;
+            vec_clr(layer_synd, cir_sz);
+
+            // Per circulant of the layer
+            for (e = mod2sparse_first_in_row(qc_bm, layer);
+                !mod2sparse_at_end(e);
+                e = mod2sparse_next_in_row(e))
+            {
+                for (int i = 0; i < cir_sz; i++)
+                {
+                    cn_q_mem[cir_cnt][i] = vn_app_mem[e->col][(i + e->shift)%cir_sz] - cn_r_mem[cir_cnt][i];
+
+                    // Quantization
+                    if (finite_mode == 1)
+                        cn_q_mem[cir_cnt][i] = (float)Sat_Quan((double)cn_q_mem[cir_cnt][i],finite_q_max, finite_q_min, finite_q_num, finite_f_num);
+                    
+                    cn_c_prod[i] *= tanh(cn_q_mem[cir_cnt][i] / 2);
+                } // per Node
+
+                cir_cnt++;
+                rowoffset++;
+            }
+
+            cir_cnt -= rowoffset;
+            for (e = mod2sparse_first_in_row(qc_bm, layer);
+                !mod2sparse_at_end(e) && ((ldec_early_term_en == 0)||(cw_fail == 1));
+                e = mod2sparse_next_in_row(e))
+            {
+                for (int i = 0; i < cir_sz; i++)
+                {
+                    // update R
+                    cn_r_mem[cir_cnt][i] = 2 * atanh(cn_c_prod[i] / tanh(cn_q_mem[cir_cnt][i] / 2));
+                    cn_r_mem[cir_cnt][i] = (cn_r_mem[cir_cnt][i] > 3.875) ? 3.875 : cn_r_mem[cir_cnt][i];
+                    cn_r_mem[cir_cnt][i] = (cn_r_mem[cir_cnt][i] < -3.875) ? -3.875 : cn_r_mem[cir_cnt][i];
+
+                    if (finite_mode == 1)
+                        cn_r_mem[cir_cnt][i] = (float)Sat_Quan((double)cn_r_mem[cir_cnt][i], finite_r_max, finite_r_min, finite_r_num, finite_f_num);
+                
+                    // update APP
+                    vn_app_mem[e->col][(i + e->shift)%cir_sz] = cn_r_mem[cir_cnt][i] + cn_q_mem[cir_cnt][i];
+
+                    if (finite_mode == 1)
+                        vn_app_mem[e->col][(i + e->shift)%cir_sz] = (float)Sat_Quan((double)vn_app_mem[e->col][(i + e->shift)%cir_sz], finite_q_max, finite_q_min, finite_q_num, finite_f_num);
+
+                    vn_dec_hd[i] = vn_app_mem[e->col][(i + e->shift)%cir_sz] >= 0 ? 0 : 1;  
+                }
+
+                if (dec_init[e->col] == 1)
+                {
+                    dec_init[e->col] = 0;
+                }
+
+                // 1. check if HD updated
+                if (hd_updated == 0)
+                    if (vec_cmp(dec_do_blk, vn_dec_hd, e->col*cir_sz, 0, cir_sz) == 1)
+                        hd_updated = 1;
+
+                vec_copy(vn_dec_hd, dec_do_blk, 0, e->col*cir_sz, cir_sz);
+                // 2. accumulate syndrome
+                vec_shift(vn_dec_hd, cn_dec_hd, cir_sz, -1 * e->shift);
+                vec_mod2_add(cn_dec_hd, layer_synd, layer_synd, cir_sz);
+
+                cir_cnt++;
+            } // per circulant
+
+            // check converage checking
+            layer_synd_wt = vec_sum(layer_synd, cir_sz);
+            if (hd_init == 1)
+            {
+                hd_stable_cnt = 0;
+                synd_pass_cnt = 0;
+            }
+            else if ((hd_updated == 0) && (layer_synd_wt == 0))
+            {
+                hd_stable_cnt++;
+                synd_pass_cnt++;
+            }
+            else
+            {
+                hd_stable_cnt = 0;
+                synd_pass_cnt = 0;
+            }
+
+            if ((synd_pass_cnt >= bm_m) && (hd_stable_cnt >= bm_m -1) )
+            {
+                cw_fail = 0;
+                cnvg_itr = itr;
+                cnvg_lyr = layer;
+            }
+        } // per layer
+    } // per iteration
+
+    if ((cw_fail == 1) || (ldec_early_term_en == 0))
+    {
+        cnvg_itr = ldec_max_itr - 1;
+        cnvg_lyr = bm_m - 1;
+    }
+
+    // free all
+    free(dec_init);
+    for (int i=0; i<bm_n*col_wt; i++)
+        free(cn_r_mem[i]);
+    free(cn_r_mem);
+    for (int i=0; i<bm_n; i++)
+        free(vn_app_mem[i]);
+    free(vn_app_mem);
+    for (int i=0; i<bm_n*col_wt; i++)
+        free(cn_q_mem[i]);
+    free(cn_q_mem);
+
+    free(cn_c_prod);
+
+    free(layer_synd);
+    free(cn_dec_hd);
+    free(vn_dec_hd);
+} // ldpc_dec_lbp
+
 
 void ldpc_packet::ldpc_dec_skip()
 {
