@@ -1,0 +1,83 @@
+system:
+  command_prefix: []
+
+paths:
+  workspace_root: "/mnt/f/MyProject/MaxioProject/LDPC-codes"
+  output_root: "/mnt/f/MyProject/MaxioProject/test_local"
+  exec: "gen4_ldpc_sim/ssd_fc_dq"
+  config: "gen4_ldpc_sim/config/sdec_dq.cnfg"
+  gen_bin: "GenLDPC/ldpc_gen"
+  matrix_dir: "${OUTPUT_ROOT}/gen_matrix"
+  sim_out_root: "${OUTPUT_ROOT}/runs"
+  perf_dir: "${OUTPUT_ROOT}/perf"
+  log_suffix: ".log"
+
+generation:
+  gen_n: 149
+  gen_k: 129
+  gen_count: 4
+  batch_size: 2
+  mode: "local"
+  gen_out_base: "${OUTPUT_ROOT}/gen_matrix"
+  disable_rename: false  # 启用重命名，将 _X_Y.txt 改为 _X.txt
+
+simulation:
+  job_prefix: "ldpc_local"
+  snr_list: [3.6]
+  anchor_snr: 3.6
+  deep_snr_list: [3.7]
+  dry_run: false
+
+selection:
+  top_n: 3
+  err_inj_threshold: 0.1
+
+err_inj:
+  config: "gen4_ldpc_sim/config/fdec.cnfg"
+  command: "./ssd_fc_dq LDPC {config} ERR_INJ 360 {matrix_id}"
+
+limits:
+  max_matrices: 8
+  max_runtime_hours: null
+  sleep_seconds: 15
+  stop_flag_file: "${OUTPUT_ROOT}/STOP"
+
+log_parser:
+  awgn:
+    stat_keys:
+      - "Total simulated number"
+      - "RAW  BER"
+      - "LDPC BER"
+      - "LDPC FER"
+      - "MCRC FER"
+      - "DATA FER"
+      - "Retry Decoder average iterations"
+    fer_key: "LDPC FER"
+    statistics_prefix: "[STATISTICS]"
+  err_inj:
+    stat_keys:
+      - "Total simulated number"
+      - "RAW  BER"
+      - "LDPC BER"
+      - "LDPC FER"
+      - "MCRC FER"
+      - "DATA FER"
+      - "Fast Decoder average iterations"
+    fer_key: "LDPC FER"
+    statistics_prefix: "[STATISTICS]"
+
+xlsx:
+  enable: true
+  filename: "auto_ldpc_local_results.xlsx"
+
+database:
+  path: "${OUTPUT_ROOT}/state/state.db"
+
+plot:
+  enable: true
+  output: "${OUTPUT_ROOT}/perf/best_plot.png"
+  baseline:
+    path: null
+    sheet: "baseline"
+    snr_column: "SNR"
+    fer_column: "FER"

@@ -3,6 +3,7 @@ build/
 build_dq/
 
 # Executable files
+gen4_ldpc_sim/.cache
 gen4_ldpc_sim/ssd_fc
 gen4_ldpc_sim/ssd_fc_dq
 GenLDPC/ldpc_gen
@@ -54,3 +55,14 @@ perf/*.log
 # Backup files
 *.bak
 *.backup
+
+# Python cache directories
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
