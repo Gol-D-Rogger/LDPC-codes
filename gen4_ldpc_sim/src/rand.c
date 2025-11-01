@@ -459,7 +459,7 @@ void randomSubset(int *subset, int n, int N)
   int  t = 0, m = 0;
   double U;
 
-  while (m < N)
+  while (m < n)
   {
     U = rand_uniform();
     if (((N - t) * U) >= (n - m))

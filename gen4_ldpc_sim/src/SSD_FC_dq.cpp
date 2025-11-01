@@ -33,12 +33,18 @@ int main (int argc, char **argv)
     long ldec_itr_tot = 0;
     long fdec_cyc_tot = 0;
     long fdec_cyc_org = 0;
+    long fdec_success_cnt = 0;
+    long fdec_fail_cnt = 0;
+    long fdec_success_itr_tot = 0;
+    long fdec_fail_itr_tot = 0;
     int ldec_tot = 0;
     int fdec_false_skip_cnt = 0;
     int fdec_false_used_cnt = 0;
     int fdec_corr_skip_cnt = 0;
     long *fdec_cnvg_itr;
     long *ldec_cnvg_itr;
+    long *fdec_success_itr_dist;
+    long *fdec_fail_itr_dist;
     struct dsp_packet dsp_pckt;
     struct dsp_packet *sim_pckt = &dsp_pckt;
 
@@ -56,8 +62,17 @@ int main (int argc, char **argv)
     dsp_info_len = dsp_src_len + 32;
     dsp_pad_len = H_K - dsp_info_len;
     dsp_blk_len = dsp_info_len + H_M;
-    fdec_cnvg_itr = (long*)calloc((fdec_max_itr>0) ? fdec_max_itr : -1*fdec_max_itr, sizeof(*fdec_cnvg_itr));
-    ldec_cnvg_itr = (long*)calloc((ldec_max_itr>0) ? ldec_max_itr : -1*ldec_max_itr, sizeof(*ldec_cnvg_itr));
+    int fdec_itr_len = (fdec_max_itr > 0) ? fdec_max_itr : -1 * fdec_max_itr;
+    if (fdec_itr_len <= 0)
+        fdec_itr_len = 1;
+    int ldec_itr_len = (ldec_max_itr > 0) ? ldec_max_itr : -1 * ldec_max_itr;
+    if (ldec_itr_len <= 0)
+        ldec_itr_len = 1;
+
+    fdec_cnvg_itr = (long*)calloc(fdec_itr_len, sizeof(*fdec_cnvg_itr));
+    ldec_cnvg_itr = (long*)calloc(ldec_itr_len, sizeof(*ldec_cnvg_itr));
+    fdec_success_itr_dist = (long*)calloc(fdec_itr_len, sizeof(*fdec_success_itr_dist));
+    fdec_fail_itr_dist = (long*)calloc(fdec_itr_len, sizeof(*fdec_fail_itr_dist));
 
     printf("------------------Data Format--------------------\n");
     printf("META data       : %dB\n", dsp_meta_size/8);
@@ -192,8 +207,20 @@ int main (int argc, char **argv)
         if (sim_pckt->rdec_used==1)
         {
             ldec_tot++;
-            fdec_cnvg_itr[sim_pckt->fdec_max_itr-1]++;
-            fdec_itr_tot += (sim_pckt->fdec_max_itr);
+            int fail_iters = (sim_pckt->fdec_max_itr > 0) ? sim_pckt->fdec_max_itr : fdec_itr_len;
+            if (fail_iters <= 0)
+                fail_iters = fdec_itr_len;
+            int fail_idx = fail_iters - 1;
+            if (fail_idx < 0)
+                fail_idx = 0;
+            if (fail_idx >= fdec_itr_len)
+                fail_idx = fdec_itr_len - 1;
+            fdec_cnvg_itr[fail_idx]++;
+            fdec_fail_cnt++;
+            fdec_fail_itr_tot += fail_iters;
+            fdec_fail_itr_dist[fail_idx]++;
+            fdec_itr_tot += fail_iters;
+
             int ldec_idx = sim_pckt->cnvg_itr;
             if ((ldec_idx < 0) || (ldec_idx >= sim_pckt->ldec_max_itr))
             {
@@ -227,7 +254,21 @@ int main (int argc, char **argv)
                 fdec_idx = (fdec_idx < 0) ? 0 : ((sim_pckt->fdec_max_itr > 0) ? (sim_pckt->fdec_max_itr - 1) : 0);
             }
             fdec_cnvg_itr[fdec_idx]++;
-            fdec_itr_tot += (fdec_idx + 1);
+            int fdec_iters = fdec_idx + 1;
+            fdec_itr_tot += fdec_iters;
+
+            if (sim_pckt->cw_fail == 0)
+            {
+                fdec_success_cnt++;
+                fdec_success_itr_tot += fdec_iters;
+                fdec_success_itr_dist[fdec_idx]++;
+            }
+            else
+            {
+                fdec_fail_cnt++;
+                fdec_fail_itr_tot += fdec_iters;
+                fdec_fail_itr_dist[fdec_idx]++;
+            }
         }
 
         if (sim_mode==FC_SIM)
@@ -374,6 +415,18 @@ int main (int argc, char **argv)
     if ((dec_mode == FC_FDEC) || (dec_mode==FC_FDEC_G2) || (dec_mode==FC_MIX) || (dec_mode==FC_MIX_G2))
     {
         printf("[STATISTICS] Fast decoder average iteration: %f\n", fdec_itr_tot*1.0/sim_cnt);
+        if (fdec_success_cnt > 0)
+        {
+            printf("[STATISTICS] Fast decoder success packets: %ld\n", fdec_success_cnt);
+            printf("[STATISTICS] Fast decoder success avg iteration: %f\n",
+                   fdec_success_itr_tot * 1.0 / fdec_success_cnt);
+        }
+        if (fdec_fail_cnt > 0)
+        {
+            printf("[STATISTICS] Fast decoder fail packets   : %ld\n", fdec_fail_cnt);
+            printf("[STATISTICS] Fast decoder fail avg iteration   : %f\n",
+                   fdec_fail_itr_tot * 1.0 / fdec_fail_cnt);
+        }
         printf("[STATISTICS] Fast decoder saves %f%% cycles from column skip\n", (100-100.0*fdec_cyc_tot/fdec_cyc_org));
 
         printf("[STATISTICS] Iteration distribution as below: \n");
@@ -437,6 +490,8 @@ int main (int argc, char **argv)
     sim_pckt->dsp_pckt_clean();
     sim_pckt->ch_llr_clean();  // 这里已经释放了 vref
     free(fdec_cnvg_itr);
+    free(fdec_success_itr_dist);
+    free(fdec_fail_itr_dist);
     free(ldec_cnvg_itr);
     // free(vref);  // 【修复】删除重复释放，vref 已在 ch_llr_clean() 中释放
 

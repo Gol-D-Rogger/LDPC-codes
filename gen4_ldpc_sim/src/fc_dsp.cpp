@@ -432,6 +432,12 @@ void dsp_packet::ecc_decoder(enum fc_dec_mode fc_mode)
         ldpc_decoder(dec_mode);
         mcrc_chk();
     }
+    if (fc_mode == FC_PGDBF)
+    {
+        dec_mode = PGDBF;
+        ldpc_decoder(dec_mode);
+        mcrc_chk();
+    }
 
     // retry decoding only
     if (fc_mode == FC_RDEC)

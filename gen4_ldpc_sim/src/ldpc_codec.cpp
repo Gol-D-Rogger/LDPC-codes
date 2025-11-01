@@ -1059,10 +1059,10 @@ void ldpc_packet::ldpc_decoder(enum dec_model dec_mode)
         double default_p[5] = {0.0, 0.0081, 0.3, 0.7, 1.0};
         ldpc_dec_ppbf(3, default_p); // Use p_num=3 and default probability table
     }
-    else if (dec_mode == PPBF_SIMPLE)
+    else if (dec_mode == PGDBF)
     {
         double p_flip = 0.5; // Single probability used by simplified PGDBF
-        ldpc_dec_pgdbf_simple(p_flip);
+        ldpc_dec_pgdbf(p_flip);
     }
 
     //remove padding
@@ -3182,7 +3182,7 @@ void ldpc_packet::ldpc_dec_pgdbf(int p_num, int col_skip_itr, double *p_values)
 }
 
 
-void ldpc_packet::ldpc_dec_pgdbf_simple(double p_flip)
+void ldpc_packet::ldpc_dec_pgdbf(double p_flip)
 {
     char *hard = dec_do_blk;
     char *hard0 = (char *)calloc(hm_n, sizeof(*hard0));

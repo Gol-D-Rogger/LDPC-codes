@@ -21,6 +21,7 @@ enum fc_dec_mode
     FC_FDEC_G2,
     FC_MIX_G2,
     FC_TBFDEC,
+    FC_PGDBF,
 };
 
 struct dsp_packet : ldpc_packet

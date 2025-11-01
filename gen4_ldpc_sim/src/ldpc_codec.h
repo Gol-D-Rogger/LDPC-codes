@@ -20,7 +20,7 @@ enum dec_model
     LAYER = 8,
     TBFDEC = 9,
     PPBF = 10,
-    PPBF_SIMPLE = 11,
+    PGDBF = 11,
 };
 
 struct cn_msg
@@ -282,7 +282,7 @@ struct ldpc_packet : ch_packet
     // LDPC PGDBF decoder (Probabilistic Gradient Descent Bit-Flipping with pipeline)
     void ldpc_dec_pgdbf(int p_num, int col_skip_itr, double *p_values);
     // LDPC PGDBF decoder (Simplified, no pipeline or padding handling)
-    void ldpc_dec_pgdbf_simple(double p_flip);
+    void ldpc_dec_pgdbf(double p_flip);
     // LDPC MBF decoder (Multi-Bit Flipping, simplified)
     void ldpc_dec_mbf(int Fx, int threshold);
     // LDPC PPBF decoder (Probabilistic Parallel Bit-Flipping)

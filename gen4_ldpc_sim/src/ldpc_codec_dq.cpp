@@ -1343,10 +1343,10 @@ void ldpc_packet::ldpc_decoder(enum dec_model dec_mode)
         double default_p[5] = {0.0, 0.0081, 0.3, 0.7, 1.0};
         ldpc_dec_ppbf(3, default_p); // Use p_num=3 and default probability table
     }
-    else if (dec_mode == PPBF_SIMPLE)
+    else if (dec_mode == PGDBF)
     {
-        double p_flip = 0.5; // Single probability used by simplified PGDBF
-        ldpc_dec_pgdbf_simple(p_flip);
+        double p_flip = 0.96; // Single probability used by simplified PGDBF
+        ldpc_dec_pgdbf(p_flip);
     }
 
     //remove padding
@@ -2607,7 +2607,7 @@ void ldpc_packet::ldpc_dec_ppbf(int p_num, double *p)
         
         // Recalculate syndrome
         mod2sparse_mulvec(qc_hm, hard, syndrome);
-        syndrome_weight = vec_sum(syndrome, hm_m);
+        synd rome_weight = vec_sum(syndrome, hm_m);
         
         // Check for convergence
         if (syndrome_weight == 0) {
@@ -2643,7 +2643,192 @@ void ldpc_packet::ldpc_dec_ppbf(int p_num, double *p)
 #endif
 }
 
-void ldpc_packet::ldpc_dec_pgdbf_simple(double p_flip)
+/*
+void ldpc_packet::ldpc_dec_pgdbf(double p_flip)
+{
+    mod2entry *e;
+    int synd_wt;
+    // int pipe_len = p_num < 0 ? 0 : p_num;
+    int pipe_len = 0;
+
+    char *cn_synd_mem = (char *)calloc(hm_m + mask_len, sizeof(*cn_synd_mem));
+    char *cn_synd_sel = (char *)calloc(cir_sz, sizeof(*cn_synd_sel));
+    char *vn_synd_sel = (char *)calloc(cir_sz, sizeof(*vn_synd_sel));
+    char *vn_synd_cnt = (char *)calloc(cir_sz, sizeof(*vn_synd_cnt));
+    char *vn_hd_sel = (char *)calloc(cir_sz, sizeof(*vn_hd_sel));
+    char *vn_raw_sel = (char *)calloc(cir_sz, sizeof(*vn_raw_sel));
+    int *vn_energy = (int *)calloc(cir_sz, sizeof(*vn_energy));
+    char *cn_flp_sel = (char *)calloc(cir_sz, sizeof(*cn_flp_sel));
+    char *cn_synd_old = (char *)calloc(cir_sz, sizeof(*cn_synd_old));
+    char *cn_synd_new = (char *)calloc(cir_sz, sizeof(*cn_synd_new));
+
+    char **flip_queue = (char **)calloc(pipe_len + 1, sizeof(*flip_queue));
+    int *col_queue = (int *)calloc(pipe_len + 1, sizeof(*col_queue));
+    int *itr_queue = (int *)calloc(pipe_len + 1, sizeof(*itr_queue));
+    for (int i = 0; i <= pipe_len; ++i) {
+        flip_queue[i] = (char *)calloc(cir_sz, sizeof(*flip_queue[i]));
+        col_queue[i] = -1;
+        itr_queue[i] = 0;
+    }
+
+    if (!cn_synd_mem || !cn_synd_sel || !vn_synd_sel || !vn_synd_cnt ||
+        !vn_hd_sel || !vn_raw_sel || !vn_energy || !cn_flp_sel ||
+        !cn_synd_old || !cn_synd_new || !flip_queue || !col_queue || !itr_queue) {
+        printf("[LDPC] Memory allocation failure in ldpc_dec_pgdbf.\n");
+        exit(1);
+    }
+
+    cw_fail = 1;
+    cw_miscorr = 0;
+    fina_synd_wt = 0;
+    fdec_cyc_num = 0;
+    fdec_cyc_org = 0;
+
+    vec_copy(dec_di_blk, dec_do_blk, 0, 0, hm_n + mask_len);
+
+    vec_clr(cn_synd_mem, hm_m + mask_len);
+    for (int col = 0; col < bm_n; ++col) {
+        vec_copy(dec_do_blk, vn_hd_sel, col * cir_sz, 0, cir_sz);
+        for (e = mod2sparse_first_in_col(qc_bm, col); !mod2sparse_at_end(e); e = mod2sparse_next_in_col(e)) {
+            vec_shift(vn_hd_sel, cn_flp_sel, cir_sz, -1 * e->shift);
+            if (mask_matrix[e->row][e->col] == 1)
+                vec_mask(cn_flp_sel, cir_sz - drop_len, drop_len, 0);
+            else if (mask_matrix[e->row][e->col] == 2)
+                vec_mask(cn_flp_sel, cir_sz - mask_len, mask_len, 0);
+
+            vec_copy(cn_synd_mem, cn_synd_old, e->row * cir_sz, 0, cir_sz);
+            vec_mod2_add(cn_flp_sel, cn_synd_old, cn_synd_new, cir_sz);
+            vec_copy(cn_synd_new, cn_synd_mem, 0, e->row * cir_sz, cir_sz);
+        }
+    }
+
+    synd_wt = vec_sum(cn_synd_mem, hm_m + mask_len);
+    if (synd_wt == 0) {
+        cw_fail = 0;
+        cnvg_itr = 0;
+        cnvg_lyr = 0;
+    }
+
+    for (int itr = 0; itr < fdec_max_itr && cw_fail; ++itr) {
+        int steps = bm_n + ((pipe_len > 0) ? pipe_len : 0);
+        for (int step = 0; step < steps && cw_fail; ++step) {
+            bool have_col = (step < bm_n);
+            int col = have_col ? step : -1;
+
+            for (int stage = pipe_len; stage > 0; --stage) {
+                memcpy(flip_queue[stage], flip_queue[stage - 1], cir_sz);
+                col_queue[stage] = col_queue[stage - 1];
+                itr_queue[stage] = itr_queue[stage - 1];
+            }
+            memset(flip_queue[0], 0, cir_sz);
+            col_queue[0] = col;
+            itr_queue[0] = itr;
+
+            if (have_col) {
+                fdec_cyc_org++;
+                vec_clr(vn_synd_cnt, cir_sz);
+                for (e = mod2sparse_first_in_col(qc_bm, col); !mod2sparse_at_end(e); e = mod2sparse_next_in_col(e)) {
+                    vec_copy(cn_synd_mem, cn_synd_sel, e->row * cir_sz, 0, cir_sz);
+                    if (mask_matrix[e->row][e->col] == 1)
+                        vec_mask(cn_synd_sel, cir_sz - drop_len, drop_len, 0);
+                    else if (mask_matrix[e->row][e->col] == 2)
+                        vec_mask(cn_synd_sel, cir_sz - mask_len, mask_len, 0);
+                    vec_shift(cn_synd_sel, vn_synd_sel, cir_sz, e->shift);
+                    vec_incr(vn_synd_cnt, vn_synd_sel, cir_sz);
+                }
+
+                vec_copy(dec_do_blk, vn_hd_sel, col * cir_sz, 0, cir_sz);
+                vec_copy(dec_di_blk, vn_raw_sel, col * cir_sz, 0, cir_sz);
+
+                int max_energy = -1;
+                for (int j = 0; j < cir_sz; ++j) {
+                    int mismatch = (vn_hd_sel[j] != vn_raw_sel[j]) ? 1 : 0;
+                    int energy = mismatch + (int)vn_synd_cnt[j];
+                    vn_energy[j] = energy;
+                    if (energy > max_energy)
+                        max_energy = energy;
+                }
+
+                if (max_energy > 0) {
+                    for (int j = 0; j < cir_sz; ++j) {
+                        if (vn_energy[j] == max_energy && rand_uniform() < p_flip) {
+                            flip_queue[0][j] = 1;
+                        }
+                    }
+                }
+            } else {
+                col_queue[0] = -1;
+            }
+
+            int apply_col = col_queue[pipe_len];
+            bool flipped_now = false;
+            if (apply_col >= 0) {
+                char *flips = flip_queue[pipe_len];
+                for (int j = 0; j < cir_sz; ++j) {
+                    if (flips[j]) {
+                        dec_do_blk[apply_col * cir_sz + j] ^= 1;
+                        flipped_now = true;
+                    }
+                }
+
+                if (flipped_now) {
+                    for (e = mod2sparse_first_in_col(qc_bm, apply_col); !mod2sparse_at_end(e); e = mod2sparse_next_in_col(e)) {
+                        vec_shift(flip_queue[pipe_len], cn_flp_sel, cir_sz, -1 * e->shift);
+                        if (mask_matrix[e->row][e->col] == 1)
+                            vec_mask(cn_flp_sel, cir_sz - drop_len, drop_len, 0);
+                        else if (mask_matrix[e->row][e->col] == 2)
+                            vec_mask(cn_flp_sel, cir_sz - mask_len, mask_len, 0);
+                        vec_copy(cn_synd_mem, cn_synd_old, e->row * cir_sz, 0, cir_sz);
+                        vec_mod2_add(cn_flp_sel, cn_synd_old, cn_synd_new, cir_sz);
+                        vec_copy(cn_synd_new, cn_synd_mem, 0, e->row * cir_sz, cir_sz);
+                    }
+                    fdec_cyc_num++;
+                }
+
+                synd_wt = vec_sum(cn_synd_mem, hm_m + mask_len);
+                if (synd_wt == 0) {
+                    cw_fail = 0;
+                    cnvg_itr = itr_queue[pipe_len];
+                    cnvg_lyr = apply_col;
+                }
+
+                col_queue[pipe_len] = -1;
+            }
+        }
+    }
+
+    if (cw_fail) {
+        cnvg_itr = fdec_max_itr > 0 ? (fdec_max_itr - 1) : 0;
+        cnvg_lyr = bm_n > 0 ? (bm_n - 1) : 0;
+        fina_synd_wt = vec_sum(cn_synd_mem, hm_m + mask_len);
+    }
+
+    for (int i = 0; i <= pipe_len; ++i)
+        free(flip_queue[i]);
+    free(flip_queue);
+    free(col_queue);
+    free(itr_queue);
+    free(cn_synd_mem);
+    free(cn_synd_sel);
+    free(vn_synd_sel);
+    free(vn_synd_cnt);
+    free(vn_hd_sel);
+    free(vn_raw_sel);
+    free(vn_energy);
+    free(cn_flp_sel);
+    free(cn_synd_old);
+    free(cn_synd_new);
+
+#ifdef _LDPC_DEBUG
+    if (!cw_fail)
+        printf("[LDPC DEBUG] PGDBF layered decoding success.");
+    else
+        printf("[LDPC DEBUG] PGDBF layered decoding failed, final syndrome weight: %d", fina_synd_wt);
+#endif
+}
+*/
+
+void ldpc_packet::ldpc_dec_pgdbf(double p_flip)
 {
     char *hard = dec_do_blk;
     char *hard0 = (char *)calloc(hm_n, sizeof(*hard0));
@@ -2670,9 +2855,14 @@ void ldpc_packet::ldpc_dec_pgdbf_simple(double p_flip)
 
     int iteration = 0;
 
-    while (syndrome_weight != 0 && iteration < fdec_max_itr) {
-        iteration++;
-        fdec_cyc_org++;
+    if (syndrome_weight == 0) {
+        cw_fail = 0;
+        cnvg_itr = 0;
+        cnvg_lyr = 0;
+    } else {
+        while (syndrome_weight != 0 && iteration < fdec_max_itr) {
+            iteration++;
+            fdec_cyc_org++;
 
         int max_energy = -1;
         int num_flip = 0;
@@ -2708,34 +2898,27 @@ void ldpc_packet::ldpc_dec_pgdbf_simple(double p_flip)
         }
         if (flipped) fdec_cyc_num++;
 
-        mod2sparse_mulvec(qc_hm, hard, syndrome);
-        syndrome_weight = vec_sum(syndrome, hm_m);
-        if (syndrome_weight == 0) {
-            cw_fail = 0;
-            cnvg_itr = (iteration > 0) ? (iteration - 1) : 0;
-            cnvg_lyr = 0;
-            break;
+            mod2sparse_mulvec(qc_hm, hard, syndrome);
+            syndrome_weight = vec_sum(syndrome, hm_m);
+            if (syndrome_weight == 0) {
+                cw_fail = 0;
+                cnvg_itr = iteration - 1;
+                cnvg_lyr = 0;
+                break;
+            }
         }
-    }
 
-    if (cw_fail) {
-        cnvg_itr = (fdec_max_itr > 0) ? (fdec_max_itr - 1) : 0;
-        cnvg_lyr = 0;
-        fina_synd_wt = syndrome_weight;
+        if (cw_fail) {
+            cnvg_itr = (fdec_max_itr > 0) ? (fdec_max_itr - 1) : 0;
+            cnvg_lyr = 0;
+            fina_synd_wt = syndrome_weight;
+        }
     }
 
     free(hard0);
     free(syndrome);
     free(energy);
     free(flip_pos);
-
-#ifdef _LDPC_DEBUG
-    if (!cw_fail)
-        printf("[LDPC DEBUG] Simplified PGDBF decoding success after %d iterations.\n", cnvg_itr + 1);
-    else
-        printf("[LDPC DEBUG] Simplified PGDBF decoding failed after %d iterations, final syndrome weight: %d\n",
-               cnvg_itr + 1, fina_synd_wt);
-#endif
 }
 
 void ldpc_packet::ldpc_dec_mbf(int Fx, int threshold)

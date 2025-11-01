@@ -15,7 +15,7 @@ def _import_matplotlib():
     try:
         import matplotlib.pyplot as plt  # type: ignore
     except ImportError as exc:  # pragma: no cover
-        raise RuntimeError("未安装 matplotlib，无法绘图。请运行 `pip install matplotlib`.") from exc
+        raise RuntimeError("未安装 matplotlib, 无法绘图。请运行 `pip install matplotlib`.") from exc
     return plt
 
 
@@ -37,7 +37,7 @@ def _load_baseline(
     fer_col = baseline_cfg.get("fer_column") or "FER"
 
     try:
-        from openpyxl import load_workbook  # type: ignore
+        from openpyxl import load_workbook  # type: igno
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("未安装 openpyxl，无法读取基准数据。请运行 `pip install openpyxl`.") from exc
 
@@ -74,6 +74,7 @@ def _load_baseline(
     paired = sorted(zip(snr_values, fer_values), key=lambda x: x[0])
     snr_sorted, fer_sorted = zip(*paired)
     return list(snr_sorted), list(fer_sorted)
+
 
 
 def _group_runs_by_matrix(
