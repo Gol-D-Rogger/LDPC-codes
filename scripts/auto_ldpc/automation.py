@@ -66,6 +66,10 @@ class AutomationRunner:
         self.errinj_stat_keys = self.errinj_log_cfg.get("stat_keys", ["LDPC FER"])
         self.errinj_fer_key = self.errinj_log_cfg.get("fer_key", "LDPC FER")
 
+        self.sim_queue = self.sim_cfg.get("queue") or "regr_q"
+        self.deep_queue = self.sim_cfg.get("deep_queue") or "post_q"
+        self.generation_queue = self.gen_cfg.get("queue") or "post_q"
+
         # Determine matrix storage root via legacy helper
         default_args = self._build_generation_args(count=0)
         default_paths = legacy_submit.prepare_paths(default_args)
@@ -168,11 +172,12 @@ class AutomationRunner:
         snr_list: Sequence[float],
         matrix_dir: Optional[Path] = None,
         job_prefix: Optional[str] = None,
+        queue_override: Optional[str] = None,
     ) -> None:
         if matrix_dir is None:
             matrix_dir = self.sim_matrix_root
         jobs: List[SimulationJob] = []
-        queue = self.sim_cfg.get("queue", "regr_q")
+        queue = queue_override or self.sim_queue
         prefix = job_prefix or self.sim_cfg.get("job_prefix", "ldpc_auto")
         for matrix_id in matrix_ids:
             for snr in snr_list:
@@ -205,7 +210,7 @@ class AutomationRunner:
 
     def submit_errinj_runs(self, matrix_ids: Sequence[str]) -> None:
         jobs: List[SimulationJob] = []
-        queue = self.errinj_cfg.get("queue", self.sim_cfg.get("queue", "regr_q"))
+        queue = self.errinj_cfg.get("queue") or self.sim_queue
         prefix = self.errinj_cfg.get("job_prefix", "ldpc_errinj")
         template = self.errinj_cfg.get("command")
         config_path = Path(self.errinj_cfg.get("config", "config/another.cnfg"))
@@ -244,7 +249,13 @@ class AutomationRunner:
         if not self.deep_snr_list:
             return
         for matrix_id in matrix_ids:
-            self.submit_awgn_runs([matrix_id], self.deep_snr_list, matrix_dir, job_prefix="ldpc_deep")
+            self.submit_awgn_runs(
+                [matrix_id],
+                self.deep_snr_list,
+                matrix_dir,
+                job_prefix="ldpc_deep",
+                queue_override=self.deep_queue,
+            )
             self.state.mark_deep_runs_submitted(matrix_id)
 
     # --- Matrix generation and scheduling --------------------------------
@@ -257,7 +268,7 @@ class AutomationRunner:
             gen_job_name=None,
             matrix_dir=str(self.paths.matrix_dir) if self.paths.matrix_dir else None,
             out_dir=str(legacy_out_dir),
-            queue=self.sim_cfg.get("queue", "regr_q"),
+            queue=self.sim_queue,
             job_prefix=self.sim_cfg.get("job_prefix", "ldpc_auto"),
             cwd=None,
             snr=None,
@@ -267,7 +278,7 @@ class AutomationRunner:
             gen_n=self.gen_cfg.get("gen_n"),
             gen_k=self.gen_cfg.get("gen_k"),
             gen_count=count,
-            gen_queue=self.gen_cfg.get("queue"),
+            gen_queue=self.generation_queue,
             gen_mode=self.gen_cfg.get("mode", "lsf"),
             gen_out_base=self._resolve_gen_out_base(),
             rename_enable=not self.gen_cfg.get("disable_rename", False),
