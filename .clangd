@@ -1,0 +1,36 @@
+---
+# clangd 配置文件
+
+# 使用编译命令数据库
+CompileFlags:
+  # 添加编译标志
+  Add:
+    - "-Wall"
+    - "-Wextra"
+    - "-std=c++17"
+  # 移除某些标志（如果需要）
+  Remove:
+    - "-fno-exceptions"
+
+# 启用背景索引以提高性能
+Index:
+  Background: Build
+
+# 代码补全和诊断配置
+Diagnostics:
+  # 显示所有诊断
+  Suppress: []
+  # 忽略特定的诊断（如果需要）
+  # Suppress:
+  #   - "unused-result"
+
+# 符号查找配置
+Hover:
+  ShowAKA: true
+
+
+# 启用 clang-tidy 检查
+InlayHints:
+  Enabled: true
+  ParameterNames: true
+  DeducedTypes: true

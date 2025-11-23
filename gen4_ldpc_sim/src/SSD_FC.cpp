@@ -94,6 +94,11 @@ int main (int argc, char **argv)
     sim_pckt->dfmt_config(dsp_meta_size, dsp_lba_size, dsp_lba_num);
 
 #ifdef _SIM_DEBUG
+    printf("[SIM DEBUG] Configuring LDPC ...\n");
+#endif    
+    sim_pckt->ldpc_config(h_m, h_n, h_sc, pad_bit, h_st, h_wt, always_on, pchk_file, drop_file);
+
+#ifdef _SIM_DEBUG
     printf("[SIM DEBUG] Configuring LDPC decoder ...\n");
 #endif
     sim_pckt->ldpc_dec_config(fdec_max_itr, tbfdec_max_itr, fdec_col_skip_itr, ldec_max_itr, alpha, finite_mode, finite_q_num, finite_r_num, finite_f_num, fp_flg);
@@ -271,7 +276,7 @@ int main (int argc, char **argv)
         raw_err_tot += sim_pckt->raw_err_num;
         dec_err_tot += sim_pckt->dec_err_num;
 
-#ifdef _SUM_DUMP
+#ifdef _SIM_DUMP
         if (sim_pckt->raw_err_num < (H_N/64))
         {
             err_num_dist[sim_pckt->raw_err_num]++;
@@ -417,7 +422,7 @@ int main (int argc, char **argv)
     for (int i=0; i<=H_N/64; i++)
     {
         if (err_num_dist[i]!=0)
-            fprintf(fp, "ERR # = %3d: %6e\n", i, err_num_dist[i]*1.0/sim_cnt;
+            fprintf(fp, "ERR # = %3d: %6e\n", i, err_num_dist[i]*1.0/sim_cnt);
     }
 #endif
 

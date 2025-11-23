@@ -16,8 +16,8 @@ enum dec_model
     SKIP = 0,
     BF_P0,
     BF_P3 = 3,
+    BF_G2 = 4,
     LAYER = 8,
-    TBFDEC = 9
 };
 
 struct cn_msg
@@ -86,12 +86,6 @@ struct ldpc_packet : ch_packet
     float finite_c_max;
     float finite_c_min;
 
-    int reg_sdlite_llr_config;
-    int reg_sdlite_llr0;
-    int reg_sdlite_llr1;
-    int reg_sdlite_llr2;
-    int reg_sdlite_llr3;
-
     // data block
     char *usr_blk;
     char *enc_di_blk;
@@ -122,7 +116,7 @@ struct ldpc_packet : ch_packet
     // QC-LDPC config & clean up
 
     void ldpc_config(int, int, int, int, int, char *);
-    void ldpc_dec_config(int, int, float, int, int, int, int, int, int, int, int, int);
+    void ldpc_dec_config(int, int, int, float, int, int, int, int);
     void ldpc_rd_phck(char *);
     void ldpc_gen_gm();
     void ldpc_clean();
@@ -136,7 +130,7 @@ struct ldpc_packet : ch_packet
     // LDPC dec
     void ldpc_decoder(enum dec_model);
     // LDPC BF decoder
-    void ldpc_dec_bf(int p_num);
+    void ldpc_dec_bf(int p_num, int col_skip_itr);
     // LDPC BF Gen2
     void ldpc_dec_bf2();
 

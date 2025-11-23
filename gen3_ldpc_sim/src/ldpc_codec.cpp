@@ -223,19 +223,11 @@ void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt, char *pchk_f
 } // ldpc_config
 
 // LDPC decoder config
-void ldpc_packet::ldpc_dec_config(int max_fdec_itr, int max_ldec_itr, float dec_alpha, 
-                                  int fin_mode, int fin_q_num, int fin_r_num, int fin_f_num,
-                                  int sdlite_llr_config, int sdlite_llr0, int sdlite_llr1, int sdlite_llr2, int sdlite_llr3)
+void ldpc_packet::ldpc_dec_config(int max_fdec_itr, int fdec_col_skip, int max_ldec_itr, float dec_alpha, int fin_mode, int fin_q_num, int fin_r_num, int fin_f_num)
 {
     // syndrome weight
     init_synd_wt_min = hm_m;
     init_synd_wt_max = 0;
-
-    reg_sdlite_llr_config = sdlite_llr_config;
-    reg_sdlite_llr0 = sdlite_llr0;
-    reg_sdlite_llr1 = sdlite_llr1;
-    reg_sdlite_llr2 = sdlite_llr2;
-    reg_sdlite_llr3 = sdlite_llr3;
 
     // layer config
     if (max_ldec_itr>0)
@@ -594,17 +586,17 @@ void ldpc_packet::ldpc_decoder(enum dec_model dec_mode)
     // add 0 padding
     vec_copy(det_blk, dec_di_blk, 0, 0, info_len);
     for (int i=0; i < pad_len; i++)
-        dec_di_blk[info_len + i] = 0;
+        dec_di_blk[info_len + i] = max_llr_bin;
 
     vec_copy(det_blk, dec_di_blk, info_len, hm_k, hm_m);
 
     if (dec_mode == SKIP)
         ldpc_dec_skip();
     else if (dec_mode == BF_P0)
-        ldpc_dec_bf(0);
+        ldpc_dec_bf(0, col_skip_itr);
     else if (dec_mode == BF_P3)
-        ldpc_dec_bf(3);
-    else if (dec_mode == TBFDEC)
+        ldpc_dec_bf(3, col_skip_itr);
+    else if (dec_mode == BF_G2)
         ldpc_dec_bf2();
     else if (dec_mode == LAYER)
         ldpc_dec_layer();
@@ -645,13 +637,13 @@ void ldpc_packet::ldpc_decoder(enum dec_model dec_mode)
 #endif
 }
 
-void ldpc_packet::ldpc_dec_bf(int p_num)
+void ldpc_packet::ldpc_dec_bf(int p_num, int col_skip_itr)
 {
     mod2entry *e;
     int synd_wt;
     int col_updt;
     int itr_updt;
-
+    bool col_skip;
     char *cn_synd_mem;  //syndrome memory in CN order
     char *cn_synd_sel;  //selected syndrome in CN order
     char *vn_synd_sel;  //selected syndrome in VN order
@@ -659,6 +651,8 @@ void ldpc_packet::ldpc_dec_bf(int p_num)
     char *vn_hd_sel;    //current HD of selected column (from dec_do_blk) in VN order
     char *vn_raw_sel;    //raw data of selected column (from dec_di_blk) in VN order
     char **vn_flp_sel;  //flip flag of selected column in VN order
+    int *vn_flp_col;    //column index of the vn_flp_sel
+    int *vn_flp_itr;    //iteration of the vn_flp_sel
     char *cn_flp_sel;  //flip flag of selected column in CN order
     char *cn_synd_new;   // new syndrome in CN order
     char *cn_synd_old;  
@@ -674,6 +668,8 @@ void ldpc_packet::ldpc_dec_bf(int p_num)
     vn_flp_sel = (char **)calloc(p_num+1, sizeof(*vn_flp_sel));
     for(int i=0;i<=p_num;i++)
         vn_flp_sel[i] = (char *)calloc(cir_sz, sizeof(*vn_flp_sel[i]));
+    vn_flp_col = (int *)calloc(p_num+1, sizeof(*vn_flp_col));
+    vn_flp_itr = (int *)calloc(p_num+1, sizeof(*vn_flp_itr));
     cn_flp_sel = (char *)calloc(cir_sz, sizeof(*cn_flp_sel));
     cn_synd_old = (char *)calloc(cir_sz, sizeof(*cn_synd_old));
     cn_synd_new = (char *)calloc(cir_sz, sizeof(*cn_synd_new));
@@ -686,6 +682,9 @@ void ldpc_packet::ldpc_dec_bf(int p_num)
     vec_clr(cn_synd_mem,hm_m);
     for(int i=0;i<p_num;i++)
         vec_clr(vn_flp_sel[i], cir_sz);
+    fdec_cyc_num = 0;
+    fdec_cyc_org = 0;
+
 
     for (int itr = 0;(itr <= fdec_max_itr) && ((fdec_early_term_en == 0)||(cw_fail == 1)); itr++)
     {
@@ -696,6 +695,7 @@ void ldpc_packet::ldpc_dec_bf(int p_num)
                 vec_copy(dec_di_blk,vn_flp_sel[p_num],i*cir_sz,0,cir_sz);
                 col_updt=i;
                 itr_updt = itr;
+                col_skip=false;
             }
             else
             {
@@ -711,75 +711,103 @@ void ldpc_packet::ldpc_dec_bf(int p_num)
                 }
 
                 // previous column is skipped
-                // read raw and current HD
-                vec_copy(dec_di_blk,vn_raw_sel, i*cir_sz,0,cir_sz);
-                vec_copy(dec_do_blk,vn_hd_sel, i*cir_sz,0,cir_sz);
-
-
-                //pipelines
-                for(int j=p_num;j>0;j--)
-                    vec_copy(vn_flp_sel[j-1],vn_flp_sel[j],0,0,cir_sz);
-
-
-                for(int j=0;j<cir_sz;j++)
-                {
-                    if(((vn_raw_sel[j]==vn_hd_sel[j]) && (vn_synd_cnt[j]>=flp_thrshd0[itr-1]))
-                    || ((vn_raw_sel[j]!=vn_hd_sel[j]) && (vn_synd_cnt[j]>=flp_thrshd1[itr-1])))
-                    {
-                        vn_flp_sel[0][j] = 1;
-                    }
+                if(col_skip)
+                    col_skip = false;   // Column skip feature OFF
+                else
+                    if(col_skip_itr==0)
+                        col_skip = false;// non-skip iterations
                     else
+                        if((col_skip_itr>0)&&(itr<col_skip_itr))
+                            col_skip = false;
+                        else
+                        {
+                            col_skip = true;
+                            //make a skip decision
+                            for(int j = 0; j < cir_sz; j++)
+                            {
+                                if(vn_synd_cnt[j] >= flp_thrshd1[itr - 1])
+                                    col_skip = false;
+                            }
+                        }
+               
+                //flip logics
+                if(col_skip == false)
+                {
+                    // read raw and current HD
+                    vec_copy(dec_di_blk,vn_raw_sel, i*cir_sz,0,cir_sz);
+                    vec_copy(dec_do_blk,vn_hd_sel, i*cir_sz,0,cir_sz);
+
+
+                    //pipelines
+                    for(int j=p_num;j>0;j--)
+                        vec_copy(vn_flp_sel[j-1],vn_flp_sel[j],0,0,cir_sz);
+                    for(int j=p_num;j>0;j--)
                     {
-                        vn_flp_sel[0][j] = 0;
+                        vn_flp_col[j] = vn_flp_col[j-1];
+                        vn_flp_itr[j] = vn_flp_itr[j-1];
+                    }
+                    vn_flp_col[0] = i;
+                    vn_flp_itr[0] = itr;
+
+
+                    for(int j=0;j<cir_sz;j++)
+                    {
+                        if(((vn_raw_sel[j]==vn_hd_sel[j]) && (vn_synd_cnt[j]>=flp_thrshd0[itr-1]))
+                        || ((vn_raw_sel[j]!=vn_hd_sel[j]) && (vn_synd_cnt[j]>=flp_thrshd1[itr-1])))
+                        {
+                            vn_flp_sel[0][j] = 1;
+                        }
+                        else
+                        {
+                            vn_flp_sel[0][j] = 0;
+                        }
+                    }
+
+                    col_updt = vn_flp_col[p_num];
+                    itr_updt = vn_flp_itr[p_num];
+
+                    for(int j=0;j<cir_sz;j++)
+                    {
+                        if(vn_flp_sel[p_num][j] == 1)
+                        {
+                            dec_do_blk[col_updt*cir_sz+j] = (dec_do_blk[col_updt*cir_sz+j]+1)%2;
+                        }
+                    }
+                }//non-skipped columns(flip logic)
+            }// non-1st iteration columns
+            fdec_cyc_org++;
+
+
+            if(col_skip==false)
+            {
+                fdec_cyc_num++;
+
+                for(e=mod2sparse_first_in_col(qc_bm,col_updt);!mod2sparse_at_end(e);e=mod2sparse_next_in_col(e))
+                {
+                    // barrel shift
+                    vec_shift(vn_flp_sel[p_num], cn_flp_sel,cir_sz,-1*e->shift);
+                    // read old syndrome
+                    vec_copy(cn_synd_mem,cn_synd_old,e->row*cir_sz,0,cir_sz);
+                    // update new syndrome
+                    vec_mod2_add(cn_flp_sel, cn_synd_old, cn_synd_new, cir_sz);
+                    // update syndrome memory
+                    vec_copy(cn_synd_new,cn_synd_mem,0,e->row*cir_sz,cir_sz);
+                }
+
+
+                if((itr>0) || (i==(bm_n-1)))
+                {
+                    synd_wt = vec_sum(cn_synd_mem,hm_m);
+                    if(synd_wt ==0)
+                    {
+                        cw_fail = 0;
+                        cnvg_itr = itr_updt;
+                        cnvg_lyr = col_updt;
+                        if(fdec_early_term_en ==1)
+                            break;
                     }
                 }
-
-                itr_updt = (i-p_num)>=0 ? itr : (itr-1);
-                col_updt = (i-p_num+bm_n)%bm_n;
-
-                for(int j=0;j<cir_sz;j++)
-                {
-                    if(vn_flp_sel[p_num][j] == 1)
-                    {
-                        dec_do_blk[col_updt*cir_sz+j] = (dec_do_blk[col_updt*cir_sz+j]+1)%2;
-                    }
-                }
             }
-
-            for(e=mod2sparse_first_in_col(qc_bm,col_updt);!mod2sparse_at_end(e);e=mod2sparse_next_in_col(e))
-            {
-                // barrel shift
-                vec_shift(vn_flp_sel[p_num], cn_flp_sel,cir_sz,-1*e->shift);
-                // read old syndrome
-                vec_copy(cn_synd_mem,cn_synd_old,e->row*cir_sz,0,cir_sz);
-                // update new syndrome
-                vec_mod2_add(cn_flp_sel, cn_synd_old, cn_synd_new, cir_sz);
-                // update syndrome memory
-                vec_copy(cn_synd_new,cn_synd_mem,0,e->row*cir_sz,cir_sz);
-            }
-
-
-            if((itr>0) || (i==(bm_n-1)))
-            {
-                synd_wt = vec_sum(cn_synd_mem,hm_m);
-                if(synd_wt ==0)
-                {
-                    cw_fail = 0;
-                    cnvg_itr = itr_updt;
-                    cnvg_lyr = col_updt;
-                    if(fdec_early_term_en ==1)
-                        break;
-                }
-            }
-        }
-
-        if (itr == 0)
-        {
-            init_synd_wt = vec_sum(cn_synd_mem, hm_m);
-            if (init_synd_wt < init_synd_wt_min)
-                init_synd_wt_min = init_synd_wt;
-            if (init_synd_wt > init_synd_wt_max)
-                init_synd_wt_max = init_synd_wt;
         }
     }
 
@@ -800,6 +828,8 @@ void ldpc_packet::ldpc_dec_bf(int p_num)
     for(int i=0;i<=p_num;i++)
         free(vn_flp_sel[i]);
     free(vn_flp_sel);
+    free(vn_flp_col);
+    free(vn_flp_itr);
     free(cn_flp_sel);
     free(cn_synd_new);
     free(cn_synd_old);
@@ -1068,23 +1098,9 @@ void ldpc_packet::ldpc_dec_layer()
     cw_miscorr = 0;
     vec_copy(dec_di_blk, dec_do_blk, 0, 0, hm_n);
 
-    if (reg_sdlite_llr_config)
-    {
-        llr_tbl[0] = reg_sdlite_llr0*pow(2, -1*finite_f_num);
-        llr_tbl[1] = reg_sdlite_llr1*pow(2, -1*finite_f_num);
-        llr_tbl[2] = reg_sdlite_llr2*pow(2, -1*finite_f_num);
-        llr_tbl[3] = reg_sdlite_llr3*pow(2, -1*finite_f_num);
-    }
-
-    printf("llr_config=%d, llr_tbl[0]=%f, llr_tbl[1]=%f, llr_tbl[2]=%f, llr_tbl[3]=%f\n", reg_sdlite_llr_config, llr_tbl[0], llr_tbl[1], llr_tbl[2], llr_tbl[3]);
-    
     for (int i = 0; i < bm_n; i++)
         for (int j=0; j<cir_sz; j++)
-        {
             cn_q_mem[i][j] = (float)llr_tbl[dec_di_blk[i*cir_sz+j]];
-            if (finite_mode == 1)
-                cn_q_mem[i][j] = (float)Sat_Quan((double)cn_q_mem[i][j], finite_q_max, finite_q_min, finite_q_num, finite_f_num);
-        }
 
     // iterative decoding
     for(int itr=0;(itr<=ldec_max_itr)&&((ldec_early_term_en==0)||(cw_fail==1));itr++)

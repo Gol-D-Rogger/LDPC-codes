@@ -520,7 +520,7 @@ void ldpc_packet::ldpc_dec_config(int max_fdec_itr, int max_tbfdec_itr, int fdec
     flp_thrshd0_w[6] = 5;
     flp_thrshd0_w[7] = 5;
     for (int i=8; i<fdec_max_itr;i++)
-        flp_thrshd0[i] = 4;
+        flp_thrshd0_w[i] = 4;
 
     flp_thrshd1_s[0] = 3;
     flp_thrshd1_s[1] = 2;

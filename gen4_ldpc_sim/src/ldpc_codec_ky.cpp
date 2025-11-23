@@ -15,17 +15,6 @@ typedef struct
     int energy;
 } mbf_candidate_t;
 
-static int compare_mbf_candidate_desc(const void *a, const void *b)
-{
-    const mbf_candidate_t *ca = (const mbf_candidate_t *)a;
-    const mbf_candidate_t *cb = (const mbf_candidate_t *)b;
-
-    if (cb->energy != ca->energy)
-        return (cb->energy - ca->energy);
-    return (ca->idx - cb->idx);
-}
-
-
 void ldpc_packet::ldpc_rd_phck(char *pchk_file, char *mask_file)
 {
     FILE *mask_fp;
@@ -84,7 +73,7 @@ void ldpc_packet::ldpc_rd_phck(char *pchk_file, char *mask_file)
 
             // check mask value
             if ((mask_matrix[i][j] == 2) && (col_shift != 0) ||
-                (mask_matrix[i][j] == 1) && (col_shift != drop_len % cir_sz))
+                (mask_matrix[i][j] == 1) && (col_shift != 0))
             {
                 printf("i = %d, j = %d\n", i, j);
                 printf("[LDPC] Error: mask or drop shift value is invalid\n");
@@ -113,7 +102,7 @@ void ldpc_packet::ldpc_rd_phck(char *pchk_file, char *mask_file)
                 {
                     if (mask_matrix[i][j] == 1)
                         for (int k = 0; k < mask_len; k++)
-                            mod2sparse_insert(qc_hm, i * cir_sz + k, j * cir_sz + (k + col_shift) % cir_sz);
+                            mod2sparse_insert(qc_hm, i * cir_sz + k + drop_len, j * cir_sz + (k + col_shift + drop_len) % cir_sz);
                     else if (mask_matrix[i][j] == 2)
                         for (int k = 0; k < drop_len; k++)
                             mod2sparse_insert(qc_hm, i * cir_sz + k, j * cir_sz + (k + col_shift) % cir_sz);
@@ -125,7 +114,7 @@ void ldpc_packet::ldpc_rd_phck(char *pchk_file, char *mask_file)
                 {
                     if (mask_matrix[i][j] == 1)
                         for (int k = 0; k < mask_len; k++)
-                            mod2sparse_insert(qc_hm, i * cir_sz + k - mask_len, j * cir_sz + (k + col_shift) % cir_sz);
+                            mod2sparse_insert(qc_hm, i * cir_sz + k - mask_len + drop_len, j * cir_sz + (k + col_shift + drop_len) % cir_sz);
                     else if (mask_matrix[i][j] == 2)
                         for (int k = 0; k < drop_len; k++)
                             mod2sparse_insert(qc_hm, i * cir_sz + k - mask_len, j * cir_sz + (k + col_shift) % cir_sz);
@@ -1462,7 +1451,7 @@ void ldpc_packet::ldpc_dec_bf(int p_num, int col_skip_itr)
                     vec_copy(cn_synd_mem,cn_synd_sel,e->row*cir_sz,0,cir_sz);
                     // mask
                     if (mask_matrix[e->row][e->col] == 1)
-                        vec_mask(cn_synd_sel,cir_sz - drop_len, drop_len, 0);
+                        vec_mask(cn_synd_sel, 0, drop_len, 0);
                     else if (mask_matrix[e->row][e->col] == 2)
                         vec_mask(cn_synd_sel,cir_sz - mask_len, mask_len, 0);
 
@@ -1546,9 +1535,9 @@ void ldpc_packet::ldpc_dec_bf(int p_num, int col_skip_itr)
                     vec_shift(vn_flp_sel[p_num], cn_flp_sel,cir_sz,-1*e->shift);
                     // mask
                     if (mask_matrix[e->row][e->col] == 1)
-                        vec_mask(cn_flp_sel,cir_sz - drop_len, drop_len, 0);
+                        vec_mask(cn_flp_sel, 0, drop_len, 0);
                     else if (mask_matrix[e->row][e->col] == 2)
-                        vec_mask(cn_flp_sel,cir_sz - mask_len, mask_len, 0);
+                        vec_mask(cn_flp_sel, cir_sz - mask_len, mask_len, 0);
 
                     // read old syndrome
                     vec_copy(cn_synd_mem,cn_synd_old,e->row*cir_sz,0,cir_sz);
@@ -1678,9 +1667,9 @@ void ldpc_packet::ldpc_dec_bf2(int p_num, int col_skip_itr)
                     vec_copy(cn_synd_mem,cn_synd_sel,e->row*cir_sz,0,cir_sz);
                     // mask
                     if (mask_matrix[e->row][e->col] == 1)
-                        vec_mask(cn_synd_sel,cir_sz - drop_len, drop_len, 0);
+                        vec_mask(cn_synd_sel, 0, drop_len, 0);
                     else if (mask_matrix[e->row][e->col] == 2)
-                        vec_mask(cn_synd_sel,cir_sz - mask_len, mask_len, 0);
+                        vec_mask(cn_synd_sel, cir_sz - mask_len, mask_len, 0);
 
                     vec_shift(cn_synd_sel, vn_synd_sel,cir_sz,e->shift);
                     vec_incr(vn_synd_cnt, vn_synd_sel,cir_sz);
@@ -1763,9 +1752,9 @@ void ldpc_packet::ldpc_dec_bf2(int p_num, int col_skip_itr)
                 vec_shift(vn_flp_sel, cn_flp_sel,cir_sz,-1*e->shift);
                 // mask
                 if (mask_matrix[e->row][e->col] == 1)
-                    vec_mask(cn_flp_sel,cir_sz - drop_len, drop_len, 0);
+                    vec_mask(cn_flp_sel, 0, drop_len, 0);
                 else if (mask_matrix[e->row][e->col] == 2)
-                    vec_mask(cn_flp_sel,cir_sz - mask_len, mask_len, 0);
+                    vec_mask(cn_flp_sel, cir_sz - mask_len, mask_len, 0);
 
                 vec_copy(cn_synd_mem,cn_synd_old,e->row*cir_sz,0,cir_sz);
                 vec_mod2_add(cn_flp_sel, cn_synd_old, cn_synd_new, cir_sz);
@@ -1955,7 +1944,7 @@ void ldpc_packet::ldpc_dec_layer()
 
                     // APP in CN order of previous layer
                     if (mask_matrix[e_pre->row][e_pre->col] == 1)
-                        cn_app_pre[i] =(i >= cir_sz - drop_len) ? cn_q_sel_pre[i] : cn_r_new_pre[i] + cn_q_sel_pre[i];
+                        cn_app_pre[i] =(i < drop_len) ? cn_q_sel_pre[i] : cn_r_new_pre[i] + cn_q_sel_pre[i];
                     else if (mask_matrix[e_pre->row][e_pre->col] == 2)
                         cn_app_pre[i] = (i >= cir_sz - mask_len) ? cn_q_sel_pre[i] : cn_r_new_pre[i] + cn_q_sel_pre[i];
                     else
@@ -2099,7 +2088,7 @@ void ldpc_packet::ldpc_dec_layer()
                 vec_shift(vn_dec_hd, cn_dec_hd, cir_sz, -1 * e->shift);
                 // mask
                 if (mask_matrix[e->row][e->col] == 1)
-                    vec_mask(cn_dec_hd, cir_sz - drop_len, drop_len, 0);
+                    vec_mask(cn_dec_hd, 0, drop_len, 0);
                 else if (mask_matrix[e->row][e->col] == 2)
                     vec_mask(cn_dec_hd, cir_sz - mask_len, mask_len, 0);
                 vec_mod2_add(cn_dec_hd, layer_synd, layer_synd, cir_sz);
@@ -2114,7 +2103,7 @@ void ldpc_packet::ldpc_dec_layer()
 
                     // Q -= Rold
                     if (mask_matrix[e->row][e->col] == 1)
-                        cn_q_updt_cur[i] = (i >= cir_sz - drop_len) ? cn_app_cur[i] : cn_app_cur[i] - cn_r_old_cur[i];
+                        cn_q_updt_cur[i] = (i < drop_len) ? cn_app_cur[i] : cn_app_cur[i] - cn_r_old_cur[i];
                     else if (mask_matrix[e->row][e->col] == 2)
                         cn_q_updt_cur[i] = (i >= cir_sz - mask_len) ? cn_app_cur[i] : cn_app_cur[i] - cn_r_old_cur[i];
                     else
@@ -2124,7 +2113,7 @@ void ldpc_packet::ldpc_dec_layer()
                         cn_q_updt_cur[i] = (float)Sat_Quan((double)cn_q_updt_cur[i], finite_q_max, finite_q_min, finite_q_num, finite_f_num);
 
                     // update C
-                    if ((mask_matrix[e->row][e->col] == 1) && (i >= cir_sz - drop_len))
+                    if ((mask_matrix[e->row][e->col] == 1) && (i < drop_len))
                     {
                         sign_tmp = 1;
                         val_tmp = 100000;
@@ -2293,208 +2282,6 @@ void ldpc_packet::ldpc_dec_layer()
     free(vn_dec_hd);
 } // ldpc_dec_layer
 
-// layered belief propagation decoder
-void ldpc_packet::ldpc_dec_lbp()
-{
-#ifdef _LDPC_DEBUG_DUMP
-    FILE *cfp, *sfp, *hdfp, *lfp;
-    int stmp, vtmp;
-    char cmem_dump[50] = "./output/rdec_cmem_dump.txt";
-    char stot_dump[50] = "./output/rdec_stot_dump.txt";
-    char hdmem_dump[50] = "./output/rdec_hdmem_dump.txt";
-    char log_dump[50] = "./output/rdec_log_dump.txt";
-    cfp = fopen(cmem_dump, "w");
-    sfp = fopen(stot_dump, "w");
-    hdfp = fopen(hdmem_dump, "w");
-    lfp = fopen(log_dump, "w");
-#endif
-
-    mod2entry *e;
-    char *dec_init;
-    int cir_cnt;
-    int hd_init;
-
-    float **cn_r_mem;       // C2V MSG memory
-    float **vn_app_mem;     // posterior probability memory in VN order
-    float **cn_q_mem;       // V2C MSG memory in CN order
-    float *cn_c_prod;  // C prod of V2C MSG in CN order
-
-    char *layer_synd;
-    char *cn_dec_hd;
-    char *vn_dec_hd;
-    int hd_updated;
-    int layer_synd_wt;
-    int synd_pass_cnt = 0;
-    int hd_stable_cnt = 0;
-    int rowoffset;
-    
-    // allocation
-    dec_init = (char *)calloc(bm_n, sizeof(*dec_init));
-    vec_set(dec_init, bm_n);
-
-    cn_c_prod = (float *)calloc(cir_sz, sizeof(*cn_c_prod));
-
-    cn_r_mem = (float **)calloc(bm_n*col_wt, sizeof(*cn_r_mem));
-    for (int i = 0; i < bm_n*col_wt; i++)
-        cn_r_mem[i] = (float *)calloc(cir_sz, sizeof(*cn_r_mem[i]));
-
-    cn_q_mem = (float **)calloc(bm_n*col_wt, sizeof(*cn_q_mem));
-    for (int i = 0; i < bm_n*col_wt; i++)
-        cn_q_mem[i] = (float *)calloc(cir_sz, sizeof(*cn_q_mem[i]));
-    
-    vn_app_mem = (float **)calloc(bm_n, sizeof(*vn_app_mem));
-    for (int i = 0; i < bm_n; i++)
-        vn_app_mem[i] = (float *)calloc(cir_sz, sizeof(*vn_app_mem[i]));
-
-    layer_synd = (char *)calloc(cir_sz, sizeof(*layer_synd));
-    vn_dec_hd = (char *)calloc(cir_sz, sizeof(*vn_dec_hd));
-    cn_dec_hd = (char *)calloc(cir_sz, sizeof(*cn_dec_hd));
-
-    // initialize decoder
-    cw_fail = 1;
-    cw_miscorr = 0;
-    vec_copy(dec_di_blk, dec_do_blk, 0, 0, hm_n + mask_len);
-
-    for (int i = 0; i < bm_n; i++)
-        for (int j=0; j<cir_sz; j++)
-            vn_app_mem[i][j] = (float)llr_tbl[dec_di_blk[i*cir_sz+j]];
-
-    // iterative decoding
-    for(int itr=0; itr<ldec_max_itr && ((ldec_early_term_en==0)||(cw_fail==1));itr++)
-    {
-        // Q sign mem index
-        cir_cnt = 0;
-
-        // layer decoding
-        for(int layer=0; layer < bm_m &&((ldec_early_term_en==0)||(cw_fail==1)); layer++)
-        {
-            // initilize HD mem
-            hd_init = (vec_sum(dec_init, bm_n)!=0);
-
-            for (int i = 0; i < cir_sz; i++)
-                cn_c_prod[i] = 1.0f;
-
-            rowoffset = 0;
-
-            // Earlier termination init
-            hd_updated = 0;
-            vec_clr(layer_synd, cir_sz);
-
-            // Per circulant of the layer
-            for (e = mod2sparse_first_in_row(qc_bm, layer);
-                !mod2sparse_at_end(e);
-                e = mod2sparse_next_in_row(e))
-            {
-                for (int i = 0; i < cir_sz; i++)
-                {
-                    cn_q_mem[cir_cnt][i] = vn_app_mem[e->col][(i + e->shift)%cir_sz] - cn_r_mem[cir_cnt][i];
-
-                    // Quantization
-                    if (finite_mode == 1)
-                        cn_q_mem[cir_cnt][i] = (float)Sat_Quan((double)cn_q_mem[cir_cnt][i],finite_q_max, finite_q_min, finite_q_num, finite_f_num);
-                    
-                    cn_c_prod[i] *= tanh(cn_q_mem[cir_cnt][i] / 2);
-                } // per Node
-
-                cir_cnt++;
-                rowoffset++;
-            }
-
-            cir_cnt -= rowoffset;
-            for (e = mod2sparse_first_in_row(qc_bm, layer);
-                !mod2sparse_at_end(e) && ((ldec_early_term_en == 0)||(cw_fail == 1));
-                e = mod2sparse_next_in_row(e))
-            {
-                for (int i = 0; i < cir_sz; i++)
-                {
-                    // update R
-                    cn_r_mem[cir_cnt][i] = 2 * atanh(cn_c_prod[i] / tanh(cn_q_mem[cir_cnt][i] / 2));
-                    cn_r_mem[cir_cnt][i] = (cn_r_mem[cir_cnt][i] > 3.875) ? 3.875 : cn_r_mem[cir_cnt][i];
-                    cn_r_mem[cir_cnt][i] = (cn_r_mem[cir_cnt][i] < -3.875) ? -3.875 : cn_r_mem[cir_cnt][i];
-
-                    if (finite_mode == 1)
-                        cn_r_mem[cir_cnt][i] = (float)Sat_Quan((double)cn_r_mem[cir_cnt][i], finite_r_max, finite_r_min, finite_r_num, finite_f_num);
-                
-                    // update APP
-                    vn_app_mem[e->col][(i + e->shift)%cir_sz] = cn_r_mem[cir_cnt][i] + cn_q_mem[cir_cnt][i];
-
-                    if (finite_mode == 1)
-                        vn_app_mem[e->col][(i + e->shift)%cir_sz] = (float)Sat_Quan((double)vn_app_mem[e->col][(i + e->shift)%cir_sz], finite_q_max, finite_q_min, finite_q_num, finite_f_num);
-
-                    vn_dec_hd[i] = vn_app_mem[e->col][(i + e->shift)%cir_sz] >= 0 ? 0 : 1;  
-                }
-
-                if (dec_init[e->col] == 1)
-                {
-                    dec_init[e->col] = 0;
-                }
-
-                // 1. check if HD updated
-                if (hd_updated == 0)
-                    if (vec_cmp(dec_do_blk, vn_dec_hd, e->col*cir_sz, 0, cir_sz) == 1)
-                        hd_updated = 1;
-
-                vec_copy(vn_dec_hd, dec_do_blk, 0, e->col*cir_sz, cir_sz);
-                // 2. accumulate syndrome
-                vec_shift(vn_dec_hd, cn_dec_hd, cir_sz, -1 * e->shift);
-                vec_mod2_add(cn_dec_hd, layer_synd, layer_synd, cir_sz);
-
-                cir_cnt++;
-            } // per circulant
-
-            // check converage checking
-            layer_synd_wt = vec_sum(layer_synd, cir_sz);
-            if (hd_init == 1)
-            {
-                hd_stable_cnt = 0;
-                synd_pass_cnt = 0;
-            }
-            else if ((hd_updated == 0) && (layer_synd_wt == 0))
-            {
-                hd_stable_cnt++;
-                synd_pass_cnt++;
-            }
-            else
-            {
-                hd_stable_cnt = 0;
-                synd_pass_cnt = 0;
-            }
-
-            if ((synd_pass_cnt >= bm_m) && (hd_stable_cnt >= bm_m -1) )
-            {
-                cw_fail = 0;
-                cnvg_itr = itr;
-                cnvg_lyr = layer;
-            }
-        } // per layer
-    } // per iteration
-
-    if ((cw_fail == 1) || (ldec_early_term_en == 0))
-    {
-        cnvg_itr = ldec_max_itr - 1;
-        cnvg_lyr = bm_m - 1;
-    }
-
-    // free all
-    free(dec_init);
-    for (int i=0; i<bm_n*col_wt; i++)
-        free(cn_r_mem[i]);
-    free(cn_r_mem);
-    for (int i=0; i<bm_n; i++)
-        free(vn_app_mem[i]);
-    free(vn_app_mem);
-    for (int i=0; i<bm_n*col_wt; i++)
-        free(cn_q_mem[i]);
-    free(cn_q_mem);
-
-    free(cn_c_prod);
-
-    free(layer_synd);
-    free(cn_dec_hd);
-    free(vn_dec_hd);
-} // ldpc_dec_lbp
-
-
 void ldpc_packet::ldpc_dec_skip()
 {
     char *dec_do_blk_temp;
@@ -2531,649 +2318,3 @@ int ldpc_packet::ldpc_synd(char *cw)
 
     return synd_fail;
 }
-
-void ldpc_packet::ldpc_dec_ppbf(int p_num, double *p)
-{
-    // Rename to PGDBF for clarity
-    char *hard = dec_do_blk;  // Current hard decisions (will be modified)
-    char *hard0;              // Initial hard decisions (saved)
-    char *syndrome;           // Syndrome vector
-    char *Ej;                  // Energy function vector
-    int *flipPos;             // Positions to flip
-    
-    // Allocate memory
-    hard0 = (char *)calloc(hm_n, sizeof(*hard0));
-    syndrome = (char *)calloc(hm_m, sizeof(*syndrome));
-    Ej = (char *)calloc(hm_n, sizeof(*Ej));
-    flipPos = (int *)calloc(hm_n, sizeof(*flipPos)); // Maximum possible positions
-    
-    cw_fail = 1;
-    cw_miscorr = 0;
-    fina_synd_wt = 0;
-    
-    // Initialize: hard = initial decisions, save hard0
-    vec_copy(dec_di_blk, hard, 0, 0, hm_n);    // hard = initial input
-    vec_copy(dec_di_blk, hard0, 0, 0, hm_n);   // hard0 = saved initial input
-    
-    int iteration = 0;
-    
-    // Calculate initial syndrome
-    mod2sparse_mulvec(qc_hm, hard, syndrome);
-    int syndrome_weight = vec_sum(syndrome, hm_m);
-    
-    while ((syndrome_weight != 0) && (iteration < fdec_max_itr))
-    {
-        iteration++;
-        
-        // Calculate energy function: Ej = mod(hard+hard0, 2) + syndrome*H
-        // First part: mod(hard+hard0, 2)
-        for (int j = 0; j < hm_n; j++) {
-            Ej[j] = (hard[j] + hard0[j]) % 2;
-        }
-        
-        // Second part: syndrome*H 
-        // For each column j in H, calculate dot product with syndrome
-        mod2entry *e;
-        for (int j = 0; j < hm_n; j++) {
-            int col_product = 0;
-            // Iterate through non-zero entries in column j
-            for (e = mod2sparse_first_in_col(qc_hm, j); 
-                 !mod2sparse_at_end(e); 
-                 e = mod2sparse_next_in_col(e)) {
-                col_product += syndrome[e->row];
-            }
-            col_product = col_product % 2;
-            
-            // Add to energy function
-            Ej[j] += col_product;
-        }
-        
-        // Find maximum value in Ej
-        int bmax = vec_max(Ej, hm_n);
-        
-        // Find all positions where Ej == bmax
-        int num_flip_pos = vec_find(Ej, hm_n, bmax, flipPos);
-        
-        if (num_flip_pos > 0) {
-            // Apply probabilistic flipping
-            for (int k = 0; k < num_flip_pos; k++) {
-                double rand_val = rand_uniform();
-                if (rand_val < p[0]) { // Use first probability value
-                    int pos = flipPos[k];
-                    hard[pos] = (hard[pos] + 1) % 2; // Flip the bit
-                }
-            }
-        }
-        
-        // Recalculate syndrome
-        mod2sparse_mulvec(qc_hm, hard, syndrome);
-        synd rome_weight = vec_sum(syndrome, hm_m);
-        
-        // Check for convergence
-        if (syndrome_weight == 0) {
-            cw_fail = 0;
-            cnvg_itr = (iteration > 0) ? (iteration - 1) : 0;
-            cnvg_lyr = 0; // Not applicable for PGDBF
-            break;
-        }
-    }
-    
-    if (cw_fail == 1) {
-        cnvg_itr = (fdec_max_itr > 0) ? (fdec_max_itr - 1) : 0;
-        cnvg_lyr = 0;
-        fina_synd_wt = syndrome_weight;
-    }
-    
-    // Copy result to output
-    vec_copy(hard, dec_do_blk, 0, 0, hm_n);
-    
-    // Free memory
-    free(hard0);
-    free(syndrome);
-    free(Ej);
-    free(flipPos);
-    
-#ifdef _LDPC_DEBUG
-    if (cw_fail == 0) {
-        printf("[LDPC DEBUG] PGDBF decoding success after %d iterations.\n", cnvg_itr + 1);
-    } else {
-        printf("[LDPC DEBUG] PGDBF decoding failed after %d iterations, final syndrome weight: %d\n",
-               cnvg_itr + 1, fina_synd_wt);
-    }
-#endif
-}
-
-/*
-void ldpc_packet::ldpc_dec_pgdbf(double p_flip)
-{
-    mod2entry *e;
-    int synd_wt;
-    // int pipe_len = p_num < 0 ? 0 : p_num;
-    int pipe_len = 0;
-
-    char *cn_synd_mem = (char *)calloc(hm_m + mask_len, sizeof(*cn_synd_mem));
-    char *cn_synd_sel = (char *)calloc(cir_sz, sizeof(*cn_synd_sel));
-    char *vn_synd_sel = (char *)calloc(cir_sz, sizeof(*vn_synd_sel));
-    char *vn_synd_cnt = (char *)calloc(cir_sz, sizeof(*vn_synd_cnt));
-    char *vn_hd_sel = (char *)calloc(cir_sz, sizeof(*vn_hd_sel));
-    char *vn_raw_sel = (char *)calloc(cir_sz, sizeof(*vn_raw_sel));
-    int *vn_energy = (int *)calloc(cir_sz, sizeof(*vn_energy));
-    char *cn_flp_sel = (char *)calloc(cir_sz, sizeof(*cn_flp_sel));
-    char *cn_synd_old = (char *)calloc(cir_sz, sizeof(*cn_synd_old));
-    char *cn_synd_new = (char *)calloc(cir_sz, sizeof(*cn_synd_new));
-
-    char **flip_queue = (char **)calloc(pipe_len + 1, sizeof(*flip_queue));
-    int *col_queue = (int *)calloc(pipe_len + 1, sizeof(*col_queue));
-    int *itr_queue = (int *)calloc(pipe_len + 1, sizeof(*itr_queue));
-    for (int i = 0; i <= pipe_len; ++i) {
-        flip_queue[i] = (char *)calloc(cir_sz, sizeof(*flip_queue[i]));
-        col_queue[i] = -1;
-        itr_queue[i] = 0;
-    }
-
-    if (!cn_synd_mem || !cn_synd_sel || !vn_synd_sel || !vn_synd_cnt ||
-        !vn_hd_sel || !vn_raw_sel || !vn_energy || !cn_flp_sel ||
-        !cn_synd_old || !cn_synd_new || !flip_queue || !col_queue || !itr_queue) {
-        printf("[LDPC] Memory allocation failure in ldpc_dec_pgdbf.\n");
-        exit(1);
-    }
-
-    cw_fail = 1;
-    cw_miscorr = 0;
-    fina_synd_wt = 0;
-    fdec_cyc_num = 0;
-    fdec_cyc_org = 0;
-
-    vec_copy(dec_di_blk, dec_do_blk, 0, 0, hm_n + mask_len);
-
-    vec_clr(cn_synd_mem, hm_m + mask_len);
-    for (int col = 0; col < bm_n; ++col) {
-        vec_copy(dec_do_blk, vn_hd_sel, col * cir_sz, 0, cir_sz);
-        for (e = mod2sparse_first_in_col(qc_bm, col); !mod2sparse_at_end(e); e = mod2sparse_next_in_col(e)) {
-            vec_shift(vn_hd_sel, cn_flp_sel, cir_sz, -1 * e->shift);
-            if (mask_matrix[e->row][e->col] == 1)
-                vec_mask(cn_flp_sel, cir_sz - drop_len, drop_len, 0);
-            else if (mask_matrix[e->row][e->col] == 2)
-                vec_mask(cn_flp_sel, cir_sz - mask_len, mask_len, 0);
-
-            vec_copy(cn_synd_mem, cn_synd_old, e->row * cir_sz, 0, cir_sz);
-            vec_mod2_add(cn_flp_sel, cn_synd_old, cn_synd_new, cir_sz);
-            vec_copy(cn_synd_new, cn_synd_mem, 0, e->row * cir_sz, cir_sz);
-        }
-    }
-
-    synd_wt = vec_sum(cn_synd_mem, hm_m + mask_len);
-    if (synd_wt == 0) {
-        cw_fail = 0;
-        cnvg_itr = 0;
-        cnvg_lyr = 0;
-    }
-
-    for (int itr = 0; itr < fdec_max_itr && cw_fail; ++itr) {
-        int steps = bm_n + ((pipe_len > 0) ? pipe_len : 0);
-        for (int step = 0; step < steps && cw_fail; ++step) {
-            bool have_col = (step < bm_n);
-            int col = have_col ? step : -1;
-
-            for (int stage = pipe_len; stage > 0; --stage) {
-                memcpy(flip_queue[stage], flip_queue[stage - 1], cir_sz);
-                col_queue[stage] = col_queue[stage - 1];
-                itr_queue[stage] = itr_queue[stage - 1];
-            }
-            memset(flip_queue[0], 0, cir_sz);
-            col_queue[0] = col;
-            itr_queue[0] = itr;
-
-            if (have_col) {
-                fdec_cyc_org++;
-                vec_clr(vn_synd_cnt, cir_sz);
-                for (e = mod2sparse_first_in_col(qc_bm, col); !mod2sparse_at_end(e); e = mod2sparse_next_in_col(e)) {
-                    vec_copy(cn_synd_mem, cn_synd_sel, e->row * cir_sz, 0, cir_sz);
-                    if (mask_matrix[e->row][e->col] == 1)
-                        vec_mask(cn_synd_sel, cir_sz - drop_len, drop_len, 0);
-                    else if (mask_matrix[e->row][e->col] == 2)
-                        vec_mask(cn_synd_sel, cir_sz - mask_len, mask_len, 0);
-                    vec_shift(cn_synd_sel, vn_synd_sel, cir_sz, e->shift);
-                    vec_incr(vn_synd_cnt, vn_synd_sel, cir_sz);
-                }
-
-                vec_copy(dec_do_blk, vn_hd_sel, col * cir_sz, 0, cir_sz);
-                vec_copy(dec_di_blk, vn_raw_sel, col * cir_sz, 0, cir_sz);
-
-                int max_energy = -1;
-                for (int j = 0; j < cir_sz; ++j) {
-                    int mismatch = (vn_hd_sel[j] != vn_raw_sel[j]) ? 1 : 0;
-                    int energy = mismatch + (int)vn_synd_cnt[j];
-                    vn_energy[j] = energy;
-                    if (energy > max_energy)
-                        max_energy = energy;
-                }
-
-                if (max_energy > 0) {
-                    for (int j = 0; j < cir_sz; ++j) {
-                        if (vn_energy[j] == max_energy && rand_uniform() < p_flip) {
-                            flip_queue[0][j] = 1;
-                        }
-                    }
-                }
-            } else {
-                col_queue[0] = -1;
-            }
-
-            int apply_col = col_queue[pipe_len];
-            bool flipped_now = false;
-            if (apply_col >= 0) {
-                char *flips = flip_queue[pipe_len];
-                for (int j = 0; j < cir_sz; ++j) {
-                    if (flips[j]) {
-                        dec_do_blk[apply_col * cir_sz + j] ^= 1;
-                        flipped_now = true;
-                    }
-                }
-
-                if (flipped_now) {
-                    for (e = mod2sparse_first_in_col(qc_bm, apply_col); !mod2sparse_at_end(e); e = mod2sparse_next_in_col(e)) {
-                        vec_shift(flip_queue[pipe_len], cn_flp_sel, cir_sz, -1 * e->shift);
-                        if (mask_matrix[e->row][e->col] == 1)
-                            vec_mask(cn_flp_sel, cir_sz - drop_len, drop_len, 0);
-                        else if (mask_matrix[e->row][e->col] == 2)
-                            vec_mask(cn_flp_sel, cir_sz - mask_len, mask_len, 0);
-                        vec_copy(cn_synd_mem, cn_synd_old, e->row * cir_sz, 0, cir_sz);
-                        vec_mod2_add(cn_flp_sel, cn_synd_old, cn_synd_new, cir_sz);
-                        vec_copy(cn_synd_new, cn_synd_mem, 0, e->row * cir_sz, cir_sz);
-                    }
-                    fdec_cyc_num++;
-                }
-
-                synd_wt = vec_sum(cn_synd_mem, hm_m + mask_len);
-                if (synd_wt == 0) {
-                    cw_fail = 0;
-                    cnvg_itr = itr_queue[pipe_len];
-                    cnvg_lyr = apply_col;
-                }
-
-                col_queue[pipe_len] = -1;
-            }
-        }
-    }
-
-    if (cw_fail) {
-        cnvg_itr = fdec_max_itr > 0 ? (fdec_max_itr - 1) : 0;
-        cnvg_lyr = bm_n > 0 ? (bm_n - 1) : 0;
-        fina_synd_wt = vec_sum(cn_synd_mem, hm_m + mask_len);
-    }
-
-    for (int i = 0; i <= pipe_len; ++i)
-        free(flip_queue[i]);
-    free(flip_queue);
-    free(col_queue);
-    free(itr_queue);
-    free(cn_synd_mem);
-    free(cn_synd_sel);
-    free(vn_synd_sel);
-    free(vn_synd_cnt);
-    free(vn_hd_sel);
-    free(vn_raw_sel);
-    free(vn_energy);
-    free(cn_flp_sel);
-    free(cn_synd_old);
-    free(cn_synd_new);
-
-#ifdef _LDPC_DEBUG
-    if (!cw_fail)
-        printf("[LDPC DEBUG] PGDBF layered decoding success.");
-    else
-        printf("[LDPC DEBUG] PGDBF layered decoding failed, final syndrome weight: %d", fina_synd_wt);
-#endif
-}
-*/
-
-void ldpc_packet::ldpc_dec_pgdbf(double p_flip)
-{
-    char *hard = dec_do_blk;
-    char *hard0 = (char *)calloc(hm_n, sizeof(*hard0));
-    char *syndrome = (char *)calloc(hm_m, sizeof(*syndrome));
-    int  *energy = (int *)calloc(hm_n, sizeof(*energy));
-    int  *flip_pos = (int *)calloc(hm_n, sizeof(*flip_pos));
-
-    if (!hard0 || !syndrome || !energy || !flip_pos) {
-        printf("[LDPC] Memory allocation failure in ldpc_dec_pgdbf_simple\n");
-        exit(1);
-    }
-
-    cw_fail = 1;
-    cw_miscorr = 0;
-    fina_synd_wt = 0;
-    fdec_cyc_num = 0;
-    fdec_cyc_org = 0;
-
-    vec_copy(dec_di_blk, hard, 0, 0, hm_n);
-    vec_copy(dec_di_blk, hard0, 0, 0, hm_n);
-
-    mod2sparse_mulvec(qc_hm, hard, syndrome);
-    int syndrome_weight = vec_sum(syndrome, hm_m);
-
-    int iteration = 0;
-
-    if (syndrome_weight == 0) {
-        cw_fail = 0;
-        cnvg_itr = 0;
-        cnvg_lyr = 0;
-    } else {
-        while (syndrome_weight != 0 && iteration < fdec_max_itr) {
-            iteration++;
-            fdec_cyc_org++;
-
-        int max_energy = -1;
-        int num_flip = 0;
-
-        for (int j = 0; j < hm_n; j++) {
-            int column_sum = 0;
-            for (mod2entry *e = mod2sparse_first_in_col(qc_hm, j);
-                 !mod2sparse_at_end(e);
-                 e = mod2sparse_next_in_col(e)) {
-                column_sum += syndrome[e->row];
-            }
-
-            int first_part = (hard[j] + hard0[j]) & 1;
-            int ej = first_part + column_sum;
-            energy[j] = ej;
-
-            if (ej > max_energy) {
-                max_energy = ej;
-                flip_pos[0] = j;
-                num_flip = 1;
-            } else if (ej == max_energy) {
-                flip_pos[num_flip++] = j;
-            }
-        }
-
-        bool flipped = false;
-        for (int i = 0; i < num_flip; i++) {
-            if (rand_uniform() < p_flip) {
-                int pos = flip_pos[i];
-                hard[pos] ^= 1;
-                flipped = true;
-            }
-        }
-        if (flipped) fdec_cyc_num++;
-
-            mod2sparse_mulvec(qc_hm, hard, syndrome);
-            syndrome_weight = vec_sum(syndrome, hm_m);
-            if (syndrome_weight == 0) {
-                cw_fail = 0;
-                cnvg_itr = iteration - 1;
-                cnvg_lyr = 0;
-                break;
-            }
-        }
-
-        if (cw_fail) {
-            cnvg_itr = (fdec_max_itr > 0) ? (fdec_max_itr - 1) : 0;
-            cnvg_lyr = 0;
-            fina_synd_wt = syndrome_weight;
-        }
-    }
-
-    free(hard0);
-    free(syndrome);
-    free(energy);
-    free(flip_pos);
-}
-
-void ldpc_packet::ldpc_dec_mbf(int Fx, int threshold)
-{
-    char *hard = dec_do_blk;
-    char *syndrome = (char *)calloc(hm_m, sizeof(*syndrome));
-    mbf_candidate_t *candidates = (mbf_candidate_t *)calloc(hm_n, sizeof(*candidates));
-
-    if (!syndrome || !candidates) {
-        printf("[LDPC] Memory allocation failure in ldpc_dec_mbf\n");
-        exit(1);
-    }
-
-    cw_fail = 1;
-    cw_miscorr = 0;
-    fina_synd_wt = 0;
-    fdec_cyc_num = 0;
-    fdec_cyc_org = 0;
-
-    vec_copy(dec_di_blk, hard, 0, 0, hm_n);
-
-    mod2sparse_mulvec(qc_hm, hard, syndrome);
-    int syndrome_weight = vec_sum(syndrome, hm_m);
-
-    int iteration = 0;
-
-    while (syndrome_weight != 0 && iteration < fdec_max_itr) {
-        iteration++;
-        fdec_cyc_org++;
-
-        int candidate_count = 0;
-
-        for (int j = 0; j < hm_n; j++) {
-            int energy_val = 0;
-            for (mod2entry *e = mod2sparse_first_in_col(qc_hm, j);
-                 !mod2sparse_at_end(e);
-                 e = mod2sparse_next_in_col(e)) {
-                energy_val += ((int)syndrome[e->row] * 2) - 1;
-            }
-
-            if (energy_val > threshold) {
-                candidates[candidate_count].idx = j;
-                candidates[candidate_count].energy = energy_val;
-                candidate_count++;
-            }
-        }
-
-        bool flipped = false;
-        if (candidate_count > 0) {
-            int max_flips = (Fx > 0) ? Fx : candidate_count;
-            int flips_to_apply = candidate_count;
-
-            if (candidate_count > max_flips) {
-                qsort(candidates, candidate_count, sizeof(*candidates), compare_mbf_candidate_desc);
-                flips_to_apply = max_flips;
-            }
-
-            for (int i = 0; i < flips_to_apply; i++) {
-                int pos = candidates[i].idx;
-                hard[pos] ^= 1;
-                flipped = true;
-            }
-        }
-
-        if (flipped)
-            fdec_cyc_num++;
-
-        mod2sparse_mulvec(qc_hm, hard, syndrome);
-        syndrome_weight = vec_sum(syndrome, hm_m);
-        if (syndrome_weight == 0) {
-            cw_fail = 0;
-            cnvg_itr = (iteration > 0) ? (iteration - 1) : 0;
-            cnvg_lyr = 0;
-            break;
-        }
-    }
-
-    if (cw_fail) {
-        cnvg_itr = (fdec_max_itr > 0) ? (fdec_max_itr - 1) : 0;
-        cnvg_lyr = 0;
-        fina_synd_wt = syndrome_weight;
-    }
-
-    free(syndrome);
-    free(candidates);
-
-#ifdef _LDPC_DEBUG
-    if (!cw_fail)
-        printf("[LDPC DEBUG] MBF decoding success after %d iterations.\n", cnvg_itr + 1);
-    else
-        printf("[LDPC DEBUG] MBF decoding failed after %d iterations, final syndrome weight: %d\n",
-               cnvg_itr + 1, fina_synd_wt);
-#endif
-}
-
-/*
-ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input, s_ldpc_decoder_parameters ldpc_decoder_parameters, s_h_matrix h_matrix)
-{
-    int VERBOSITY = 0;
-    int MAX_ERROR_COUNT = 4095;
-    int i;
-    int j;
-    int k;
-    int m;
-    int iteration = 0;
-    int clock_cycles = 0;
-    int syndrome_weight;
-    int weight;
-    int decode_mode;
-    int decode_mode2;
-    bool post_process = 0;
-    bool post_process_2 = 0;
-    bool do_post_flipped = 0;
-    bool do_post_unflipped = 0;
-    bool give_up = 0;
-    bool finished = 0;
-    bool post_processing = 0;
-    bool qc_parity_en;
-    bool disable_update;
-    bool hamming_weight_le_circ_thr;
-    bool hamming_weight_lt_circ_thr;
-    bool post_trigger;
-    bool post_trigger2;
-    bool flipped_prev;
-    bool flipped;
-    bool be_aggressive;
-    bool prng_post_process;
-    bool prng_post_process2;
-    s_hard_codeword hard_codeword;
-    s_hard_codeword soft_codeword;
-    s_variable_nodes vn;
-    s_check_node cn;
-    s_check_node cn_shifted;
-    s_likelihood_levels likelihood_levels;
-    s_256_bits prng_256;
-    s_256_bits prng_512;
-    int prng_init[32];
-    int syndrome_weight_delayed;
-
-    int syndrome_weight_r;
-    bool do_not_use_this_bit;
-    bool look;
-
-    prng_init[31] = 0x083d;
-    prng_init[30] = 0x3214;
-    prng_init[29] = 0xa8a1;
-    prng_init[28] = 0x5327;
-    prng_init[27] = 0x71bc;
-    prng_init[26] = 0x3edb;
-    prng_init[25] = 0xba50;
-    prng_init[24] = 0xc946;
-    prng_init[23] = 0x4c9a;
-    prng_init[22] = 0x0b73;
-    prng_init[21] = 0xef18;
-    prng_init[20] = 0x31ee;
-    prng_init[19] = 0xf2b2;
-    prng_init[18] = 0xd98f;
-    prng_init[17] = 0x89f9;
-    prng_init[16] = 0x9375;
-    prng_init[15] = 0x043d;
-    prng_init[14] = 0x6214;
-    prng_init[13] = 0xa8a1;
-    prng_init[12] = 0x5d27;
-    prng_init[11] = 0x71cc;
-    prng_init[10] = 0x2edb;
-    prng_init[9]  = 0xb550;
-    prng_init[8]  = 0xc646;
-    prng_init[7]  = 0x8c9a;
-    prng_init[6]  = 0x1b73;
-    prng_init[5]  = 0xef08;
-    prng_init[4]  = 0x30ee;
-    prng_init[3]  = 0xf7b2;
-    prng_init[2]  = 0xda8f;
-    prng_init[1]  = 0x49f9;
-    prng_init[0]  = 0x9365;
-
-    for (j=0; j< h_matrix.cols; j++)
-    {
-        for (k=0; k<h_matrix.bits; k++)
-        {
-            hard_codeword.c[j].b[k] = ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_hard;
-            vn.c[j].b[k].bit_hard = hard_codeword.c[j].b[k];
-            soft_codeword.c[j].b[k] = ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_questionable;
-            vn.c[j].b[k].flipped = 0;
-        }
-    }
-
-    CN = f_check_nodes(h_matrix, hard_codeword);
-    if (VERBOSITY > 0)
-    {
-        printf("[LDPC DEBUG] Starting BF decoding with max %d iterations.\n", fdec_max_itr);
-        f_print_hard_codeword(hard_codeword, h_matrix.cols, h_matrix.bits);
-        printf("### DECODER C++: H MATRIX:\n");
-        f_print_h_matrix(h_matrix);
-        printf("### DECODER C++: AFTER SYNDROME CHECK, CODEWORD HAS CHECK NODES:\n");
-        f_print_check_nodes(cn, h_matrix.rows, h_matrix.bits);
-    }
-
-    for (i=0; i<h_matrix.rows; i++)
-        for (j=0; j<h_matrix.bits; j++)
-            cn_shifted.r[i].b[k] = 0;
-    syndrome_weight = f_check_node_weight(h_matrix, cn);
-    clock_cycles = (2 * h_matrix.rows) + 1;
-    if (syndrome_weight == 0)
-        finished = 1;
-    ldpc_decoder_output.syndrome_weight_before = syndrome_weight;
-    syndrome_weight_delayed = syndrome_weight;
-    ldpc_decoder_output.early_termination = 0;
-
-    if (ldpc_decoder_parameters.early_terminate_dis == 0)
-    {
-        int early_term_thr;
-        if (ldpc_decoder_input.nand_strobes == 0)
-        {
-            if      (h_matrix.rows <=6)
-                early_term_thr = ldpc_decoder_parameters.early_terminate_thr[0][0];
-            else if (h_matrix.rows == 7)
-                early_term_thr = ldpc_decoder_parameters.early_terminate_thr[0][1];
-            else if (h_matrix.rows == 8)
-                early_term_thr = ldpc_decoder_parameters.early_terminate_thr[0][2];
-            else if (h_matrix.rows == 9)
-                early_term_thr = ldpc_decoder_parameters.early_terminate_thr[0][3];
-            else if (h_matrix.rows == 10)
-                early_term_thr = ldpc_decoder_parameters.early_terminate_thr[0][4];
-            else if (h_matrix.rows == 11)
-                early_term_thr = ldpc_decoder_parameters.early_terminate_thr[0][5];
-            else
-                early_term_thr = ldpc_decoder_parameters.early_terminate_thr[0][6];
-        }    
-        else
-        {
-            if      (h_matrix.rows <=6)
-                early_term_thr = ldpc_decoder_parameters.early_terminate_thr[1][0];
-            else if (h_matrix.rows == 7)
-                early_term_thr = ldpc_decoder_parameters.early_terminate_thr[1][1];
-            else if (h_matrix.rows == 8)
-                early_term_thr = ldpc_decoder_parameters.early_terminate_thr[1][2];
-            else if (h_matrix.rows == 9)
-                early_term_thr = ldpc_decoder_parameters.early_terminate_thr[1][3];
-            else if (h_matrix.rows == 10)
-                early_term_thr = ldpc_decoder_parameters.early_terminate_thr[1][4];
-            else if (h_matrix.rows == 11)
-                early_term_thr = ldpc_decoder_parameters.early_terminate_thr[1][5];
-            else
-                early_term_thr = ldpc_decoder_parameters.early_terminate_thr[1][6];
-        }
-
-        if (syndrome_weight >= early_term_thr)
-        {
-            finished = 1;
-            ldpc_decoder_output.early_termination = 1;
-            if (VERBOSITY > 0 && syndrome_weight >= early_term_thr)
-                printf("### LDPC DECODER C++ EARLY TERMINATION: %5d\n", syndrome_weight);
-        }
-    }
-    
-}
-*/

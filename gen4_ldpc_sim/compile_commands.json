@@ -1,0 +1,405 @@
+[
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-c",
+      "-g",
+      "-o",
+      "build/./src/alloc.c.o",
+      "src/alloc.c"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/alloc.c",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build/src/alloc.c.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-c",
+      "-g",
+      "-o",
+      "build/./src/finite_lib.c.o",
+      "src/finite_lib.c"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/finite_lib.c",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build/src/finite_lib.c.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-c",
+      "-g",
+      "-o",
+      "build/./src/intio.c.o",
+      "src/intio.c"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/intio.c",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build/src/intio.c.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-c",
+      "-g",
+      "-o",
+      "build/./src/mod2convert.c.o",
+      "src/mod2convert.c"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/mod2convert.c",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build/src/mod2convert.c.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-c",
+      "-g",
+      "-o",
+      "build/./src/mod2dense.c.o",
+      "src/mod2dense.c"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/mod2dense.c",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build/src/mod2dense.c.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-c",
+      "-g",
+      "-o",
+      "build/./src/mod2sparse.c.o",
+      "src/mod2sparse.c"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/mod2sparse.c",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build/src/mod2sparse.c.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-c",
+      "-g",
+      "-o",
+      "build/./src/rand.c.o",
+      "src/rand.c"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/rand.c",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build/src/rand.c.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-c",
+      "-g",
+      "-o",
+      "build/./src/utility.c.o",
+      "src/utility.c"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/utility.c",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build/src/utility.c.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-c",
+      "-g",
+      "-o",
+      "build/./src/vec_op.c.o",
+      "src/vec_op.c"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/vec_op.c",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build/src/vec_op.c.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-c",
+      "-g",
+      "-o",
+      "build/./src/fc_dsp.cpp.o",
+      "src/fc_dsp.cpp"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/fc_dsp.cpp",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build/src/fc_dsp.cpp.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-c",
+      "-g",
+      "-o",
+      "build/./src/transceiver.cpp.o",
+      "src/transceiver.cpp"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/transceiver.cpp",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build/src/transceiver.cpp.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-c",
+      "-g",
+      "-o",
+      "build/./src/SSD_FC.cpp.o",
+      "src/SSD_FC.cpp"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/SSD_FC.cpp",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build/src/SSD_FC.cpp.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-c",
+      "-g",
+      "-o",
+      "build/./src/ldpc_codec.cpp.o",
+      "src/ldpc_codec.cpp"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/ldpc_codec.cpp",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build/src/ldpc_codec.cpp.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-DDQ_SIM",
+      "-c",
+      "-g",
+      "-o",
+      "build_dq/./src/alloc.c.o",
+      "src/alloc.c"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/alloc.c",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build_dq/src/alloc.c.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-DDQ_SIM",
+      "-c",
+      "-g",
+      "-o",
+      "build_dq/./src/finite_lib.c.o",
+      "src/finite_lib.c"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/finite_lib.c",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build_dq/src/finite_lib.c.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-DDQ_SIM",
+      "-c",
+      "-g",
+      "-o",
+      "build_dq/./src/intio.c.o",
+      "src/intio.c"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/intio.c",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build_dq/src/intio.c.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-DDQ_SIM",
+      "-c",
+      "-g",
+      "-o",
+      "build_dq/./src/mod2convert.c.o",
+      "src/mod2convert.c"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/mod2convert.c",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build_dq/src/mod2convert.c.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-DDQ_SIM",
+      "-c",
+      "-g",
+      "-o",
+      "build_dq/./src/mod2dense.c.o",
+      "src/mod2dense.c"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/mod2dense.c",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build_dq/src/mod2dense.c.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-DDQ_SIM",
+      "-c",
+      "-g",
+      "-o",
+      "build_dq/./src/mod2sparse.c.o",
+      "src/mod2sparse.c"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/mod2sparse.c",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build_dq/src/mod2sparse.c.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-DDQ_SIM",
+      "-c",
+      "-g",
+      "-o",
+      "build_dq/./src/rand.c.o",
+      "src/rand.c"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/rand.c",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build_dq/src/rand.c.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-DDQ_SIM",
+      "-c",
+      "-g",
+      "-o",
+      "build_dq/./src/utility.c.o",
+      "src/utility.c"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/utility.c",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build_dq/src/utility.c.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-DDQ_SIM",
+      "-c",
+      "-g",
+      "-o",
+      "build_dq/./src/vec_op.c.o",
+      "src/vec_op.c"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/vec_op.c",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build_dq/src/vec_op.c.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-DDQ_SIM",
+      "-c",
+      "-g",
+      "-o",
+      "build_dq/./src/fc_dsp.cpp.o",
+      "src/fc_dsp.cpp"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/fc_dsp.cpp",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build_dq/src/fc_dsp.cpp.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-DDQ_SIM",
+      "-c",
+      "-g",
+      "-o",
+      "build_dq/./src/transceiver.cpp.o",
+      "src/transceiver.cpp"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/transceiver.cpp",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build_dq/src/transceiver.cpp.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-DDQ_SIM",
+      "-c",
+      "-g",
+      "-o",
+      "build_dq/./src/SSD_FC_dq.cpp.o",
+      "src/SSD_FC_dq.cpp"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/SSD_FC_dq.cpp",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build_dq/src/SSD_FC_dq.cpp.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I./src",
+      "-g",
+      "-DDQ_SIM",
+      "-c",
+      "-g",
+      "-o",
+      "build_dq/./src/ldpc_codec_dq.cpp.o",
+      "src/ldpc_codec_dq.cpp"
+    ],
+    "directory": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim",
+    "file": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/src/ldpc_codec_dq.cpp",
+    "output": "/mnt/f/MyProject/MaxioProject/LDPC-codes/gen4_ldpc_sim/build_dq/src/ldpc_codec_dq.cpp.o"
+  }
+]
