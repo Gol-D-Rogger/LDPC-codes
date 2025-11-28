@@ -8,7 +8,7 @@
 6                               // column weight of base matrix
 1000                           // maximum simulation number
 10                              // maximum error number
-FC_RDEC                         // LDPC decoder(FC_SKIP/FC_FDEC/FC_RDEC/FC_MIX/FC_FDEC2)
+FC_FDEC                         // LDPC decoder(FC_SKIP/FC_FDEC/FC_RDEC/FC_MIX/FC_FDEC2)
 24                              // Fast decoder maximum iteration number 24
 0                               // Iteration to turn on FDEC column skip feature (0:always OFF)
 32                              // Retry decoder maximum iteration number

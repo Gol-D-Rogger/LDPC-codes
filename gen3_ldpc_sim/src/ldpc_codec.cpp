@@ -1085,7 +1085,7 @@ void ldpc_packet::ldpc_dec_layer()
     cn_r_old_cur = (float *)calloc(cir_sz, sizeof(*cn_r_old_cur));
     cn_q_updt_cur = (float *)calloc(cir_sz, sizeof(*cn_q_updt_cur));
 
-    cn_q_sign = (int **)calloc(bm_m*col_wt, sizeof(*cn_q_sign));
+    cn_q_sign = (int **)calloc(bm_n*col_wt, sizeof(*cn_q_sign));
     for (int i = 0; i<bm_n*col_wt; i++)
         cn_q_sign[i] = (int*)calloc(cir_sz, sizeof(*cn_q_sign[i]));
 

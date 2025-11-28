@@ -330,17 +330,17 @@ int main (int argc, char **argv)
         if ((sim_pckt->cw_fail == 1) || (sim_pckt->cw_miscorr==1) ||
             (sim_pckt->mcrc_err==1) || (sim_pckt->lba_err==1) || (sim_pckt->meta_err==1))
         {
-            printf("[SIM] Statistical result of %d packets simulated: \n", sim_cnt);
+            printf("[SIM] Statistical result of %d packets simulated: \n", (sim_cnt+1));
             printf("[SIM] SNR       : %f\n", ch_para);
             printf("[SIM] FAIL CW   : %ld\n", cw_fail_tot);
-            printf("[SIM] RAW BER   : %e\n", raw_err_tot*1.0/sim_cnt/dsp_blk_len);
-            printf("[SIM] LDPC BER  : %e\n", dec_err_tot*1.0/sim_cnt/dsp_blk_len);
-            printf("[SIM] LDPC FER  : %e\n", cw_fail_tot*1.0/sim_cnt);
-            printf("[SIM] LDPC MIS  : %e\n", cw_misc_tot*1.0/sim_cnt);
-            printf("[SIM] MCRC FER  : %e\n", cw_mcrc_tot*1.0/sim_cnt);
-            printf("[SIM] DATA FER  : %e\n", (lba_err_tot+meta_err_tot)*1.0/sim_cnt);
+            printf("[SIM] RAW BER   : %e\n", raw_err_tot*1.0/(sim_cnt+1)/dsp_blk_len);
+            printf("[SIM] LDPC BER  : %e\n", dec_err_tot*1.0/(sim_cnt+1)/dsp_blk_len);
+            printf("[SIM] LDPC FER  : %e\n", cw_fail_tot*1.0/(sim_cnt+1));
+            printf("[SIM] LDPC MIS  : %e\n", cw_misc_tot*1.0/(sim_cnt+1));
+            printf("[SIM] MCRC FER  : %e\n", cw_mcrc_tot*1.0/(sim_cnt+1));
+            printf("[SIM] DATA FER  : %e\n", (lba_err_tot+meta_err_tot)*1.0/(sim_cnt+1));
             if ((dec_mode == FC_MIX) || (dec_mode==FC_MIX_G2))
-                printf("[SIM] ECC Retry Rate: %e\n", ldec_tot*1.0/sim_cnt);
+                printf("[SIM] ECC Retry Rate: %e\n", ldec_tot*1.0/(sim_cnt+1));
         } 
     }
 
@@ -353,7 +353,7 @@ int main (int argc, char **argv)
     printf("[STATISTICS] LDPC BER  : %e\n", dec_err_tot*1.0/sim_cnt/dsp_blk_len);
     printf("[STATISTICS] LDPC FER  : %e\n", cw_fail_tot*1.0/sim_cnt);
     printf("[STATISTICS] LDPC MIS  : %e\n", cw_misc_tot*1.0/sim_cnt);
-    printf("[STATISTICS] MCRC ERR  : %e\n", cw_mcrc_tot*1.0/sim_cnt);
+    printf("[STATISTICS] MCRC FER  : %e\n", cw_mcrc_tot*1.0/sim_cnt);
     printf("[STATISTICS] DATA FER  : %e\n", (lba_err_tot+meta_err_tot)*1.0/sim_cnt);
 
     if ((dec_mode == FC_MIX) || (dec_mode==FC_MIX_G2))
@@ -386,14 +386,14 @@ int main (int argc, char **argv)
             for (int j=0; j<8; j++)
             {
                 if ((i+j) < sim_pckt->fdec_max_itr)
-                    printf("%8d ", i+j+1);
+                    printf("%8d |", i+j+1);
             }
             printf("\n");
             printf("Num: ");
             for (int j=0; j<8; j++)
             {
                 if ((i+j) < sim_pckt->fdec_max_itr)
-                    printf("%8ld ", fdec_cnvg_itr[i+j]);
+                    printf("%8ld |", fdec_cnvg_itr[i+j]);
             }
             printf("\n");
             printf("------------------------------------------------------------\n");
@@ -411,14 +411,14 @@ int main (int argc, char **argv)
             for (int j=0; j<8; j++)
             {
                 if ((i+j) < sim_pckt->ldec_max_itr)
-                    printf("%8d ", i+j+1);
+                    printf("%8d |", i+j+1);
             }
             printf("\n");
             printf("Num: ");
             for (int j=0; j<8; j++)
             {
                 if ((i+j) < sim_pckt->ldec_max_itr)
-                    printf("%8ld ", ldec_cnvg_itr[i+j]);
+                    printf("%8ld |", ldec_cnvg_itr[i+j]);
             }
             printf("\n");
             printf("------------------------------------------------------------\n");
@@ -771,6 +771,7 @@ void read_config_file()
         printf("Column skip feature OFF\n");
     else
         printf("Column skip @ iterations %d\n", fdec_col_skip_itr);
+    printf("Retry decoder: max_iter = %d\n", ldec_max_itr);
     printf("alpha = %f\n", alpha);
 
     if (finite_mode==0)

@@ -1,0 +1,880 @@
+\documentclass[aspectratio=169,8pt]{beamer}
+\usetheme[
+%%% options passed to the outer theme
+%    progressstyle=movCircCnt,   %either fixedCircCnt, movCircCnt, or corner
+%    rotationcw,          % change the rotation direction from counter-clockwise to clockwise
+%    shownavsym          % show the navigation symbols
+  ]{AAUsimple}
+  
+% If you want to change the colors of the various elements in the theme, edit and uncomment the following lines
+% Change the bar and sidebar colors:
+%\setbeamercolor{AAUsimple}{fg=red!20,bg=red}
+%\setbeamercolor{sidebar}{bg=red!20}
+% Change the color of the structural elements:
+%\setbeamercolor{structure}{fg=red}
+% Change the frame title text color:
+%\setbeamercolor{frametitle}{fg=blue}
+% Change the normal text color background:
+%\setbeamercolor{normal text}{fg=black,bg=gray!10}
+% ... and you can of course change a lot more - see the beamer user manual.
+
+\usepackage{fontspec}
+\usepackage{unicode-math}
+\setmathfont[version=bold]{XITS Math Bold}
+\setmathfont{XITS Math}\setmainfont{Arial}
+\setsansfont{Arial}
+% \setsansfont{SourceSansPro-Regular.otf}
+
+\usepackage{xeCJK}
+\setCJKsansfont{FandolHei}
+\setCJKmainfont{FandolSong}
+
+% \usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+% \usepackage[T1]{fontenc}
+% Or whatever. Note that the encoding and the font should match. If T1
+% does not look nice, try deleting the line with the fontenc.
+% \usepackage{helvet} 
+\usepackage{indentfirst}
+\usepackage{tikz}
+\usetikzlibrary{backgrounds,mindmap}
+\usepackage{xcolor}
+\usetikzlibrary{calc,positioning,intersections}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{listings}
+\usepackage{caption}
+% \usepackage{enumitem} % 与 beamer 冲突会导致 labelenumi 递归报错，先不用
+% \setlist[itemize]{itemsep=6ex,parsep=4ex} % item 之间与同 item 内段落/换行的间距
+
+% for algorithm
+% ---------------------------------------
+\usepackage{latexsym}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{color,xcolor,tikz}
+\usepackage{graphicx}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{amsthm}
+\usepackage{float}
+\usepackage{setspace}
+\usepackage{hyperref}
+\hypersetup{hidelinks}
+% \usepackage[linesnumbered,vlined,boxed,commentsnumbered]{algorithm2e}
+\usepackage{pdflscape}
+% ---------------------------------------
+
+% \definecolor{blockTColor}{RGB}{18, 67, 180}
+% \definecolor{blockTColor}{RGB}{239, 131, 84} % coral orange
+% \definecolor{blockTColor}{RGB}{7, 71, 143} % light blue
+% \setbeamercolor{block title}{bg=blockTColor,fg=white}
+% \definecolor{blockBColor}{RGB}{248, 247, 255}
+% \setbeamercolor{block body}{bg=blockBColor,fg=black}
+% \setbeamercolor{block title}{bg=cyan!90,fg=white}
+% \setbeamercolor{block body}{bg=blue!10,fg=black}
+% \useoutertheme{infolines}
+% colored hyperlinks
+\newcommand{\chref}[2]{%
+  \href{#1}{{\usebeamercolor[bg]{AAUsimple}#2}}%
+}
+
+\title{An Improved Syndrome Bit Flipping Decoder with Narrowed Flipping Set for LDPC Codes}
+
+% \subtitle{ICCC 2023}  % could also be a conference name
+\date{December 9, 2023\\}
+\author{
+  Wenlin Zhao, Jie Zhang, Li Li and Haitong Jiang
+}
+
+% - Give the names in the same order as they appear in the paper.
+% - Use the \inst{?} command only if the authors have different
+%   affiliation. See the beamer manual for an example
+
+\institute[
+%  {\includegraphics[scale=0.2]{aau_segl}}\\ %insert a company, department or university logo
+  School of Information Science and Technology\\
+  Southwest Jiaotong University\\
+  Cheng du, China
+] % optional - is placed in the bottom of the sidebar on every slide
+{% is placed on the bottom of the title page
+  School of Information Science and Technology\\
+  Southwest Jiaotong University\\
+  Cheng du, China
+  
+  %there must be an empty line above this line - otherwise some unwanted space is added between the university and the country (I do not know why;( )
+}
+
+% specify a logo on the titlepage (you can specify additional logos an include them in 
+% institute command below
+\pgfdeclareimage[height=1.8cm]{titlepagelogo}{AAUgraphics/swjtu_circle_light_blue} % placed on the title page
+\pgfdeclareimage[height=1.8cm]{titlepagelogo2}{AAUgraphics/ICCC_logo} % placed on the title page
+\titlegraphic{% is placed on the bottom of the title page
+  \pgfuseimage{titlepagelogo}
+  \hspace{0.75cm}\pgfuseimage{titlepagelogo2}
+}
+
+\begin{document}
+% the titlepage
+{\aauwavesbg%
+\begin{frame}[plain,noframenumbering] % the plain option removes the header from the title page
+  % \fontsize{12}{12}\selectfont
+  \titlepage
+\end{frame}}
+%%%%%%%%%%%%%%%%
+
+% TOC
+\begin{frame}{Tabel of Contents}{}
+\tableofcontents
+\end{frame}
+%%%%%%%%%%%%%%%%
+
+\section{SiDTBF: Merging Soft Info with DTBF}
+\begin{frame}{Tabel of Contents}{}
+	\frametitle{}
+	\tableofcontents[currentsection]
+\end{frame}
+
+\section{DTBF Algorithm Overview}
+
+\begin{frame}{Dynamic Threshold Bit Flipping (DTBF)}
+
+  \begin{block}{Flipping Function ($E_n$)}
+    The reliability $E_n$ of bit $n$ is calculated using the syndrome weight and a weighting factor:
+    \begin{equation*}
+      E_n = \alpha(z_n \oplus y_n) + \sum_{m \in A(n)}(2s_m - 1)
+    \end{equation*}
+    \vspace{-0.3cm}
+    \begin{itemize}
+      \item \textbf{Core Mechanism}: It introduces a dynamic threshold ($Th$) that adjusts during iterations to prevent the decoder from getting stuck in local loops when no bits satisfy the flipping condition.
+      \item \textbf{Rule}: If $E_n \ge Th$, bit $n$ is flipped.
+    \end{itemize}
+  \end{block}
+
+  \begin{block}{Dynamic Threshold Adjustment}
+    \begin{itemize}
+      \item \textbf{Initialization}: Start with maximum threshold $Th = d_v + \alpha$.
+      \item \textbf{Adjustment}: Count bits ($t$) where $E_n \ge Th$.
+      \item If $t=0$ (no bits flipped), reduce $Th$ by a step size $\Delta$ to escape the local deadlock.
+      \item \textbf{Limitation}: Cannot effectively correct errors when RBER exceeds the algorithm's capability (e.g., $7 \times 10^{-3}$) as it treats all bits with equal initial probability.
+    \end{itemize}
+  \end{block}
+\end{frame}
+
+\begin{frame}{Soft Info from Additional Reads}
+  \vspace{-0.1cm}
+  \begin{columns}
+    \begin{column}{0.55\textwidth}
+      \begin{block}{Bound-based labeling}
+        \begin{itemize}
+          \item Insert two extra references in each overlap region; define \textbf{bound} $=y_1/y_2$ between adjacent PDFs.
+          \item Cells between the added references are marked \textcolor{blue}{weak} ($b_i=0$); others are \textcolor{blue}{strong} ($b_i=1$).
+          \item Bound must balance coverage of real errors vs. accidental inclusion of correct bits.
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.4\textwidth}
+      \centering
+      \includegraphics[width=0.95\linewidth]{AAUgraphics/SiDTBF_multi_read.png}
+      \\
+      \tiny Threshold-voltage overlap; shaded area becomes weak bits.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Workflow and First-Iteration Logic}
+  \vspace{-0.15cm}
+  \begin{columns}
+    \begin{column}{0.53\textwidth}
+      \begin{block}{Algorithm sketch}
+        \begin{enumerate}
+          \setlength{\parsep}{4pt}\setlength{\itemsep}{4pt}
+          \item Input hard bits $z$ plus weak/strong masks $B_{lsb/msb}$ (weak when sample lies between added refs).
+          \item Iteration 1: compute sydrome weight $s$; compute $E_n=\alpha(z_n\oplus v_n)+\sum_{m\in\mathcal{A}(n)}(2s_m-1)$.
+          \item Weak bits: if $E_n > E_n^{*}$ flip aggressively; strong bits still compare to $Th$ (DTBF rule).
+          \item Iterations $>1$: drop to DTBF to prevent false-flip amplification.
+          \item Stop when $s=\vec{0}$ or iter hits cap; output $y$.
+        \end{enumerate}
+      \end{block}
+      \begin{block}{Rationale}
+        \begin{itemize}
+          \item Overlap-region errors dominate; lowering $E_n^{*}$ only in iter-1 cleans them quickly.
+          \item Returning to DTBF keeps complexity intact and avoids later mis-flips.
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.42\textwidth}
+      \centering
+      \includegraphics[width=0.9\linewidth]{AAUgraphics/SiDTBF_workflow.png}
+      \\
+      \tiny SiDTBF workflow
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Tuning Bound and $E_{n}^{*}$}
+  \vspace{-0.2cm}
+  \begin{columns}
+    \begin{column}{0.5\textwidth}
+      \begin{block}{How thresholds are chosen}
+        \begin{itemize}
+          \item $E_n^{*}\!\in\!\{-d_v-\alpha+k\Delta\}$ with $\alpha\!=\!2,\Delta\!=\!1$; sweep across retention \& P/E conditions.
+          \item Keep only best $E_n^{*}$ values for key retention points to control complexity.
+          \item Bound is swept via chip scans and Gaussian fits; choose the value that maximizes corrected weak bits while limiting false flips.
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.45\textwidth}
+      \centering
+      \includegraphics[width=0.95\linewidth]{AAUgraphics/SiDTBF_PE.png}
+      \\
+      \tiny Flipped-error ratio vs. $E_n^{*}$ across P/E cycles.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Performance Highlights}
+  \vspace{-0.25cm}
+  \begin{block}{Setup}
+    \begin{itemize}
+      \item 3D TLC NAND, $N=32768$, rate $0.89$, $d_v=5$, first-iter $E_n^{*}=-d_v+4$.
+      \item Sweep bound $\in\{5,10,15,20,50\}$; bound $=20$ emerges best.
+    \end{itemize}
+  \end{block}
+  \begin{columns}
+    \begin{column}{0.52\textwidth}
+      \begin{block}{Observed gains}
+        \begin{itemize}
+          \item Correctable RBER grows from $7\!\times\!10^{-3}$ (DTBF) to $9\!\times\!10^{-3}$.
+          \item Bound $=20$ slashes FER from $6\!\times\!10^{-1}$ to $4\!\times\!10^{-5}$ at $6.8\!\times\!10^{-3}$.
+          \item Average decoding latency drops $\approx3\times$ thanks to cleaner first iteration.
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.43\textwidth}
+      \centering
+      \includegraphics[width=0.95\linewidth]{SiDTBF_Paper/images/9c0d4aef33a967a6b82c36b929b3a91925e97bd851809ca722ada35988b4a5ae.jpg}
+      \\
+      \tiny FER comparison.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+
+\section{Context and Objectives}
+\begin{frame}{Tabel of Contents}{}
+	\frametitle{}
+	\tableofcontents[currentsection]
+\end{frame}
+
+\begin{frame}{Context and Objectives}{}
+\vspace{-0.3cm}
+
+\begin{block}{Low Density Parity Check (LDPC) Decoder}
+  \centering
+  \includegraphics[width=0.75\textwidth]{/mnt/f/MyProject/LaTexProject/MaxPPT/SiDTBF/AAUgraphics/LDPC_Model.pdf}
+\end{block}
+\begin{block}{2 types of LDPC decoding algorithms:}
+    \begin{itemize}
+      \item \textbf{Soft information algorithms}: Sum-Product, Min-Sum...,\alert {powerful error correction} capacity but high complexity.
+      \item \textbf{Hard-decision algorithms}: Bit Flipping (BF), Gradient Descent Bit Flipping (GDBF), etc. \alert{low complexity}, usually weak in error correction.
+      \item \textbf{Towards a new type of decoder}: \alert{low complexity + randomness} \(\Leftrightarrow \) \alert{powerful error correction}.
+    \end{itemize}
+\end{block}
+\end{frame}
+%%%%%%%%%%%%%%%%
+
+\begin{frame}{Trend and Experience}
+  \begin{minipage}[c][.8\textheight][c]{.4\textwidth}
+    \hspace{0.5cm}
+    \includegraphics[width=0.6\textwidth]{/mnt/f/MyProject/LaTexProject/MaxPPT/SiDTBF/AAUgraphics/BF_Evolution_Timeline.pdf}
+    % \captionof{figure}{BF Evolution}
+  \end{minipage}%
+  \hspace{-0.75cm} 
+  \vspace{0.2cm}
+  \begin{minipage}[c][.7\textheight][c]{.55\textwidth}
+
+    \begin{block}{Trends of LDPC Bit Flipping decoders}
+      \begin{enumerate}
+        \itemsep1em
+        \item \textbf{Injected Noise in the decoder can help to against the channel errors}: 
+          \begin{itemize}
+            \itemsep0.5em
+            \item Probabilistic Gradient Descent Bit Flipping \alert{(PGDBF)} for BSC
+            \item Noisy Gradient Descent Bit Flipping \alert{(NGDBF)} for AWGN
+          \end{itemize}
+        \item \textbf{Optimizing mechanism or strategy applyed on GDBF}:
+          \begin{itemize}
+            \itemsep0.5em
+            \item Noisy Gradient Descent Bit-Flipping Decoder Based on Adjustment Factor \alert{(A-NGDBF)}
+            \item Tabu-list Random-penalty Gradient Descent Bit Flipping \alert{(TRGDBF)}
+            \item Gradient Descent Bit Flipping with Momentum \alert{(GDBF with Momentum)}
+          \end{itemize}
+        \item \textbf{Low complexity, as post-processing decoder}:
+          \begin{itemize}
+            \item Syndrome Bit Flipping \alert{(SBF)}
+          \end{itemize}
+      \end{enumerate}
+      \par
+  \vspace{\baselineskip}
+
+   \end{block}
+    % \begin{block}{Block 2}
+    %   This is the second block on the right.
+    % \end{block}
+  \end{minipage}
+\end{frame}
+
+
+\begin{frame}{Proposed Algorithm}
+  \vspace{-0.1cm}
+  \centering
+  \begin{minipage}{0.7\textwidth}
+    % \begin{block}{}
+      
+      % \begin{tikzpicture}[remember picture, overlay]
+      %   \node at (current page.west) [anchor=west, xshift=1cm] (leftbrace) {
+      %     \scalebox{5}{$\left\lbrace\right.$}
+      %   };
+      % \end{tikzpicture}
+
+        \textbf{Key Concepts:}
+        \begin{itemize}
+          \item Improved Syndrome Bit Flipping (SBF) Algorithm.
+          \item Incorporation of a \textcolor{blue}{Narrowed Flipping Set (NFS)}.
+        \end{itemize}
+
+        \vspace{\baselineskip}
+
+        \textbf{Algorithm Highlights:}
+        \begin{itemize}
+          \item Combines channel information and random selection for NFS.
+          \item Mitigates error propagation during bit-flipping.
+          \item Aims for improved decoding convergence.
+        \end{itemize}
+
+        \vspace{\baselineskip}
+
+        \textbf{Expected Advancements:}
+        \begin{itemize}
+          \item Significant Bit Error Rate (BER) performance improvement.
+          \item Estimated \alert{1.2 dB} BER gain over original SBF.
+          \item Balances enhanced BER performance with \textbf{modest complexity increase}.
+        \end{itemize}
+
+        \vspace{\baselineskip}
+  
+        \textbf{Applicability:}
+        \begin{itemize}
+          \item Effective across various LDPC codes.
+          % \item Robust under varying SNR conditions.
+        \end{itemize}
+  
+    % \end{block}
+  \end{minipage}
+\end{frame}
+
+\section{Introduction of Related Algorithms}
+
+\begin{frame}{Tabel of Contents}{}
+	\frametitle{}
+	\tableofcontents[currentsection]
+\end{frame}
+
+\begin{frame}{GDBF Algorithm}
+  \vspace{-0.35cm}
+  \begin{block}{Concepts of Gradient Descent Bit Flipping (GDBF) Algorithm}
+    \begin{itemize}
+      \item Iterative propagation of binary information between 2 groups of processing units
+      \begin{enumerate}
+        \item \textbf{Check Nodes Units} (CNU): compute parity check equations
+        \begin{equation*}
+          c_m^{(l)}=\bigoplus_{v_n \in \mathcal{N}(c_m)} v_n^{(l)}
+        \end{equation*}
+        \item \textbf{Variable Nodes Units} (VNU): the VN value is flipped if the number of violated CN neighbors is too large.
+      \end{enumerate}
+      \item Requires the computation of an Energy/Inversion Function in order to  \textcolor{blue}{select the bit-flips}.
+    \end{itemize}
+  \end{block}
+
+  \begin{block}{Energy function for the AWGN channel}
+    \setlength{\belowdisplayskip}{0pt}
+    \setlength{\belowdisplayshortskip}{0pt}
+    \centering \alert{\textbf{low energy}} \(\Leftrightarrow\) \alert{\textbf{low reliability}}
+    \begin{equation*}
+      E_{k}^{(l)} = x_k^{(l)} y_k + \sum (1-2c_m^{(l)})
+    \end{equation*}
+    \begin{itemize}
+      \item \(x_k^{(l)} y_k\):\textbf{ maximum likelihood (ML) part}, correct codeword yields maximum value
+      \item \(\sum (1-2c_m^{(l)})\): \textbf{penalty part}, the sum of the bipolar syndromes of \(\mathbf{x}\)
+    \end{itemize}
+    \end{block}
+\end{frame}
+
+
+% \subseciton{Some related BFs}
+\begin{frame}{Variant of GDBF}
+  \vspace{-0.3cm}
+  \begin{block}{Noisy Gradient Descent Bit Flipping and Syndrome Bit Flipping}
+    \begin{itemize}
+      \item \alert{NGDBF}: Noisy version of GDBF, noise \(q_k \sim N(0,\eta^2 N_0/2)\) are injected to help GDBF get out of local maximum.
+      \item \alert{SBF}: The channel information is \alert{no longer} taken into consideration.
+      \begin{equation*}
+        E_{k}^{(l)} = \sum c_m^{(l)}
+      \end{equation*}
+    \end{itemize}
+
+  \end{block}
+
+  \vspace{-0.2cm}
+  \begin{block}{Unified presentation of GDBF, NGDBF and SBF decoders}
+    \textbf{[Step 1] Compute CNs values}: \(c_m^{(l)},\forall m=1,\ldots,M\) \\
+    \textbf{[Step 2] Compute Energy function of VNs}: \(E_{k}^{(l)},\forall n=1,\ldots,N\)\\
+    \textbf{[Step 3] Determine the flipping set}
+    \begin{gather*}
+      \mathcal{S}_{\text{GDBF}}^{(l)} = \{n\in\{1,N\};E_k^{(l)}\le \theta \} \\ 
+      \mathcal{S}_{\text{NGDBF}}^{(l)} = \{n\in\{1,N\};E_k^{(l)}\le \theta + q_k^{(l)} \}\\ 
+      \mathcal{S}_{\text{SBF}}^{(l)} = \{n\in\{1,N\};E_k^{(l)} > \theta_k(\ell) \} 
+    \end{gather*}
+    \textbf{[Step 4] Bit flipping}
+    \begin{equation*}
+      \forall n \in \mathcal{S}^{(l)}:  x_n = 1-x_n
+    \end{equation*}
+  \end{block}
+\end{frame}
+
+\begin{frame}{Flipping Sets}
+  \vspace{-0.3cm}
+  \begin{block}{Flipping sets contain indices of bits to be flipped}
+    \vspace{-\baselineskip} % 可用于block中整体上移
+    \begin{gather*}
+      \mathcal{S}_{\text{GDBF}}^{(l)} = \{n\in\{1,N\};E_k^{(l)}\le \theta \} \\ 
+      \mathcal{S}_{\text{NGDBF}}^{(l)} = \{n\in\{1,N\};E_k^{(l)}\le \theta + q_k^{(l)} \}\\ 
+      \mathcal{S}_{\text{SBF}}^{(l)} = \{n\in\{1,N\};E_k^{(l)} > \theta_k(\ell) \} 
+    \end{gather*}
+  \end{block}
+  \vspace{-0.1cm}
+  \begin{block}{Graphical representation of GDBF and NGDBF flipping sets}
+    \centering
+    \includegraphics[width=0.7\textwidth]{/mnt/f/MyProject/LaTexProject/MaxPPT/SiDTBF/AAUgraphics/Flipping_Set_Graphic.pdf}
+  \end{block}
+\end{frame}
+%%%%%%%%%%%%%%%%
+
+\begin{frame}{SBF Algorithm}
+  \vspace{-0.3cm}
+  \begin{block}{Why \(E_{k}^{(l)} = \sum c_m^{(l)}\) works?}
+    \vspace{\baselineskip}
+    \centering \alert{Lower accuracy} \(\rightarrow\) \alert{Concise Architecture}
+    \begin{itemize} 
+      \item Old idea\footnote[frame]{Raul Benet, Adriaan De Lind Van Wijngaarden, Ralf Dohmen, Thomas Richardson, Rudiger
+      Urbanke, “Iterative decoding of low-density parity-check (LDPC) codes”, Patent EP1643653A1, 5
+      april 2006.}: Use the number of unsatisfied checks connected to a VN to
+      represent the reliability of VN.\\
+      \item \textbf{Syndrome can be viewed as a compressed representation of the error pattern}.
+
+    \end{itemize}
+    
+    % \footnote[frame]{Second footnote.}. 可在页面底部生成footnote
+    \includegraphics[width=0.8\textwidth]{/mnt/f/MyProject/LaTexProject/MaxPPT/SiDTBF/AAUgraphics/SBF_E_Graphic.eps}
+  \end{block}
+\end{frame}
+
+
+\begin{frame}{Example of a SBF decoding processing}
+  \vspace{-0.2cm}
+  \centering
+  \includegraphics[width=0.8\textwidth]{/mnt/f/MyProject/LaTexProject/MaxPPT/SiDTBF/AAUgraphics/SBF_E_over4.pdf}
+  \begin{columns}
+    \hspace{0.2cm}
+    \begin{column}{0.45\textwidth}
+      Flip bits with \(E > 4\) \(\Rightarrow \) 19 bits flipped :\\
+      \hspace*{11em} 14 that was in error \\ % Adjust the space as needed
+      \hspace*{11em} \alert{5 that was correct}\\
+      Only 20 – 14 + 5 = 11 errors after the first iteration.\\
+      \includegraphics[width=0.7\textwidth]{/mnt/f/MyProject/LaTexProject/MaxPPT/SiDTBF/AAUgraphics/SBF_process.pdf}
+    \end{column}
+    \begin{column}{0.4\textwidth}
+      \vspace{-0.3cm}
+      \begin{block}{Threshold sequence \(\theta\)}
+        A threshold sequence is << \alert{a decoding key} >>.
+        \begin{itemize}
+          \item \textbf{Non-unique}.
+          \item Searched by \textbf{trapping set analysis}.
+          \item \(0\le\theta\le\max(d_v)\).
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\section{The Narrowed Flipping Set}
+
+\begin{frame}{Tabel of Contents}{}
+	\frametitle{}
+	\tableofcontents[currentsection]
+\end{frame}
+
+\begin{frame}{The unnecessary flip}
+  \begin{block}{Potential problem during bit flipping}
+    All ‘0’ codeword transmission:
+    \begin{itemize}
+      \item Non-error bits are \textbf{unnecessarily flipped} in threshold-based bit flipping algorithms.
+    \end{itemize}
+    \centering
+    \includegraphics[width=0.75\textwidth]{/mnt/f/MyProject/LaTexProject/MaxPPT/SiDTBF/AAUgraphics/unneccessary_flip_SBF.pdf}
+  \end{block}
+\end{frame}
+
+\begin{frame}{The unnecessary flip}
+  \begin{block}{Potential problem during bit flipping}
+    All ‘0’ codeword transmission:
+    \begin{itemize}
+      \item Non-error bits are \textbf{unnecessarily flipped} in threshold-based bit flipping algorithms.
+    \end{itemize}
+    \centering
+    \includegraphics[width=0.75\textwidth]{/mnt/f/MyProject/LaTexProject/MaxPPT/SiDTBF/AAUgraphics/unneccessary_flip_MNGDBF.pdf}
+  \end{block}
+
+\end{frame}
+
+\begin{frame}{An underdeveloped idea from paper}
+
+  \begin{columns}
+    \hspace{0.5cm}
+    \begin{column}{0.4\textwidth}
+
+      \begin{block}{Heuristic in SBF paper}
+        \setstretch{1.25}
+        \begin{itemize}
+          \item \textbf{Heuristic 3}\footnote[frame]{E. Boutillon, C. Winstead, and F. Ghaffari, “The Syndrome Bit Flipping Algorithm for LDPC Codes,” IEEE Communications Letters, pp. 1–1, 2023}. : \textcolor{blue}{SBF is only applied for bits with "unreliable" channel samples}, $|y|\le\gamma$ for some threshold $\gamma$. The choice of \(\gamma\) is determined empirically by simulation.
+        \end{itemize}
+      \end{block}
+
+
+      \begin{block}{The limitaion of Heuristic 3}
+        \begin{itemize}
+          \item BER gain is small.
+          \item Optimal $\gamma$ is varying with SNR.
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+
+        \centering
+        \includegraphics[width=0.9\textwidth]{/mnt/f/MyProject/LaTexProject/MaxPPT/SiDTBF/AAUgraphics/SFB+h3.jpg}
+
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Narrow down the Flipping Set}
+  \vspace{-0.4cm}
+  \begin{block}{The experiment for narrowing down the flipping set}
+    Construct a flipping set \(\mathcal{S}\) that includes the positions of all error bits \(\mathcal{S}_{\text{err}}\) and another \(n\) non-error bits.
+    \begin{itemize}
+      \item During SBF decoding, flipping bits are selected in \(\mathcal{S}\).
+      \item The original SBF algorithm: a circumstance where \(\mathcal{S}\) contains all the bits in the codeword.
+      % \item as \(n\) decreases, the flipping set \(\mathcal{S}_{\text{SBF}}\) becomes increasingly constrained by \(\mathcal{S}\).
+    \end{itemize}
+  \end{block}
+  \vspace{0.1cm}
+  \begin{columns}
+    \begin{column}{0.5\textwidth}
+      % \begin{block}{}
+        \centering
+        \includegraphics[width=0.75\textwidth]{/mnt/f/MyProject/LaTexProject/MaxPPT/SiDTBF/AAUgraphics/SBF_with_Fn.pdf}
+      % \end{block}
+    \end{column}
+    \begin{column}{0.35\textwidth}
+      \begin{block}{}
+        \begin{itemize}
+          \item \textcolor{blue}{\textbf{Conclusion}}: Narrowing down the flipping set makes SBF decoding more convergent.
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+
+\begin{frame}{Narrowed Flipping Set}
+  \vspace{-0.1cm}
+  \begin{block}{Construct the flipping set \(\mathcal{S}\)}
+    \centering \alert{Channel Information + Random Selection}
+    \begin{itemize}
+      \item Bits with lowest magnitude of \(|⃗\vec{y}|\) are considered as unreliable bits. 
+    \end{itemize}
+
+    \vspace{0.3em}
+
+    \begin{columns}%[T] % T aligns the tops of the columns
+      \begin{column}{0.5\textwidth}
+        \includegraphics[width=0.8\textwidth]{/mnt/f/MyProject/LaTexProject/MaxPPT/SiDTBF/AAUgraphics/bits_include_probability.pdf}
+        % \tiny Monte Carlo simulation of the average ratio of the number of error bits contained within the \textbf{top-n unreliable bits} to the total number of error bits.
+      \end{column}
+      \begin{column}{0.4\textwidth}
+        \begin{equation*}
+          P_n = \frac{\text{error bits within }n \text{ smallest } |\vec{y}|}{\text{total error bits}} 
+        \end{equation*}
+        \begin{equation*}
+          \mathcal{S}=\mathcal{S}_{CI}\cup \mathcal{S}_{\text{Random}}
+        \end{equation*}
+        
+        \begin{itemize}
+          \item \(\mathcal{S}_{\text{err}} \subseteq \mathcal{S}\) is essential for successful decoding.
+          \item Flipping bits are selected in \(\mathcal{S}_{\text{SBF}} \cap \mathcal{S}\).
+        \end{itemize}
+      \end{column}
+    \end{columns}
+  \end{block}
+\end{frame}
+
+% \begin{landscape}
+\begin{frame}{Algorithm}
+  \centering
+  \vspace{-0.4cm}
+  \begin{minipage}{0.6\textwidth}
+
+  \begin{algorithm}[H]
+  \caption{SBF decoding with narrowed flipping set}
+  \begin{algorithmic}  % enter the algorithmic environment
+  {\small 
+    \REQUIRE  $\vec{y} = (y_1,\dots,y_N)\in{\mathbb R}^N$ $\quad${(received word)} \\
+                $\qquad \quad \Theta_k = \{\theta_k(\ell)\}_{\ell=1\ldots N_k}$ $\qquad${(threshold sequences)}
+
+    % \STATE $m=0;\vec{x}=(1-\operatorname{sign}(\vec{y}))/2$;
+    % \STATE $\vec{x}_0 = \vec{x};\vec{s}_0=\mathbf{H}\vec{x}_0 \; \operatorname{mod}2$;
+    \medskip
+
+    \STATE $\mathcal{S}_1 \gets  T_1 \; \text{smallest} \; |\vec{y}| \text{ bit positions}; \qquad{\rhd \textbf{\textcolor{blue}{Channel information part}}}$
+    \WHILE {$m < \gamma \; \textbf{and} \; \vec{s} \neq \vec{0} $}
+
+      \STATE $k=0;m=m+1$;
+      \STATE $\mathcal{S}_2 \gets \textcolor{blue}{\text{random select }} T_2 \text{ bit positions from } \vec{y} \setminus  \mathcal{S}_1; \qquad{\rhd \textbf{\textcolor{blue}{Random part}}}$
+      \STATE $\mathcal{S} \gets \mathcal{S}_1 \cup \mathcal{S}_2;$
+      \IF {$m = 2$}
+        \STATE 	$\Theta = \Theta(1); \qquad{\rhd \textbf{\textcolor{blue}{Reduce computational complexity}}}$
+      \ENDIF
+
+      % \WHILE {$ k<\operatorname{size}(\Theta) \; \textbf{and} \; \vec{s} \neq \vec{0} $} %$\quad${\textbf{SBF iteration loop}}
+      %   \STATE $\ell = 0;k=k+1;\vec{}=\vec{s}_0;\vec{x}=\vec{x}_0$;
+
+      %   \WHILE {$\ell<N_k \; \textbf{and} \; \vec{s} \neq \vec{0} $}
+      \WHILE {\textcolor{blue}{SBF Loop}}
+          % \STATE $\ell = \ell + 1$;
+          \STATE $E = \mathbf{H}^T \vec{s}$; %$\quad${energy computation}
+          \STATE $\mathcal{S}_{\text{SBF}} \gets \{n\in\{1\ldots N\}; E_n>\theta_k(\ell)\}$;
+          \IF{$m=1$} 
+            \STATE $\forall n \in \mathcal{S}_{\text{SBF}} : x_n = 1- x_n; \qquad\qquad \rhd \textbf{\textcolor{blue}{SBF iteration}}$
+          \ELSE
+            \STATE $\forall n \in \mathcal{S}_{\text{SBF}}\cap \mathcal{S} : x_n =  1- x_n; \qquad \rhd \textbf{\textcolor{blue}{NFS-SBF iteration}}$
+          \ENDIF
+          \STATE $\vec{s}=\mathbf{H}\vec{x} \; \operatorname{mod}2$;
+        \ENDWHILE
+      \ENDWHILE
+    % \ENDWHILE
+    % \smallskip
+    % \IF {$\vec{s} \neq \vec{0}$}
+    %   \STATE $\vec{x}=\vec{x}_0$;
+    % \ENDIF
+  }
+  \end{algorithmic}
+  \end{algorithm}
+
+\end{minipage}
+\end{frame}
+% \end{landscape}
+
+\section{Parameter Optimizing and Performance Evaluation}
+\begin{frame}{Tabel of Contents}{}
+	\frametitle{}
+	\tableofcontents[currentsection]
+\end{frame}
+
+\begin{frame}{Parameter Optimizing}
+  \vspace{-0.4cm}
+  \begin{block}{}
+    We denote $T_1,T_2$ as size of $\mathcal{S}_{CI},\mathcal{S}_{\text{Random}}$, there are some facts:
+    \begin{itemize}
+      \item The probability $p$ that of $\mathcal{S}_{\text{err}} \subseteq \mathcal{S},(\mathcal{S}=\mathcal{S}_{CI}\cup \mathcal{S}_{\text{Random}})$ increases with the growth of $T_1+T_2$.
+      \item BER performance degrades with the growth of $T_1+T_2$.
+      \item $T_1+T_2$ is expected as low as possible.
+    \end{itemize}
+  \end{block}
+
+  \vspace{-0.2cm}
+  \begin{columns}%[T] % T aligns the tops of the columns
+    \begin{column}{0.4\textwidth}
+      \begin{itemize}
+        \setstretch{1.5}
+        \item Rest of error bits after $(T_1,T_2)$ extraction:\\
+              $N_r = N\cdot P_e\cdot(1-P_n)$
+        \item $p = \frac{\binom{N-T_1-N_r}{T_2-N_r} }{\binom{N-T_1}{T_2} }.$
+        \item Generalized binomial coefficient: $\binom{n}{k} = \frac{\Gamma(n+1)}{\Gamma(k+1)\Gamma(n-k+1)}.$
+        \item $p =\frac{\Gamma(N-T_1-N_r+1)\Gamma(T_2+1)}{\Gamma(T_2-N_r+1)\Gamma(N-T_1+1)}.$ 
+      \end{itemize}
+    \end{column}
+
+    \begin{column}{0.5\textwidth}
+      
+      \setbeamerfont{block title}{size=\normalsize}
+      \begin{block}{Probability \(p\) for different $T1$ and $T2$.}
+        \centering
+        \includegraphics[width=0.75\textwidth]{/mnt/f/MyProject/LaTexProject/MaxPPT/SiDTBF/AAUgraphics/p_T1T2.pdf}
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Optimal Selection of $T_1$ and $T_2$}
+
+  \vspace{-0.2cm}
+  \centering
+  \begin{minipage}{0.9\textwidth}
+  \begin{block}{$T_1$: Channel Information Utilization}
+    \begin{itemize}
+      \item Purpose: Identify the most unreliable bit positions.
+      \item Strategy: Select top $T_1$ bits with smallest absolute values.
+    \end{itemize}
+  \end{block}
+
+  \begin{block}{$T_2$: Random Selection Complement}
+    \begin{itemize}
+      \item Purpose: Increase likelihood of encompassing all error bits.
+      \item Strategy: Randomly select $T_2$ bits not in $T_1$.
+    \end{itemize}
+  \end{block}
+
+  \begin{block}{SNR Considerations}
+    \begin{itemize}
+      \item High SNR: Smaller $T_1$ and $T_2$ may suffice due to concentrated errors.
+      \item Low SNR: Larger $T_1$ and $T_2$ might be necessary for uniform error distribution.
+    \end{itemize}
+  \end{block}
+
+  % \begin{block}{Experimental Tuning and Optimization}
+  %   \begin{itemize}
+  %     \item Method: Adjust based on simulation results and system performance.
+  %     \item Goal: Optimal BER performance with balanced computational complexity.
+  %   \end{itemize}
+  % \end{block}
+  \end{minipage}
+\end{frame}
+
+
+\begin{frame}{Performance Evaluation}
+  \vspace{-0.3cm}
+  \begin{block}{Performance of NFS-SBF}
+    \begin{itemize}
+      \item $(T_1,T_2)=(300,400)$ for 802.3an code, $(T_1,T_2)=(400,200)$ for PEG code.
+      \item With growth of maximum $\gamma$ trials of $(T_1,T_2)$ extraction, NFS significantly improves the BER performance.
+    \end{itemize}
+    \centering
+    \includegraphics[width=0.8\textwidth]{/mnt/f/MyProject/LaTexProject/MaxPPT/SiDTBF/AAUgraphics/performance_NFS_SBF.pdf}
+  \end{block}
+\end{frame}
+
+
+\section{Conclusion and Heuristics}
+\begin{frame}{Tabel of Contents}{}
+  \hspace{5em}
+	% \frametitle{}
+	\tableofcontents[currentsection]
+\end{frame}
+
+\begin{frame}{Conclusion}
+  \centering
+  \begin{minipage}{0.7\textwidth}
+  % \begin{block}{Narrowed Flipping Set (NFS)}
+  %   \begin{itemize}
+  %     \item Construct by channel information and random selection.
+  %     \item Applicable for different LDPC codes.
+  %     \item NFS successful avoids non-error bits from being unnecessarily flipped.
+  %     \item The coding gains come at the cost of a modest increasing complexity.
+  %   \end{itemize}
+  % \end{block}
+
+
+  \textbf{Main Conclusion:}
+  \begin{itemize}
+    \item Improves Bit Error Rate (BER) performance in LDPC codes.
+    \item Integrates channel information and random selection for NFS.
+    \item Mitigates error propagation in the bit-flipping process.
+    \item Achieves better decoding convergence, especially at high SNR.
+    \item Balances accuracy improvement with computational complexity.
+  \end{itemize}
+  \vspace{\baselineskip}
+  \textbf{Key Takeaway:}
+  \begin{itemize}
+    \item Significant BER improvement over traditional SBF algorithms.
+  \end{itemize}
+  \vspace{\baselineskip}
+  \textbf{Implications:}
+  \begin{itemize}
+    \item Validates NFS effectiveness in LDPC code decoding.
+    \item Suggests potential for further error correction optimizations.
+  \end{itemize}
+\end{minipage}
+\end{frame}
+
+\begin{frame}{More Heuristics}
+  \vspace{-0.1cm}
+  \begin{block}{}
+    \begin{itemize}
+      \item Narrowed Flipping Set: \textbf{A cross-validation mechanism}.
+      \item Can NFS be applied on other bit-flipping algorithms?-->\alert{YES}
+      \begin{itemize}
+        \item \textbf{Threshold-based bit flipping}: NGDBF, GDBF, MTBF
+      \end{itemize}
+    \end{itemize}
+
+    \centering
+    \includegraphics[width=0.4\textwidth]{/mnt/f/MyProject/LaTexProject/MaxPPT/SiDTBF/AAUgraphics/NFS_effect.jpg}
+    
+    \begin{itemize}
+      \item The cost: Linearly increasing complexity.
+    \end{itemize}
+  \end{block}
+
+\end{frame}
+
+
+\begin{frame}{More Heuristics}
+  \centering
+  \begin{minipage}{0.9\textwidth}
+    \begin{block}{Further Research}
+
+        \textbf{The weakness of current NFS method:}
+          \begin{itemize}
+            \itemsep0.5em  % 在子列表中也可以设置
+            \item When SNR is low, the distribution of error bit positions in the LDPC code becomes chaotic.
+            \item The worst case come at the cost of a large number of iterations.
+          \end{itemize}
+        
+        \vspace{\baselineskip}  
+
+        \textbf{Further Research Directions:}
+          \begin{itemize}
+            \itemsep0.5em
+              % \item \textbf{Refining NFS Construction}: Developing more effective methods to identify unreliable bit positions, potentially enhancing the algorithm's efficiency in lower SNR conditions.
+              % \item \textbf{Iterative Improvement}: Exploring the use of information from previous iterations to optimize the NFS construction and potentially reduce the number of iterations required.
+              % \item \textbf{Application to Other Algorithms}: Extending the NFS mechanism to other bit-flipping algorithms to evaluate its effectiveness and applicability across a broader range of decoding strategies and different LDPC codes.
+              
+              \item Developing more effective methods to identify unreliable bit positions.
+              \item Leveraging information from previous iterations.
+              \item Extending NFS mechanism to other algorithms.
+
+          \end{itemize}
+
+    \end{block}
+  \end{minipage}
+\end{frame}
+
+
+{\aauwavesbg
+\begin{frame}[plain,noframenumbering]
+  \LARGE
+  \finalpage{Thank you for listening!}
+\end{frame}}
+%%%%%%%%%%%%%%%%
+
+\end{document}
