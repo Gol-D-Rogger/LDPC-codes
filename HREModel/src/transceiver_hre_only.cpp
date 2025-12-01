@@ -31,7 +31,7 @@ void ch_packet::ch_config(int w, int x, ch_model y, float z, int u, int v, int h
         snr = z;
         snr_code = snr - 10 * log10(blk_len * 1.0 / info_len);
         awgn_sigma = pow(10, -snr_code * 1.0 / 20) / sqrt(2);
-        rber = 0.5 * (1 + errf(-1/(awgn_sigma * sqrt(2))));
+        rber = 0.5 * (1 + erff(-1/(awgn_sigma * sqrt(2))));
 
         printf("[CH_TRX] AWGN channel selected with SNR = %f dB.\n", snr);
     }
@@ -138,7 +138,7 @@ void ch_packet::ch_transmit()
 {
     int *err_vec;
     int *err_pos;
-    int err_cnt;
+    int err_cnt = 0;
     int awgn_err_cnt = 0;
 
     if ((ch_sel == ERR_INJ) || (ch_sel == MAX_ERR))

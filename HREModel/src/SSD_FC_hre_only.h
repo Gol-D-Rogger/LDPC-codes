@@ -1,5 +1,8 @@
 #pragma once
+#include "transceiver_hre_only.h"
+
 enum fc_sim_mode {FC_SIM=0, LDPC_SIM=1};
+enum fc_dec_mode {FC_SKIP=0, FC_FDEC=1, FC_RDEC=2, FC_MIX=3, FC_FDEC_G2=4, FC_MIX_G2=5};
 
 // Simulation
 enum fc_sim_mode sim_mode = LDPC_SIM;

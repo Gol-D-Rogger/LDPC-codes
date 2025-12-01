@@ -180,7 +180,7 @@ void ldpc_packet::ldpc_gen_gm()
     free(qc_c_rows);
 } // ldpc_gen_gm
 
-void ldpc_packet::f_print_h_matrix(s_h_matrix)
+void ldpc_packet::f_print_h_matrix(s_h_matrix h_matrix)
 {
     int i;
     int j;
@@ -211,7 +211,7 @@ void ldpc_packet::f_print_h_matrix(s_h_matrix)
     for (i = 0; i < h_matrix.rows; i++)
     {
         printf("%02d  ", h_matrix.row_weight[i]);
-        for (j = 0; j < h_matrix.row_weight[i]; j++)
+        for (j = 0; j < h_matrix.cols[i]; j++)
         {
             if (h_matrix.occupied[i][j])
                 printf("x,");
@@ -320,7 +320,7 @@ void ldpc_packet::f_print_check_nodes(s_check_nodes data, int rows, int bits)
     }
 }
 
-void ldpc_packet::f_print_check_nodes_shifted(s_check_nodes data, s_h_matrix h_matirx, int column)
+void ldpc_packet::f_print_check_nodes_shifted(s_check_nodes data, s_h_matrix h_matrix, int column)
 {
     int i;
     int k;
@@ -329,9 +329,9 @@ void ldpc_packet::f_print_check_nodes_shifted(s_check_nodes data, s_h_matrix h_m
 
     for (i = 0; i < h_matrix.rows; i++)
     {
-        if (h_matrix.occupied[i][column] || h_matirx.fade[i][column])
+        if (h_matrix.occupied[i][column] || h_matrix.fade[i][column])
             for (k = 0; k < h_matrix.bits; k++)
-                data_shifted.r[i].b[k] = data.r[i].b[(h_matirx.bits + k - h_matirx.element[i][column]) % h_matirx.bits];
+                data_shifted.r[i].b[k] = data.r[i].b[(h_matrix.bits + k - h_matrix.element[i][column]) % h_matrix.bits];
         else
             for (k = 0; k < h_matrix.bits; k++)
                 data_shifted.r[i].b[k] = 0;
@@ -339,14 +339,14 @@ void ldpc_packet::f_print_check_nodes_shifted(s_check_nodes data, s_h_matrix h_m
 
     for (i = 0; i < h_matrix.rows; i++)
     {
-        if (h_matrix.occupied[i][column] || h_matirx.fade[i][column])
+        if (h_matrix.occupied[i][column] || h_matrix.fade[i][column])
         {
-            if (h_matirx.occupied[i][column])
+            if (h_matrix.occupied[i][column])
                 printf("C++ CN SHIFTED COL %2d ROW %2d OCCUPIED  0x", column, i);
-            else if (h_matirx.fade[i][column])
+            else if (h_matrix.fade[i][column])
                 printf("C++ CN SHIFTED COL %2d ROW %2d FADED     0x", column, i);
 
-            for (k = h_matirx.bits - 1; k >= 0; k--)
+            for (k = h_matrix.bits - 1; k >= 0; k--)
             {
                 if ((k % 4) == 3)
                     b = data_shifted.r[i].b[k] ? 8 : 0;
@@ -360,7 +360,7 @@ void ldpc_packet::f_print_check_nodes_shifted(s_check_nodes data, s_h_matrix h_m
                 if (((k % 4) == 0) && (b == 0))
                     printf(".");
                 else if ((k % 4) == 0)
-                    printf("1x", b);
+                    printf("%1x", b);
             }
             printf("\n");
         }
@@ -396,9 +396,9 @@ void ldpc_packet::f_print_s_512_bits(s_512_bits s)
 {
     int k;
     int b;
-    printf("### PRNG B  ");
+    printf("### PRNG C  ");
 
-    for (k = 511; k >= 0; k--)
+    for (k = 512; k >= 0; k--)
     {
         if ((k % 4) == 3)
             b = s.b[k] ? 8 : 0;
@@ -475,16 +475,16 @@ s_check_nodes ldpc_packet::f_check_nodes(s_h_matrix h_matrix, s_hard_codeword vn
             {
                 for (i = 0; i < h_matrix.rows; i++)
                 {
-                    m = (k + h_matrix.bits + k - h_matrix.element[i][j]) % h_matrix.bits;
+                    m = (k + h_matrix.bits - h_matrix.element[i][j]) % h_matrix.bits;
                     if (h_matrix.extra_bytes_of_parity == 0)
                     {
                         if (h_matrix.occupied[i][j])
                             cn.r[i].b[m] = !cn.r[i].b[m];
                         else
                         {
-                            if (h_matrix.occupied[i][j] == 0 && (i < h_matrix.rows -1))
+                            if (h_matrix.occupied[i][j] && (i < h_matrix.rows -1))
                                 cn.r[i].b[m] = !cn.r[i].b[m];
-                            if (h_matrix.occupied[i][j] == 0 && (i == h_matrix.rows -1) && h_matrix.mask[j][k])
+                            if (h_matrix.occupied[i][j] && (i == h_matrix.rows -1) && h_matrix.mask[j][k])
                                 cn.r[i].b[m] = !cn.r[i].b[m];
                             if (h_matrix.fade[i][j] && !h_matrix.mask[j][k])
                                 cn.r[i].b[m] = !cn.r[i].b[m];
@@ -862,7 +862,7 @@ void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt, char *pchk_f
             for (i = 0; i < 13; i++)
             {
                 k = 5 - 1;
-                printf("### MATRIX: %2d ROW: %2d WEIGHT: %2d OCCUPIED: \n", k, i, rw[k][i]);
+                printf("### MATRIX: %2d ROW: %2d WEIGHT: %2d OCCUPIED: ", k, i, rw[k][i]);
                 for (j = 0; j < 80; j++)
                     printf("%1x ", ldpc_matrix_occupied[k][i][j]);
                 printf("\n");
@@ -916,7 +916,7 @@ void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt, char *pchk_f
                         if (ldpc_matrix_occupied[k][i][j] && (rw[k][i] < rw_max_in_col) && !found_it)
                         {
                             found_it = 1;
-                            rw[k][i]++;
+                            rw[k][i]--;
                             ldpc_matrix_occupied[k][i][j] = 0;
                             ldpc_matrix_fade[k][i][j] = 1;
                         }
@@ -928,7 +928,7 @@ void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt, char *pchk_f
             {
                 for (i = 0; i < 13; i++)
                 {
-                    printf("### MATRIX: %2d ROW: %2d WEIGHT: %2d OCCUPIED: \n", k, i, rw[k][i]);
+                    printf("### MATRIX: %2d ROW: %2d WEIGHT: %2d OCCUPIED: ", k, i, rw[k][i]);
                     for (j = 0; j < 80; j++)
                         printf("%1x ", ldpc_matrix_occupied[k][i][j]);
                     printf("\n");
@@ -1001,13 +1001,13 @@ void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt, char *pchk_f
             {
                 if (h_matrix.occupied[i][n] || h_matrix.fade[i][n])
                 {
-                    h_matrix.element[i][k] = h_matrix.fade[i][n];
+                    h_matrix.element[i][k] = h_matrix_index[i][n];
                     h_matrix.first_element[i] = h_matrix.element[i][k];
                     h_matrix_index[i] = (h_matrix_index[i] + h_matrix.bits - h_matrix.delta[i]) % h_matrix.bits;
                     if (h_matrix.occupied[i][n])
                     {
                         h_matrix.row_weight[i]++;
-                        h_matrix.col_weight[j]++;
+                        h_matrix.col_weight[k]++;
                     }
                 }
                 else
@@ -1073,6 +1073,18 @@ void ldpc_packet::ldpc_ibex_input(int syndrome_cal_only = 0, int max_iter = 0, i
                     ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_questionable2 = 
                         ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_questionable; // replicate
             }
+            else if ((j == (h_matrix.cols - h_matrix.rows)) &&
+                     (k >= (h_matrix.bits - 8 * h_matrix.unused_bytes_of_parity)))
+            {
+                ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_hard = 0;
+                if (soft_bits >= 1)
+                    ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_questionable = ldpc_decoder_parameters.likelihood_map[3];
+                if (soft_bits >= 2)
+                    ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_questionable2 = ldpc_decoder_parameters.likelihood_map[3];
+                else if (soft_bits >= 1)
+                    ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_questionable2 = 
+                        ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_questionable; // replicate
+            }
             else
             {
                 ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_hard = (rx_blk[bit_index] >= 0) ? 0 : 1;
@@ -1084,7 +1096,7 @@ void ldpc_packet::ldpc_ibex_input(int syndrome_cal_only = 0, int max_iter = 0, i
                     if (soft_bits >= 1)
                         ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_questionable = (bin_ibex / 2) % 2;
                     if (soft_bits >= 2)
-                        ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_questionable2 = (bin_ibex % 4) %2;
+                        ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_questionable2 = (bin_ibex / 4) %2;
                     else if (soft_bits >= 1)
                         ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_questionable2 = 
                             ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_questionable; // replicate
@@ -1233,9 +1245,9 @@ void ldpc_packet::ldpc_dec_config(int max_fdec_itr, int fdec_col_skip, int max_l
     finite_c_min = 0;
 
 #ifdef _LDPC_DEBUG
-    printf("[LDPC DEBUG] Q MSG: %d/%d, max %f, min %f \n", finite_q_num, finite_q_max, finite_q_min);
-    printf("[LDPC DEBUG] R MSG: %d/%d, max %f, min %f \n", finite_r_num, finite_r_max, finite_r_min);
-    printf("[LDPC DEBUG] C MSG: %d/%d, max %f, min %f \n", finite_c_num-1, finite_c_max, finite_c_min);
+    printf("[LDPC DEBUG] Q MSG: %d/%d, max %f, min %f \n", finite_q_num, fin_f_num, finite_q_max, finite_q_min);
+    printf("[LDPC DEBUG] R MSG: %d/%d, max %f, min %f \n", finite_r_num, fin_f_num, finite_r_max, finite_r_min);
+    printf("[LDPC DEBUG] C MSG: %d/%d, max %f, min %f \n", finite_c_num-1, fin_f_num, finite_c_max, finite_c_min);
 #endif    
 
     // BF config
@@ -1630,7 +1642,7 @@ void ldpc_packet::ldpc_ibex_encoder()
     }
 }
 
-s_hard_codeword ldpc_packet::f_ldpc_encode(s_hard_codeword ldpc_encoder_input, s_ldpc_matrix h_matrix)
+s_hard_codeword ldpc_packet::f_ldpc_encode(s_hard_codeword ldpc_encoder_input, s_h_matrix h_matrix)
 {
     int VERBOSITY;
     int i;
@@ -1649,7 +1661,7 @@ s_hard_codeword ldpc_packet::f_ldpc_encode(s_hard_codeword ldpc_encoder_input, s
     bool payload[67][512];
     bool parity[13][512];
     bool check_node[13][512];
-    bool ldpc_matrix_occpuied[13][80];
+    bool ldpc_matrix_occupied[13][80];
     bool ldpc_matrix_fade[13][80];
     unsigned int ldpc_matrix[13][80];
     int ldpc_encoder_failure;
@@ -1661,9 +1673,10 @@ s_hard_codeword ldpc_packet::f_ldpc_encode(s_hard_codeword ldpc_encoder_input, s
     int num_bytes = h_matrix.bits >> 3;
     int num_payload_cols = int((h_matrix.bytes_of_userdata + num_bytes - 1) / num_bytes);
     int num_payload_bits = 8 * h_matrix.bytes_of_userdata;
-    int num_parity_cols =  num_payload_cols - 64;
+    int num_parity_cols =  h_matrix.rows;
+    int extra_payload_bits =  num_payload_cols - 64;
     int unused_parity_bytes = (h_matrix.rows * num_bytes) - h_matrix.bytes_of_parity;
-    int unused_parity_bits = (unused_parity_bytes * 8);
+    int unused_parity_bits = unused_parity_bytes * 8;
     int matrix_element[13];
 
     int bit_location;
@@ -1683,7 +1696,7 @@ s_hard_codeword ldpc_packet::f_ldpc_encode(s_hard_codeword ldpc_encoder_input, s
         for (k = 0; k < h_matrix.bits; k++)
             vn.c[j].b[k] = cn.r[m].b[k]; // The diagonal shift val is 0
 
-        for (i = 0; i < h_matrix.bits; k++)
+        for (k = 0; k < h_matrix.bits; k++)
         {
             if (vn.c[j].b[k])
             {
@@ -1739,7 +1752,7 @@ s_hard_codeword ldpc_packet::f_ldpc_encode(s_hard_codeword ldpc_encoder_input, s
     cn = f_check_nodes(h_matrix, vn);
     syndrome_weight = f_check_node_weight(h_matrix, cn);
     ldpc_encoder_failure = (syndrome_weight != 0);
-    if (ldpc_encoder_failure != 0)
+    if (ldpc_encoder_failure > 0)
     {
         printf("ERROR: Encoding! Syndrome weight = %d > 0\n", syndrome_weight);
         exit(1);
@@ -1756,8 +1769,6 @@ void ldpc_packet::ldpc_decoder(enum dec_model dec_mode)
         dec_di_blk[info_len + i] = max_llr_bin;
 
     vec_copy(det_blk, dec_di_blk, info_len, hm_k, hm_m);
-    for (int i=hm_n-1;i>=hm_n-cir_sz+pad_bit; i--)
-        dec_di_blk[i] = 0;
 
     if (dec_mode == SKIP)
         ldpc_dec_skip();
@@ -1769,10 +1780,20 @@ void ldpc_packet::ldpc_decoder(enum dec_model dec_mode)
         ldpc_dec_bf2(3, col_skip_itr);
     else if (dec_mode == LAYER)
         ldpc_dec_layer();
+    else if (dec_mode == BF_IBEX)
+        ldpc_dec_bf_ibex(s_ldpc_decoder_input, ldpc_decoder_parameters, h_matrix);
 
     //remove padding
-    vec_copy(dec_do_blk, dec_blk, 0, 0, info_len);
-    vec_copy(dec_do_blk, dec_blk, hm_k, info_len, hm_m);
+    if (dec_mode != BF_IBEX)
+    {
+        vec_copy(dec_do_blk, dec_blk, 0, 0, info_len);
+        vec_copy(dec_do_blk, dec_blk, hm_k, info_len, hm_m);
+    }
+    else {
+        vec_copy(dec_do_blk, dec_blk, 0, 0, info_len);
+        vec_copy(dec_do_blk, dec_blk, hm_k, info_len, h_matrix.extra_bits_of_parity);
+        vec_copy(dec_do_blk, dec_blk, hm_k + cir_sz, info_len + h_matrix.extra_bits_of_parity, (bm_m - 1) * cir_sz);
+    }
 
     // check error bit number
     dec_err_num = 0;
@@ -2546,6 +2567,7 @@ ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input, s_ldpc_de
     bool disable_update;
     bool hamming_weight_le_circ_thr;
     bool hamming_weight_lt_circ_thr;
+    bool hamming_weight_lt_post_thr;
     bool post_trigger;
     bool post_trigger2;
     bool flipped_prev;
@@ -2556,15 +2578,15 @@ ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input, s_ldpc_de
     s_hard_codeword hard_codeword;
     s_hard_codeword soft_codeword;
     s_variable_nodes vn;
-    s_check_node cn;
-    s_check_node cn_shifted;
+    s_check_nodes cn;
+    s_check_nodes cn_shifted;
     s_likelihood_levels likelihood_levels;
     s_256_bits prng_256;
-    s_256_bits prng_512;
+    s_512_bits prng_512;
     int prng_init[32];
     int syndrome_weight_delayed;
 
-    int syndrome_weight_r;
+    int syndrome_weight_r[5];
     bool do_not_use_this_bit;
     bool look;
 
@@ -2612,7 +2634,7 @@ ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input, s_ldpc_de
         }
     }
 
-    CN = f_check_nodes(h_matrix, hard_codeword);
+    cn = f_check_nodes(h_matrix, hard_codeword);
     if (VERBOSITY > 0)
     {
         printf("[LDPC DEBUG] Starting BF decoding with max %d iterations.\n", fdec_max_itr);
@@ -2624,10 +2646,10 @@ ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input, s_ldpc_de
     }
 
     for (i=0; i<h_matrix.rows; i++)
-        for (j=0; j<h_matrix.bits; j++)
+        for (k=0; k<h_matrix.bits; k++)
             cn_shifted.r[i].b[k] = 0;
     syndrome_weight = f_check_node_weight(h_matrix, cn);
-    clock_cycles = (2 * h_matrix.rows) + 1;
+    clock_cycles = (2 * h_matrix.cols) + 1;
     if (syndrome_weight == 0)
         finished = 1;
     ldpc_decoder_output.syndrome_weight_before = syndrome_weight;
@@ -2764,10 +2786,10 @@ ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input, s_ldpc_de
             if (iteration >= ldpc_decoder_input.post_iteration)
             {
                 hamming_weight_lt_post_thr = (syndrome_weight_delayed < ldpc_decoder_parameters.syndrome_weight_thr_post);
-                hamming_weight_lt_post_thr = (syndrome_weight_delayed < ldpc_decoder_parameters.syndrome_weight_thr_qc);
+                hamming_weight_lt_circ_thr = (syndrome_weight_delayed < ldpc_decoder_parameters.syndrome_weight_thr_qc);
                 post_trigger = hamming_weight_lt_circ_thr && ((iteration % 16) < ldpc_decoder_parameters.post_ratio) &&
                                 ldpc_decoder_parameters.post_process_en;
-                post_trigger2 = hamming_weight_lt_circ_thr && ((iteration % 16) >= ldpc_decoder_parameters.post_ratio) &&
+                post_trigger2 = hamming_weight_lt_post_thr && ((iteration % 16) >= ldpc_decoder_parameters.post_ratio) &&
                                 ldpc_decoder_parameters.post_process_en;
 
                 if (VERBOSITY > 0)
@@ -2786,7 +2808,7 @@ ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input, s_ldpc_de
             }
 
             // be_aggressive is different with rtl and not used
-            be_aggressive = (ldpc_decoder_input.soft_bits >= 0) &&
+            be_aggressive = (ldpc_decoder_input.soft_bits > 0) &&
                             (likelihood_levels.min < ldpc_decoder_parameters.likelihood_thr) && !post_trigger &&
                             !post_trigger2; // different with verilog, add two post trigger judge
             // be_aggressive = (ldpc_decoder_input.soft_bits > 0) && (likelihood_levels.min < 
@@ -2801,8 +2823,8 @@ ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input, s_ldpc_de
                 do_not_use_this_bit = 0;
                 do_not_use_this_bit |= ((h_matrix.extra_bits_of_parity > 0) && (j == (h_matrix.cols - h_matrix.rows)) &&
                                         (k >= h_matrix.extra_bits_of_parity));
-                do_not_use_this_bit |= ((h_matrix.extra_bits_of_parity > 0) && (j > (h_matrix.cols - h_matrix.rows - 1)) &&
-                                        (k >= h_matrix.extra_bits_of_userdata));
+                do_not_use_this_bit |= ((h_matrix.extra_bits_of_parity > 0) && (j == (h_matrix.cols - h_matrix.rows - 1)) &&
+                                        (k >= h_matrix.extra_bits_of_parity));
                 if ((VERBOSITY > 0) && do_not_use_this_bit)
                     printf("### DO NOT USE THIS BIT %2d %3d\n", j, k);
                 if (!do_not_use_this_bit)
@@ -2865,7 +2887,7 @@ ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input, s_ldpc_de
                         f_print_s_512_bits(prng_512);
                     }
 
-                    bool_aggr = (ldpc_decoder_input.soft_bits > 0) &&
+                    bool aggr = (ldpc_decoder_input.soft_bits > 0) &&
                                 (likelihood_levels.min < ldpc_decoder_parameters.likelihood_thr && !flipped_prev);
                     int w = weight;
                     if (aggr && (weight == 0))
@@ -2957,7 +2979,7 @@ ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input, s_ldpc_de
         }
 
         syndrome_weight = f_check_node_weight(h_matrix, cn);
-        finished = (syndrome_weight == 0) ? 1 : 0;
+        finished = (syndrome_weight == 0);
         syndrome_weight_r[4] = syndrome_weight_r[3];
         syndrome_weight_r[3] = syndrome_weight_r[2];
         syndrome_weight_r[2] = syndrome_weight_r[1];
@@ -2970,7 +2992,7 @@ ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input, s_ldpc_de
 
     if (VERBOSITY > 0)
     {
-        printf("### AFTER %4d ITERATION, CODEWORD HAS CHECK NODES:\n", iteration);
+        printf("### AFTER %4d ITERATIONS, CODEWORD HAS CHECK NODES:\n", iteration);
         f_print_check_nodes(cn, h_matrix.rows, h_matrix.bits);
     }
 
@@ -2980,12 +3002,12 @@ ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input, s_ldpc_de
     ldpc_decoder_output.failure = (ldpc_decoder_output.syndrome_weight_after != 0);
     ldpc_decoder_output.errors_in_userdata = 0;
     ldpc_decoder_output.errors_in_codeword = 0;
-    for (j=0; j < h_matrix.cols; j++)
+    for (j = 0; j < h_matrix.cols; j++)
     {
-        for (k=0; k < h_matrix.bits; k++)
+        for (k = 0; k < h_matrix.bits; k++)
         {
             ldpc_decoder_output.corrupted_codeword.c[j].b[k] = 
-                ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_hard ^ vn.c[j].b[k].flipped;
+                ldpc_decoder_input.corrected_codeword.c[j].b[k].bit_hard ^ vn.c[j].b[k].flipped;
             dec_do_blk[j * h_matrix.bits + k] = ldpc_decoder_output.corrected_codeword.c[j].b[k];
             if (vn.c[j].b[k].flipped)
                 ldpc_decoder_output.errors_in_codeword++;
@@ -3006,7 +3028,7 @@ ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input, s_ldpc_de
         ldpc_decoder_output.errors_in_userdata = 0;
         ldpc_decoder_output.errors_in_codeword = 0;
     }
-    else if (ldpc_decoder_output.syndrome_cal_only)
+    else if (ldpc_decoder_input.syndrome_cal_only)
     {
         if (VERBOSITY > 0)
             printf("### C SYNDROME CALCULATION ONLY ###\n");
@@ -3033,7 +3055,7 @@ ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input, s_ldpc_de
     if (VERBOSITY > 0)
     {
         printf("### C++ OUTPUT ###\n");
-        f_print_hard_codeword(ldpc_decoder_output.corrupted_codeword, h_matrix.cols, h_matrix.bits);
+        f_print_hard_codeword(ldpc_decoder_output.corrected_codeword, h_matrix.cols, h_matrix.bits);
     }
     cw_fail = ldpc_decoder_output.failure;
 }

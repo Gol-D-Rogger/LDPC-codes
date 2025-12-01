@@ -332,17 +332,18 @@ int main (int argc, char **argv)
         if ((sim_pckt->cw_fail == 1) || (sim_pckt->cw_miscorr==1) ||
             (sim_pckt->mcrc_err==1) || (sim_pckt->lba_err==1) || (sim_pckt->meta_err==1))
         {
-            printf("[SIM] Statistical result of %d packets simulated: \n", sim_cnt);
+            printf("[SIM] Statistical result of %d packets simulated: \n", (sim_cnt+1));
             printf("[SIM] SNR       : %f\n", ch_para);
             printf("[SIM] FAIL CW   : %ld\n", cw_fail_tot);
-            printf("[SIM] RAW BER   : %e\n", raw_err_tot*1.0/sim_cnt/dsp_blk_len);
-            printf("[SIM] LDPC BER  : %e\n", dec_err_tot*1.0/sim_cnt/dsp_blk_len);
-            printf("[SIM] LDPC FER  : %e\n", cw_fail_tot*1.0/sim_cnt);
-            printf("[SIM] LDPC MIS  : %e\n", cw_misc_tot*1.0/sim_cnt);
-            printf("[SIM] MCRC FER  : %e\n", cw_mcrc_tot*1.0/sim_cnt);
-            printf("[SIM] DATA FER  : %e\n", (lba_err_tot+meta_err_tot)*1.0/sim_cnt);
+            printf("[SIM] RAW BER   : %e\n", raw_err_tot*1.0/(sim_cnt+1)/dsp_blk_len);
+            printf("[SIM] TheoRBER  : %e\n", sim_pckt->rber);
+            printf("[SIM] LDPC BER  : %e\n", dec_err_tot*1.0/(sim_cnt+1)/dsp_blk_len);
+            printf("[SIM] LDPC FER  : %e\n", cw_fail_tot*1.0/(sim_cnt+1));
+            printf("[SIM] LDPC MIS  : %e\n", cw_misc_tot*1.0/(sim_cnt+1));
+            printf("[SIM] MCRC FER  : %e\n", cw_mcrc_tot*1.0/(sim_cnt+1));
+            printf("[SIM] DATA FER  : %e\n", (lba_err_tot+meta_err_tot)*1.0/(sim_cnt+1));
             if ((dec_mode == FC_MIX) || (dec_mode==FC_MIX_G2))
-                printf("[SIM] ECC Retry Rate: %e\n", ldec_tot*1.0/sim_cnt);
+                printf("[SIM] ECC Retry Rate: %e\n", ldec_tot*1.0/(sim_cnt+1));
         } 
     }
 
@@ -352,6 +353,7 @@ int main (int argc, char **argv)
     printf("--------------------------------------------------------\n");
     printf("[STATISTICS] Total packets simulated: %d\n", sim_cnt);
     printf("[STATISTICS] RAW BER   : %e\n", raw_err_tot*1.0/sim_cnt/dsp_blk_len);
+    printf("[STATISTICS] TheoRBER  : %e\n", sim_pckt->rber);
     printf("[STATISTICS] FBC(bit)  : %f\n", raw_err_tot*1.0/sim_cnt);
     printf("[STATISTICS] FBC(no HRE): %f\n", raw_err_awgn_tot*1.0/sim_cnt);
     printf("[STATISTICS] LDPC BER  : %e\n", dec_err_tot*1.0/sim_cnt/dsp_blk_len);
@@ -593,7 +595,6 @@ void read_config_file()
 
     // generate pchk file（支持可配置矩阵目录）
     sprintf(pchk_file, "%s/LDPC_%dx%dex%d_w%d_dense%d_QC_H.txt", matrix_dir, h_m, h_n, h_sc, h_wt, h_dense);
-    sprintf(drop_file, "%s/LDPC_%dx%dex%d_w%d_dense%d_drop_col.txt", matrix_dir, h_m, h_n, h_sc, h_wt, h_dense);
 
     // 6. max_sim_num
     fscanf(fp, "%d", &max_sim_num);

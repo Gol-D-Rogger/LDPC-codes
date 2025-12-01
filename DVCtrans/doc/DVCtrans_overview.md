@@ -70,3 +70,161 @@ DVCtrans 作为部门 DV 使用的 DPI C-model，提供可直接对接 SystemVer
 - 校验矩阵文件需放置在仿真工作目录或通过路径配置，命名需匹配 `ldpc_h_<m>_<n>_<sc>_<wt>_<wt>.txt`。  
 - 若只做硬判，`sd_num` 设 1，可节省 Vref 传递与软读分布计算。  
 - 解码模式选择：BF_P3（硬判 BF）、LAYER（层迭代最小和）、TBFDEC（软/三值 BF），可根据 RTL 顶层模式寄存器对应选择。
+
+
+## gen4 to DVC
+Gen4 DQ (Partial Circulant) 模式的核心在于：物理矩阵扩展了一行一列，但最后一个 Circulant 是部分有效的（由 pad_bit
+  决定有效长度，mask_len 决定无效长度）。
+
+  ---
+
+  1. 参数计算与设置 (ldpc_config)
+
+  在 ldpc_c_model_gen4.c 的 ldpc_config 函数中，你需要计算以下全局参数 (g_ 开头变量)。
+
+  输入参数：
+   * h_m, h_n: 逻辑基矩阵行列数 (e.g., 20, 149)
+   * h_sc: 循环块大小 (Z, e.g., 256)
+   * info_num: 用户实际数据长度 (e.g., 4KB + Meta)
+   * pad_bit: 最后一个 Partial Block 的有效长度 (e.g., 128)
+
+  计算公式：
+
+```
+  // 1. 物理基矩阵维度 (Gen4 扩展)
+  int bm_m = h_m + 1;
+  int bm_n = h_n + 1;
+  
+  // 2. Mask 参数
+  int mask_len = h_sc - pad_bit; // 无效尾部长度
+  
+  // 3. 系统信息位总容量 (Systematic Bits Capacity)
+  // 注意: hm_k 不受 mask 影响，它总是完整的 (N-M)*Z
+  // Gen4 结构保证了前 bm_k 列是完整的 Circulant
+  g_hm_k = (bm_n - bm_m) * h_sc; 
+  
+  // 4. 物理校验位长度 (Parity Length)
+  // 校验位对应矩阵的行。最后一行被 Mask 截断，所以总长减去 mask_len
+  g_hm_m = bm_m * h_sc - mask_len;
+  
+  // 5. 物理码字总长 (Codeword Length)
+  // 码字 = 系统位 + 校验位
+  g_hm_n = g_hm_k + g_hm_m;
+  
+  // 6. 补零长度 (Padding Zeros)
+  // 为了填满 hm_k 系统位容量，需要在用户数据后补的 0
+  g_pad_num = g_hm_k - info_num;
+  
+  // 7. 传输块长度 (Interface Block Length)
+  // 实际在 DPI 接口上传输的有效数据 = 用户数据 + 校验位 (不传 Padding)
+  g_blk_len = info_num + g_hm_m; 
+  // 或者等价于: g_hm_n - g_pad_num
+```
+  ---
+
+  2. 比特数据流详解
+
+  以下展示数据在 编码 -> 传输 -> 解码 全过程中的形态变化。
+
+  阶段 A: 编码 (Encoding)
+
+   1. 输入 (User Data):
+       * 来源: ldpc_enc 的 usr_data_sv
+       * 变量: sim_pckt->usr_blk
+       * 内容: [ User_Data ]
+       * 长度: info_num
+
+   2. 补零 (Padding / Shortening):
+       * 操作: 在 usr_blk 尾部填充 0
+       * 变量: sim_pckt->enc_di_blk (编码器输入)
+       * 内容: [ User_Data (info_num) | 00...00 (pad_num) ]
+       * 总长: g_hm_k
+
+   3. 核心编码 (LDPC Encoder):
+       * 操作: 计算校验位
+       * 变量: sim_pckt->enc_do_blk
+       * 内容: [ User_Data | 00...00 | Parity (hm_m) ]
+       * 总长: g_hm_n
+
+   4. 打包输出 (Packing):
+       * 操作: 去除 Padding，仅输出有效数据
+       * 目标: enc_data_sv
+       * 内容: [ User_Data (info_num) | Parity (hm_m) ]
+       * 总长: g_blk_len
+
+  阶段 B: 传输 (Channel)
+
+   * 接口: ch_err_inj 或 sd_err_inj
+   * 数据: 保持 [ User | Parity ] 结构，长度 g_blk_len。
+   * 注入: 错误注入在此长度范围内进行。
+
+  阶段 C: 解码 (Decoding)
+
+  这是最容易出错的地方，必须显式重构数据结构。
+
+   1. 输入 (Detection Data):
+       * 来源: ldpc_dec 的 det_data_sv
+       * 内容: [ Rx_User (info_num) | Rx_Parity (hm_m) ]
+       * 长度: g_blk_len
+
+   2. 重构 (Reconstruction) - 关键步骤:
+       * 操作: 将 Rx_Parity 向后搬移，中间插入强判决 0 (或最大LLR)
+       * 变量: sim_pckt->det_blk (或拷贝到 dec_di_blk)
+       * 内存布局变化:
+
+```
+          输入 Buffer: [ Rx_User ... | Rx_Parity ... ]
+                                     ^ 
+                                     |
+          (搬移 Parity) --------------+
+          |
+          v
+          目标 Buffer: [ Rx_User ... | 00...00 | Rx_Parity ... ]
+                       <--info_num--> <-pad_num-> <---hm_m----->
+```
+       * 总长: g_hm_n
+   3. 核心译码 (LDPC Decoder):
+       * 输入: sim_pckt->dec_di_blk (长度 g_hm_n)
+       * 算法: 使用 (bm_m, bm_n) 矩阵进行迭代，期间利用 mask_matrix 屏蔽无效节点。
+       * 输出: sim_pckt->dec_do_blk (长度 g_hm_n)
+
+   4. 提取输出 (Unpacking):
+       * 操作: 仅提取前面的用户数据
+       * 内容: dec_do_blk[0 ... info_num-1]
+       * 目标: dec_data_sv
+
+  ---
+
+  3. 关键代码实现片段 (参考)
+
+  在 ldpc_c_model_gen4.c 中：
+
+  `ldpc_config`:
+
+``` 
+  // 必须计算并保存这些全局变量
+  g_info_len = info_num;
+  g_hm_k     = (h_n + 1 - (h_m + 1)) * h_sc; 
+  g_hm_m     = (h_m + 1) * h_sc - (h_sc - pad_bit);
+  g_pad_num  = g_hm_k - info_num;
+  g_blk_len  = info_num + g_hm_m; 
+```
+  `ldpc_dec` (重构逻辑):
+```
+  // 假设 det_blk 已经读入了 g_blk_len 长度的数据 [User | Parity]
+  
+  // 1. 从后往前搬移 Parity，防止覆盖
+  // src_start = info_num
+  // dst_start = hm_k (即 info_num + pad_num)
+  // len = hm_m
+  for (int i = g_hm_m - 1; i >= 0; i--) {
+      sim_pckt->det_blk[g_hm_k + i] = sim_pckt->det_blk[g_info_len + i];
+  }
+  
+  // 2. 填充中间的 Padding 区域
+  // start = info_num
+  // len = pad_num
+  for (int i = 0; i < g_pad_num; i++) {
+      sim_pckt->det_blk[g_info_len + i] = 0; // 硬判决填0，软判决填最大确信度
+  }
+```

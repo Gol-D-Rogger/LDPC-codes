@@ -220,7 +220,6 @@ void read_config_file()
 
     // generate pchk file（支持可配置矩阵目录）
     sprintf(pchk_file, "%s/LDPC_%dx%dex%d_w%d_dense%d_QC_H.txt", matrix_dir, h_m, h_n, h_sc, h_wt, h_dense);
-    sprintf(drop_file, "%s/LDPC_%dx%dex%d_w%d_dense%d_drop_col.txt", matrix_dir, h_m, h_n, h_sc, h_wt, h_dense);
 
     // 6. max_sim_num
     fscanf(fp, "%d", &max_sim_num);

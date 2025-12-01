@@ -46,11 +46,11 @@ void ldpc_packet::ldpc_rd_phck(char *pchk_file)
             // insert mod2entry to base matrix
             if (col_shift >= 0)
             {
-                e = mod2sparse_add_entry(qc_bm, i, j);
+                e = mod2sparse_insert(qc_bm, i, j);
                 e->shift = col_shift;
 
                 for (int k=0; k < cir_sz; k++)
-                    mod2sparse_add_entry(qc_hm, i*cir_sz + k, j*cir_sz + (k + col_shift) % cir_sz);
+                    mod2sparse_insert(qc_hm, i*cir_sz + k, j*cir_sz + (k + col_shift) % cir_sz);
             }
         }
     }
@@ -590,8 +590,6 @@ void ldpc_packet::ldpc_decoder(enum dec_model dec_mode)
         dec_di_blk[info_len + i] = max_llr_bin;
 
     vec_copy(det_blk, dec_di_blk, info_len, hm_k, hm_m);
-    for (int i=hm_n-1;i>=hm_n-cir_sz+pad_bit; i--)
-        dec_di_blk[i] = 0;
 
     if (dec_mode == SKIP)
         ldpc_dec_skip();
@@ -1090,7 +1088,7 @@ void ldpc_packet::ldpc_dec_layer()
 
     cn_q_sign = (int **)calloc(bm_n*col_wt, sizeof(*cn_q_sign));
     for (int i = 0; i<bm_n*col_wt; i++)
-        cn_q_sign[i] = (int*)calloc(cir_sz, sizeof(*cn_q_sign[i])n);
+        cn_q_sign[i] = (int*)calloc(cir_sz, sizeof(*cn_q_sign[i]));
 
     layer_synd = (char *)calloc(cir_sz, sizeof(*layer_synd));
     vn_dec_hd = (char *)calloc(cir_sz, sizeof(*vn_dec_hd));
@@ -1106,18 +1104,18 @@ void ldpc_packet::ldpc_dec_layer()
         for (int j=0; j<cir_sz; j++)
         {
             cn_q_mem[i][j] = (float)llr_tbl[dec_di_blk[i*cir_sz+j]];
-        }
 
-        // when enable HRE LLR process, HRE bit llr be set 0
-        if (hre_llr == 1)
-        {
-            if ((i*cir_sz + j) < info_len)
-                if (hre_vec[i*cir_sz + j] == 1)
-                    cn_q_mem[i][j] = 0;
-            
-            if ((i*cir_sz + j) >= hm_k)
-                if (hre_vec[i*cir_sz + j - hm_k + info_len] == 1)
-                    cn_q_mem[i][j] = 0;
+            // when enable HRE LLR process, HRE bit llr be set 0
+            if (hre_llr == 1)
+            {
+                if ((i*cir_sz + j) < info_len)
+                    if (hre_vec[i*cir_sz + j] == 1)
+                        cn_q_mem[i][j] = 0;
+                
+                if ((i*cir_sz + j) >= hm_k)
+                    if (hre_vec[i*cir_sz + j - hm_k + info_len] == 1)
+                        cn_q_mem[i][j] = 0;
+            }
         }
     }
 

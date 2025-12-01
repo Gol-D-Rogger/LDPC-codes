@@ -135,11 +135,11 @@ struct s_ldpc_decoder_output
     int clock_cycles;
     int syndrome_weight_before;
     int syndrome_weight_after;
-    bool early_termination;
-    s_codeword corrected_codeword;
+    int early_termination;
+    s_hard_codeword corrected_codeword;
 };
 
-struct s_variable_nodes_bit
+struct s_variable_node_bit
 {
     short int likelihood;
     bool bit_hard;
@@ -149,14 +149,14 @@ struct s_variable_nodes_bit
     bool flipped;
 };
 
-struct s_variable_nodes_column
+struct s_variable_node_column
 {
-    s_variable_nodes_bit b[512];
+    s_variable_node_bit b[512];
 };
 
 struct s_variable_nodes
 {
-    s_variable_nodes_column c[80];
+    s_variable_node_column c[80];
 };
 
 struct s_check_node_row
