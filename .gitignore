@@ -4,12 +4,8 @@ build_dq/
 
 # Executable files
 gen4_ldpc_sim/.cache
-gen4_ldpc_sim/ssd_fc
-gen4_ldpc_sim/ssd_fc_dq
+ssd_fc*
 GenLDPC/ldpc_gen
-HREModel/ssd_fc_hre
-HREModel/ssd_fc_hre_only
-gen3_ldpc_sim/ssd_fc
 
 # Output directories
 GenLDPC/output/

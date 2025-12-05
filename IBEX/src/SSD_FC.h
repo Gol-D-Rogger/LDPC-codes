@@ -22,6 +22,8 @@ char dec_sel[10];
 enum fc_dec_mode dec_mode;
 int fdec_max_itr;
 int ldec_max_itr;
+int max_iter;
+int post_iter;
 int fdec_col_skip_itr;
 float alpha;
 int sd_num;

@@ -25,6 +25,7 @@ void ch_packet::ch_config(int w, int x, ch_model y, float z, int u, int v, int h
     if (ch_sel == CLEAN)
     {
         printf("[CH_TRX] Clean channel selected.\n");
+        rber = 0.0f;
     }
     else if (ch_sel == AWGN)
     {
@@ -155,6 +156,11 @@ void ch_packet::ch_transmit()
     }
 
     randomBinError(hre_vec, hre_pos, blk_len, hre_num);
+#ifdef HRE2_MODE
+    fixed_hre_cnt = hre_num;
+#else
+    fixed_hre_cnt = 0;
+#endif
 
     for (int i = 0; i < blk_len; i++)
     {
@@ -164,30 +170,20 @@ void ch_packet::ch_transmit()
         }
         else if (ch_sel == AWGN)
         {
+#ifdef HRE2_MODE
             float noiseless_sym = -1 * (tx_blk[i] * 2.0 - 1);
 
             if (hre_vec[i] == 1)
             {
-                rx_blk[i] = -noiseless_sym; // flip bit without AWGN for HRE positions
+                if (hre_model == 0)
+                    rx_blk[i] = -noiseless_sym; // flip without AWGN
+                else
+                    rx_blk[i] = -noiseless_sym + awgn_sigma * rand_gaussian(); // flip then add AWGN
             }
             else
             {
                 rx_blk[i] = noiseless_sym + awgn_sigma * rand_gaussian();
             }
-
-//             if (tx_blk[i] != ((rx_blk[i] >= 0) ? 0 : 1))
-//             {
-//                 err_cnt++;
-//             }
-//             if (hre_vec[i] == 1)
-//             {
-//                 if (hre_model == 0)
-//                     rx_blk[i] = 1.0;
-//                 else if (hre_model == 1)
-//                     rx_blk[i] = -1.0;
-//                 else
-//                     rx_blk[i] = rand_int(2) ? -1.0 : 1.0;
-//             }
 
             if (hre_vec[i] == 0)
             {
@@ -201,6 +197,23 @@ void ch_packet::ch_transmit()
             {
                 err_cnt++;
             }
+#else
+            rx_blk[i] = -1 * (tx_blk[i] * 2.0 - 1) + awgn_sigma * rand_gaussian();
+
+            if (tx_blk[i] != ((rx_blk[i] >= 0) ? 0 : 1))
+            {
+                err_cnt++;
+            }
+            if (hre_vec[i] == 1)
+            {
+                if (hre_model == 0)
+                    rx_blk[i] = 1.0;
+                else if (hre_model == 1)
+                    rx_blk[i] = -1.0;
+                else
+                    rx_blk[i] = rand_int(2) ? -1.0 : 1.0;
+            }
+#endif
         }
         else if (ch_sel == BSC)
         {
@@ -215,7 +228,11 @@ void ch_packet::ch_transmit()
     if (ch_sel == AWGN)
     {
         raw_err_num = err_cnt;
+#ifdef HRE2_MODE
         raw_err_awgn = awgn_err_cnt;
+#else
+        raw_err_awgn = 0;
+#endif
     }
     else
     {
@@ -246,6 +263,8 @@ void ch_packet::ch_llr_gen(float hd0_llr, float hd1_llr, int llr_tot_bit, int ll
         }
 
         max_llr_bin = bin_num - 1;
+        hi_conf0_bin = max_llr_bin;
+        hi_conf1_bin = 0;
 
         printf("[LLRGEN] Direct mode LLR table:\n");
         for (int i = 0; i < bin_num; i++)
@@ -463,6 +482,8 @@ void ch_packet::ch_llr_gen(float hd0_llr, float hd1_llr, int llr_tot_bit, int ll
         }
 
         max_llr_bin = bin_asc_ord[rd_num];
+        hi_conf0_bin = bin_asc_ord[rd_num];
+        hi_conf1_bin = bin_asc_ord[0];
     }
 
 #ifdef _CH_DEBUG
@@ -473,6 +494,8 @@ void ch_packet::ch_llr_gen(float hd0_llr, float hd1_llr, int llr_tot_bit, int ll
 void ch_packet::ch_detector()
 {
     // int err_cnt = 0;
+
+    int hre_like_cnt_tmp = 0;
 
     for (int i = 0; i < blk_len; i++)
     {
@@ -501,6 +524,16 @@ void ch_packet::ch_detector()
             }
         }
 
+        #ifdef HRE2_MODE
+        if (sd_type != DIRECT)
+        {
+            if ((tx_blk[i] == 1 && det_blk[i] == hi_conf0_bin) || (tx_blk[i] == 0 && det_blk[i] == hi_conf1_bin))
+            {
+                hre_like_cnt_tmp++;
+            }
+        }
+        #endif
+
         // check error count
 //         if (tx_blk[i] != ((rx_blk[i] >= 0) ? 0 : 1))
 //         {
@@ -512,6 +545,11 @@ void ch_packet::ch_detector()
     }
 
     // raw_err_num = err_cnt;
+#ifdef HRE2_MODE
+    hre_like_cnt = hre_like_cnt_tmp;
+#else
+    hre_like_cnt = 0;
+#endif
 
     if (sd_type != DIRECT)
     {

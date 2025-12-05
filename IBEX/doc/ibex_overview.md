@@ -21,10 +21,21 @@
 1. 硬判决：`rx_blk>=0 ? 0 : 1` 写入 `bit_hard`；尾部未用位填 0。
 2. 软位：根据 `rd_num` 选择 1 或 2 bit（`bit_questionable/bit_questionable2`），未配置的复制最弱等级（`likelihood_map[3]`）。
 3. 初始似然 `f_likelihood_levels(strobes=soft_bits, rows, syndrome_weight)`：
-   - `flip_thr = (1<<VN_BITS)-1-3/7`（3bit → max-3，8bit → max-7），`weak=flip_thr-4`，`strong=weak` 起始。
-   - 若 `strobes>0`：`address = syndrome_weight>>5`（饱和 63），按行数索引 `likelihood_init_coef_all` 得系数，分段累加 `delta_sum`，按 `VN_BITS` 进行衰减得到 `strong`（8bit 场景约 0.75 系数），四级 `level` 以 `strong/weak` 填充。
-   - 若 `strobes>1`：用 `likelihood_init_fraction` 对 `level[1]/[2]` 做分数插值，拉开 4 个等级。
-   - `likelihood_map[8]` 把软位组合 (00/01/10/11/...) 映射到 `level[x]`。
+   该函数负责在解码开始前，根据当前的错误严重程度（Syndrome Weight）和信道软信息，动态计算并初始化所有 VN 的似然值等级。它相当于解码器的“初始状态配置器”。
+
+   - **基础初始化**: 
+     * 设定 `max` (7) 和 `min` (1)。
+     * 设定 `flip_thr = (1<<VN_BITS)-1-3/7`（3bit → max-3，即 4）。这意味着初始确信的比特需要至少 3 个校验报错才会翻转。
+     * 初始 `weak` / `strong` 设为 `flip_thr - 4`。
+
+   - **动态调整 (`strobes>0`)**:
+     * 根据 `syndrome_weight`（错误总数）微调初始置信度。错误越多，信道越差，初始置信度应设得越低（越容易翻转）。
+     * 计算逻辑：`address = syndrome_weight >> 5`，查表 `likelihood_init_coef_all` 获取系数，计算衰减量 `delta_total`，进而调整 `strong` 等级。
+
+   - **软信息插值 (`strobes>1`)**:
+     * 若 `weak` 和 `strong` 差值足够大（`>=8`），利用 `likelihood_init_fraction` 对中间等级 `level[1]/[2]` 进行插值，拉开梯度。
+
+   - **输出**: 返回包含 `flip_thr`, `min/max` 和 `level[4]` 查找表的结构体。VN 初始化时根据软信息查表：`likelihood = level[soft_bit_val]`。
 
 **代码摘录：初始似然生成（`src/ldpc_codec.cpp`）**
 ```cpp
@@ -99,14 +110,29 @@ if (aggr && (weight == 4))
 ```
 
 ### C. 似然更新（`f_update_vn_post`）
-- 基本更新：`flipped ? (likelihood - weight) : (likelihood + weight - 1)`。
-- 后处理：  
-   - 若 `post_trigger`：  
-     * `likelihood_new == flip_thr` → 设为 `flip_thr+1`（巩固已翻转状态，增加“反转回去”的难度）  
-     * `likelihood_new < flip_thr` → 拉到 `flip_thr-1`（推向阈值边缘，降低翻转门槛）
-   - 若 `post_trigger2`：未翻转且 `weight==1` 且 `likelihood_new==flip_thr-1` → +1（轻推向阈值，加速收敛）。
-- 饱和到 `[min_likelihood, max_likelihood]`。
-- 判决翻转：`likelihood_new >= flip_thr`。
+
+该函数是 IBEX BF 算法中计算下一个状态似然值（Likelihood Update）的核心逻辑单元。它的输入包括当前的似然值、计算出的权重、以及各种后处理和激进模式的标志。它的输出是新的似然值。
+
+#### 1. 基础更新逻辑 (Basic Update)
+这是算法的主干，决定了似然值的基本走向。
+*   **如果当前已翻转 (`flipped == true`)**：
+    *   说明之前认为该比特是错的。现在的 `weight` 代表依然有多少个校验方程报错。
+    *   **逻辑**：`likelihood - weight`。报错越多，对“翻转”这个决定的信心越低（似然值下降）。
+*   **如果当前未翻转 (`flipped == false`)**：
+    *   说明之前认为该比特是对的。现在的 `weight` 代表有多少个校验方程指控该比特是错的。
+    *   **逻辑**：`likelihood + weight - 1`。报错越多，该比特是错的可能性越大（似然值上升）。此处 `-1` 为阻尼策略，防止增长过快。
+
+#### 2. 后处理强制干预 (Post-Processing)
+如果触发了随机扰动（`post_process`），算法会强行修改似然值：
+*   **巩固翻转 (`do_post_flipped`)**: 若 `new_likelihood == flip_thr`，强制设为 `flip_thr + 1`。既然已到边缘，就往里推一步，防止轻易退回。
+*   **诱导翻转 (`do_post_unflipped`)**: 若 `new_likelihood < flip_thr`，强制拉到 `flip_thr - 1`。强行拉到悬崖边，下一轮只要有微小报错（Weight>=1）就会翻转。
+
+#### 3. 激进后处理 (Post-Process 2 / Kick)
+针对 `Weight=1` 的顽固错误进行的特殊打击。
+*   若未翻转、`Weight=1` 且似然值在阈值边缘 (`flip_thr - 1`)，强制 `+1` 触发翻转。这用于消除单线连接的死锁错误。
+
+#### 4. 饱和截断
+最后保证数值不溢出 `[min, max]` 范围。
 
 **代码摘录：似然更新与后处理**
 ```cpp
@@ -124,7 +150,54 @@ if (post_process2 && !flipped && (weight == 1) && (likelihood_new == flip_thresh
 return likelihood_new;
 ```
 
-### D. 翻转与 syndrome 更新
+### D. 2-bit 位宽下的逻辑影响分析
+当 `VN_BITS` 缩减为 2 时（范围 0~3，`flip_thr=3`），`f_update_vn_post` **函数本身的代码逻辑不需要修改**，因为它依赖的是参数传入的 `flip_threshold`、`min`、`max`，具有自适应性。但其实际行为会发生以下变化：
+
+1.  **数值空间极度压缩**：
+    *   `flip_thr - 1` 变为 2 (Weak)。
+    *   `flip_thr + 1` 变为 4 (超出 Max=3，会被最后的饱和逻辑截断回 3)。
+    *   这意味着后处理中的“巩固翻转”操作 (`flip_thr+1`) 实际上变成了维持在最大值 3，不再有额外的缓冲空间。
+
+2.  **后处理行为**：
+    *   `do_post_unflipped` (拉向边缘): 会将似然值强制设为 2。下一轮只要 `Weight >= 2` (未翻转时 `L_new = 2 + 2 - 1 = 3`) 即可触发翻转。
+    *   `post_process2` (临门一脚): 当 `Likelihood=2` 且 `Weight=1` 时，强制 +1 变为 3，触发翻转。这在 2-bit 下依然有效且关键。
+
+3.  **饱和截断**：
+    *   由于动态范围小，`likelihood_new` 很容易触碰 `min` (1) 或 `max` (3)。代码末尾的 `if (likelihood_new <= min)` 和 `if (likelihood_new >= max)` 将频繁生效，保证数值安全。
+
+**结论**：该函数在 2-bit 模式下逻辑完备，无需改动代码，只需确保传入正确的阈值参数（`min=1`, `max=3`, `flip_thr=3`）。
+
+### E. 2-bit 自适应更新策略 (Adaptive Update Strategy)
+针对 2-bit 位宽下数值空间极小（0~3）导致的震荡问题，IBEX 引入了一种基于全局收敛趋势的自适应更新策略。该策略通过动态调整更新步长（Delta），在“维持翻转”和“撤销翻转”之间取得平衡。
+
+#### 1. 核心逻辑
+利用全局信号 `pushing`（Syndrome Weight 是否未下降）来决定奇数权重的取整方向。
+
+**Delta 计算公式**:
+```cpp
+int delta;
+if (VN_BITS <= 2)
+    // 2-bit 模式: 基础步长减半 (阻尼)。
+    // 若趋势不好 (pushing=true) 且权重为奇数，则向上取整 (加大力度)；否则向下取整 (保守)。
+    delta = (weight >> 1) + ((weight & 1) && pushing ? 1 : 0);
+else
+    delta = weight; // 常规模式
+```
+
+#### 2. 状态更新
+```cpp
+likelihood_new = flipped ? (likelihood - delta) : (likelihood + delta - 1);
+```
+*   **已翻转 (`flipped`)**: 执行减法。
+    *   **趋势好 (`!pushing`)**: `delta` 较小（向下取整）。少减一点，**保护当前的翻转状态**（惯性）。
+    *   **趋势坏 (`pushing`)**: `delta` 较大（向上取整）。多减一点，**果断撤销翻转**（纠错）。
+*   **未翻转 (`!flipped`)**: 执行加法。趋势不好时加速翻转，打破僵局。
+
+#### 3. 效果示例 (以 Weight=3, Likelihood=3 为例)
+*   **场景 A (收敛中)**: `delta = 1`。`New = 3 - 1 = 2` (Weak)。状态温和回退，避免直接变回 Strong。
+*   **场景 B (震荡中)**: `delta = 2`。`New = 3 - 2 = 1` (Strong)。状态大幅回退，强制撤销翻转。
+
+### F. 翻转与 syndrome 更新
 - 若翻转状态改变：沿该比特关联的所有 1 边把 `cn` 对应位取反（同 RTL mask/toggle 逻辑，含 `fade/mask` 分支）。
 - 每列末重算 `syndrome_weight`；若 0 则提前成功。
 

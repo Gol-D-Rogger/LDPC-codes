@@ -321,6 +321,7 @@ struct ldpc_packet : ch_packet
 
     // LDPC IBEX BF decoder
     void ldpc_dec_bf_ibex(s_ldpc_decoder_input, s_ldpc_decoder_parameters, s_h_matrix);
+    // void ldpc_dec_bf_ibex_2bit(s_ldpc_decoder_input, s_ldpc_decoder_parameters, s_h_matrix);
 
     // LDPC layer decoder
     void ldpc_dec_layer();

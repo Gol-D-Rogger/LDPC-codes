@@ -12,11 +12,12 @@
 // y --> CH selection
 // z --> CH parameter
 //############################
-void ch_packet::ch_config(int w, int x, ch_model y, float z)
+void ch_packet::ch_config(int w, int x, ch_model y, float z, int width)
 {
     info_len = w;
     blk_len = x;
     ch_sel = y;
+    VN_BITS = width;
     
     if (ch_sel == CLEAN)
     {

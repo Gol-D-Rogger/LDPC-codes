@@ -78,7 +78,7 @@ struct ch_packet{
     float llr_max;
     float llr_min;
 
-    void ch_config(int, int, enum ch_model, float);
+    void ch_config(int, int, enum ch_model, float, int);
     void ch_pckt_alloc();
     void ch_pckt_clean();
     void ch_llr_alloc(enum sd_mode, int, float*);

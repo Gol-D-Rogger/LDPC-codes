@@ -10,8 +10,15 @@
             "request": "launch",
             // "program": "${workspaceFolder}/GenLDPC/ldpc_gen",
             // "args": ["149", "129", "1"],
-            "program": "${workspaceFolder}/gen4_ldpc_sim/ssd_fc_dq",
-            "args": ["LDPC", "${workspaceFolder}/gen4_ldpc_sim/config/sdec_dq.cnfg", "AWGN", "5.0", "2", "/workspaces/LDPC-codes/GenLDPC/output"],
+            // "program": "${workspaceFolder}/gen4_ldpc_sim/ssd_fc_dq",
+            // "args": ["LDPC", "${workspaceFolder}/gen4_ldpc_sim/config/sdec_dq.cnfg", "AWGN", "5.0", "2", "/workspaces/LDPC-codes/GenLDPC/output"],
+            "program": "${workspaceFolder}/IBEX/ssd_fc",
+            "args": [
+                "LDPC",
+                "${workspaceFolder}/IBEX/config/Ibex_hd_row8.cnfg",
+                "AWGN",
+                "5.1"
+            ],
             "stopAtEntry": false,
             "cwd": "${fileDirname}",
             "environment": [],
@@ -31,12 +38,5 @@
                 }
             ]
         }
-
-
-
-
-
-
-
     ]
 }

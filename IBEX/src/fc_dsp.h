@@ -20,7 +20,7 @@ enum fc_dec_mode
     FC_MIX,
     FC_FDEC_G2,
     FC_MIX_G2,
-    FC_TBFDEC,
+    FC_IBEX,
     FC_PGDBF,
 };
 

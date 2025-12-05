@@ -396,7 +396,10 @@ void dsp_packet::mcrc_chk()
 void dsp_packet::ecc_encoder()
 {
     mcrc_gen();
-    ldpc_encoder();
+    if (cir_sz == 256)
+        ldpc_encoder();
+    else if (cir_sz == 512)
+        ldpc_ibex_encoder();
 }
 
 void dsp_packet::ecc_decoder(enum fc_dec_mode fc_mode)
@@ -424,6 +427,13 @@ void dsp_packet::ecc_decoder(enum fc_dec_mode fc_mode)
     if ((fc_mode == FC_FDEC_G2) || (fc_mode == FC_MIX_G2))
     {
         dec_mode = BF_G2;
+        ldpc_decoder(dec_mode);
+        mcrc_chk();
+    }
+
+    if (fc_mode == FC_IBEX)
+    {
+        dec_mode = BF_IBEX;
         ldpc_decoder(dec_mode);
         mcrc_chk();
     }

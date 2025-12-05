@@ -44,6 +44,9 @@ int main (int argc, char **argv)
     struct dsp_packet dsp_pckt;
     struct dsp_packet *sim_pckt = &dsp_pckt;
 
+    long ibex_itr_tot = 0;
+    long *ibex_cnvg_itr;
+
 #ifdef _SIM_DUMP
     fp=fopen("./output/err_num_dist.txt", "w");
 #endif
@@ -55,13 +58,25 @@ int main (int argc, char **argv)
     H_M = h_m*h_sc;
     H_N = h_n*h_sc;
     H_K = h_k*h_sc;
-    dsp_info_len = dsp_src_len + 32;
-    dsp_pad_len = H_K - dsp_info_len;
-    printf("[DEBUG GEN MATRIX] h_n%d, h_m%d, h_k%d, H_N%d, H_M%d, H_K%d\n", h_n, h_m, h_k, H_N, H_M, H_K);
-    dsp_blk_len = dsp_info_len + H_M;
+
+    if (dec_mode == FC_IBEX)
+    {
+        dsp_info_len =bytes_of_userdata*8;
+        dsp_pad_len = H_K - dsp_info_len;
+        printf("[DEBUG GEN MATRIX] h_n%d, h_m%d, h_k%d, H_N%d, H_M%d, H_K%d\n", h_n, h_m, h_k, H_N, H_M, H_K);
+        dsp_blk_len = dsp_info_len + bytes_of_parity*8;
+    }
+    else
+    {
+        dsp_info_len = dsp_src_len + 32;
+        dsp_pad_len = H_K - dsp_info_len;
+        printf("[DEBUG GEN MATRIX] h_n%d, h_m%d, h_k%d, H_N%d, H_M%d, H_K%d\n", h_n, h_m, h_k, H_N, H_M, H_K);
+        dsp_blk_len = dsp_info_len + H_M;
+    }
     fdec_cnvg_itr = (long*)calloc((fdec_max_itr>0) ? fdec_max_itr : -1*fdec_max_itr, sizeof(*fdec_cnvg_itr));
     ldec_cnvg_itr = (long*)calloc((ldec_max_itr>0) ? ldec_max_itr : -1*ldec_max_itr, sizeof(*ldec_cnvg_itr));
     err_num_dist = (long*)calloc(H_N/64+1, sizeof(*err_num_dist));
+    ibex_cnvg_itr = (long*)calloc((max_iter>0) ? (max_iter+1) : (-1*max_iter+1), sizeof(*ibex_cnvg_itr));
 
     printf("------------------Data Format--------------------\n");
     printf("META data       : %dB\n", dsp_meta_size/8);
@@ -71,7 +86,10 @@ int main (int argc, char **argv)
     printf("MCRC size       : 4B\n");
     printf("ECC user data   : %dB\n", dsp_info_len/8);
     printf("ECC padding     : %dB\n", dsp_pad_len/8);
-    printf("ECC parity      : %dB\n", H_M/8);
+    if (dec_mode == FC_IBEX)
+        printf("ECC parity    : %dB\n", bytes_of_parity);
+    else
+        printf("ECC parity      : %dB\n", H_M/8);
     printf("ECC CW size     : %dB\n", dsp_blk_len/8);
     printf("ECC CW rate     : %f\n", dsp_info_len*1.0/dsp_blk_len);
     printf("--------------------------------------------------\n");
@@ -80,7 +98,7 @@ int main (int argc, char **argv)
 #ifdef _SIM_DEBUG    
     printf("[SIM DEBUG] Configuring CH ...\n");
 #endif
-    sim_pckt->ch_config(dsp_info_len, dsp_blk_len, ch_mode, ch_para);
+    sim_pckt->ch_config(dsp_info_len, dsp_blk_len, ch_mode, ch_para, VN_BITS);
     sim_pckt->ch_llr_alloc(sd_type, sd_num, vref);
 
 #ifdef _SIM_DEBUG
@@ -148,7 +166,7 @@ int main (int argc, char **argv)
         }
 
         // generate random data
-        if ((sim_mode==FC_SIM) && (!skip_ecc_encoder))
+        if (sim_mode==FC_SIM)
         {
             for (int i=0; i<dsp_lba_len; i++)
             {
@@ -160,15 +178,25 @@ int main (int argc, char **argv)
                 sim_pckt->wr_meta_blk[i] = rand_int(2);
             }
         }
-        else if ((sim_mode==LDPC_SIM) && (!skip_ecc_encoder))
+        else if (sim_mode==LDPC_SIM)
         {
-            for (int i=0; i<dsp_src_len; i++)
+            if (dec_mode != FC_IBEX)
             {
-                sim_pckt->wr_rand_blk[i] = rand_int(2);
+                for (int i=0; i<dsp_src_len; i++)
+                {
+                    sim_pckt->wr_rand_blk[i] = rand_int(2);
+                }
+            }
+            else
+            {
+                for (int i=0; i<dsp_meta_size; i++)
+                    sim_pckt->wr_rand_blk[i] = 0;
+                for (int i=0; i<dsp_lba_size*dsp_lba_num; i++)
+                    sim_pckt->wr_rand_blk[i+dsp_meta_size] = rand_int(2);
             }
         }
         
-        if ((sim_mode==FC_SIM) && (!skip_ecc_encoder))
+        if (sim_mode==FC_SIM)
         {
 #ifdef _SIM_DEBUG
             printf("[SIM DEBUG] Insert META for packet %d\n", sim_cnt);
@@ -176,7 +204,7 @@ int main (int argc, char **argv)
             sim_pckt->meta_insert();
         }
 
-        if ((sim_mode==FC_SIM) && (!skip_ecc_encoder))
+        if (sim_mode==FC_SIM)
         {
 #ifdef _SIM_DEBUG
             printf("[SIM DEBUG] Scramble packet %d\n", sim_cnt);
@@ -187,14 +215,7 @@ int main (int argc, char **argv)
 #ifdef _SIM_DEBUG
         printf("[SIM DEBUG] encoding packet %d\n", sim_cnt);
 #endif
-        if (!skip_ecc_encoder)
-        {
-            sim_pckt->ecc_encoder();
-        }
-        else
-        {
-            vec_clr(sim_pckt->tx_blk, dsp_blk_len);
-        }
+        sim_pckt->ecc_encoder();
 
 #ifdef _SIM_DEBUG
         printf("[SIM DEBUG] trasmitting packet %d\n", sim_cnt);
@@ -206,8 +227,13 @@ int main (int argc, char **argv)
 #endif
         sim_pckt->ch_detector();        
 
+        if (dec_mode == FC_IBEX)
+        {
+            sim_pckt->ldpc_ibex_parameters(post_process_en, syndrome_weight_thr_qc, syndrome_weight_thr_post, early_terminate_dis);
+            sim_pckt->ldpc_ibex_input(syndrome_cal_only, max_iter, post_iter);
+        }
 #ifdef _SIM_DEBUG
-        printf("[SIM DEBUG] decoding packet %d\n", sim_cnt);
+        printf("[SIM DEBUG] decoding packet %d (%d)\n", sim_cnt, sim_pckt->raw_err_num);
 #endif
         sim_pckt->ecc_decoder(dec_mode);
 
@@ -230,12 +256,16 @@ int main (int argc, char **argv)
             printf("[SIM DEBUG] Packet %d TRIGGERED RETRY DECODER!\n", sim_cnt);
 #endif            
         }
-        else
+        else if (dec_mode != FC_IBEX)
         {
             fdec_cnvg_itr[sim_pckt->cnvg_itr]++;
         }
+        else
+        {
+            ibex_cnvg_itr[sim_pckt->ldpc_decoder_output.iterations]++;
+        }
 
-        if ((sim_mode==FC_SIM) && (!skip_ecc_encoder))
+        if (sim_mode==FC_SIM)
         {
 #ifdef _SIM_DEBUG
             printf("[SIM DEBUG] Descramble packet %d\n", sim_cnt);
@@ -243,7 +273,7 @@ int main (int argc, char **argv)
             sim_pckt->rand_decoder(1,0,0);
         }
 
-        if ((sim_mode==FC_SIM) && (!skip_ecc_encoder))
+        if (sim_mode==FC_SIM)
         {
 #ifdef _SIM_DEBUG
             printf("[SIM DEBUG] META extract for packet %d\n", sim_cnt);
@@ -251,7 +281,7 @@ int main (int argc, char **argv)
             sim_pckt->meta_extract();
         }            
 
-        if ((sim_mode==FC_SIM) && (!skip_ecc_encoder))
+        if (sim_mode==FC_SIM)
         {
 #ifdef _SIM_DEBUG
             printf("[SIM DEBUG] LBA data compare packet %d\n", sim_cnt);
@@ -264,7 +294,7 @@ int main (int argc, char **argv)
             sim_pckt->meta_err = vec_cmp(sim_pckt->wr_meta_blk, sim_pckt->rd_meta_blk, 0, 0, dsp_meta_size);
         }
         
-        if ((sim_mode == FC_SIM) && (!skip_ecc_encoder))
+        if (sim_mode == FC_SIM)
         {
 #ifdef _SIM_DUMP
             sim_pckt->packet_dump(sim_cnt);
@@ -299,7 +329,9 @@ int main (int argc, char **argv)
         {
             sim_err++;
             printf("[SIM] Packet %d error (%d): %d-bit errors! \n", sim_cnt, sim_err, sim_pckt->raw_err_num);
+            printf("[SIM] Packet %d error (%d): Syndrome weight is %d! \n", sim_cnt, sim_err, sim_pckt->ldpc_decoder_output.syndrome_weight_after);
         }
+        
 
         if (sim_pckt->cw_fail==1)
         {
@@ -309,7 +341,7 @@ int main (int argc, char **argv)
         if (sim_pckt->cw_miscorr==1)
         {
             cw_misc_tot++;
-            printf("[SIM] - DECODING MISCORRECTED(%ld)\n", cw_misc_tot);
+            printf("[SIM] - DECODING MISCORRECTION(%ld)\n", cw_misc_tot);
         }
         if (sim_pckt->mcrc_err==1)
         {
@@ -330,17 +362,17 @@ int main (int argc, char **argv)
         if ((sim_pckt->cw_fail == 1) || (sim_pckt->cw_miscorr==1) ||
             (sim_pckt->mcrc_err==1) || (sim_pckt->lba_err==1) || (sim_pckt->meta_err==1))
         {
-            printf("[SIM] Statistical result of %d packets simulated: \n", sim_cnt);
+            printf("[SIM] Statistical result of %d packets simulated: \n", sim_cnt+1);
             printf("[SIM] SNR       : %f\n", ch_para);
             printf("[SIM] FAIL CW   : %ld\n", cw_fail_tot);
-            printf("[SIM] RAW BER   : %e\n", raw_err_tot*1.0/sim_cnt/dsp_blk_len);
-            printf("[SIM] LDPC BER  : %e\n", dec_err_tot*1.0/sim_cnt/dsp_blk_len);
-            printf("[SIM] LDPC FER  : %e\n", cw_fail_tot*1.0/sim_cnt);
-            printf("[SIM] LDPC MIS  : %e\n", cw_misc_tot*1.0/sim_cnt);
-            printf("[SIM] MCRC FER  : %e\n", cw_mcrc_tot*1.0/sim_cnt);
-            printf("[SIM] DATA FER  : %e\n", (lba_err_tot+meta_err_tot)*1.0/sim_cnt);
+            printf("[SIM] RAW BER   : %e\n", raw_err_tot*1.0/(sim_cnt+1)/dsp_blk_len);
+            printf("[SIM] LDPC BER  : %e\n", dec_err_tot*1.0/(sim_cnt+1)/dsp_blk_len);
+            printf("[SIM] LDPC FER  : %e\n", cw_fail_tot*1.0/(sim_cnt+1));
+            printf("[SIM] LDPC MIS  : %e\n", cw_misc_tot*1.0/(sim_cnt+1));
+            printf("[SIM] MCRC FER  : %e\n", cw_mcrc_tot*1.0/(sim_cnt+1));
+            printf("[SIM] DATA FER  : %e\n", (lba_err_tot+meta_err_tot)*1.0/(sim_cnt+1));
             if ((dec_mode == FC_MIX) || (dec_mode==FC_MIX_G2))
-                printf("[SIM] ECC Retry Rate: %e\n", ldec_tot*1.0/sim_cnt);
+                printf("[SIM] ECC Retry Rate: %e\n", ldec_tot*1.0/(sim_cnt+1));
         } 
     }
 
@@ -353,7 +385,7 @@ int main (int argc, char **argv)
     printf("[STATISTICS] LDPC BER  : %e\n", dec_err_tot*1.0/sim_cnt/dsp_blk_len);
     printf("[STATISTICS] LDPC FER  : %e\n", cw_fail_tot*1.0/sim_cnt);
     printf("[STATISTICS] LDPC MIS  : %e\n", cw_misc_tot*1.0/sim_cnt);
-    printf("[STATISTICS] MCRC ERR  : %e\n", cw_mcrc_tot*1.0/sim_cnt);
+    printf("[STATISTICS] MCRC FER  : %e\n", cw_mcrc_tot*1.0/sim_cnt);
     printf("[STATISTICS] DATA FER  : %e\n", (lba_err_tot+meta_err_tot)*1.0/sim_cnt);
 
     if ((dec_mode == FC_MIX) || (dec_mode==FC_MIX_G2))
@@ -376,8 +408,8 @@ int main (int argc, char **argv)
 
     if ((dec_mode == FC_FDEC) || (dec_mode==FC_FDEC_G2) || (dec_mode==FC_MIX) || (dec_mode==FC_MIX_G2))
     {
-        printf("[STATISTICS] Fast decoder average iteration: %f\n", fdec_itr_tot*1.0/sim_cnt);
-        printf("[STATISTICS] Fast decoder saves %f cycles from column skip\n", (100-100.0*fdec_cyc_tot/fdec_cyc_org));
+        printf("[STATISTICS] Fast Decoder average iteration: %f\n", fdec_itr_tot*1.0/sim_cnt);
+        printf("[STATISTICS] Fast Decoder saves %f cycles from column skip\n", (100-100.0*fdec_cyc_tot/fdec_cyc_org));
 
         printf("[STATISTICS] Iteration distribution as below: \n");
         for (int i=0; i<sim_pckt->fdec_max_itr; i=i+8)
@@ -386,14 +418,14 @@ int main (int argc, char **argv)
             for (int j=0; j<8; j++)
             {
                 if ((i+j) < sim_pckt->fdec_max_itr)
-                    printf("%8d ", i+j+1);
+                    printf("%8d |", i+j+1);
             }
             printf("\n");
             printf("Num: ");
             for (int j=0; j<8; j++)
             {
                 if ((i+j) < sim_pckt->fdec_max_itr)
-                    printf("%8ld ", fdec_cnvg_itr[i+j]);
+                    printf("%8ld |", fdec_cnvg_itr[i+j]);
             }
             printf("\n");
             printf("------------------------------------------------------------\n");
@@ -402,16 +434,16 @@ int main (int argc, char **argv)
 
     if ((dec_mode==FC_RDEC) || ((dec_mode==FC_MIX) && ldec_tot>0) || ((dec_mode==FC_MIX_G2) && ldec_tot>0))
     {
-        printf("[STATISTICS] Retry decoder average iteration: %f\n", ldec_itr_tot*1.0/ldec_tot);
+        printf("[STATISTICS] Retry Decoder average iterations: %f\n", ldec_itr_tot*1.0/ldec_tot);
 
-        printf("[STATISTICS] Retry decoder iteration distribution as below: \n");
+        printf("[STATISTICS] Retry Decoder iteration distribution as below: \n");
         for (int i=0; i<sim_pckt->ldec_max_itr; i=i+8)
         {
             printf("Itr: ");
             for (int j=0; j<8; j++)
             {
                 if ((i+j) < sim_pckt->ldec_max_itr)
-                    printf("%8d ", i+j+1);
+                    printf("%8d |", i+j+1);
             }
             printf("\n");
             printf("Num: ");
@@ -423,6 +455,15 @@ int main (int argc, char **argv)
             printf("\n");
             printf("------------------------------------------------------------\n");
         }
+    }
+    else
+    {
+        printf("--------------------------------------------------------------\n");
+        for (int i=0; i<max_iter+1; i++)
+            ibex_itr_tot += i*ibex_cnvg_itr[i];
+
+        printf("[STATISTICS] IBEX Decoder average iterations: %f\n", ibex_itr_tot*1.0/sim_cnt);
+        printf("--------------------------------------------------------------\n");
     }
 
 #ifdef _SIM_DUMP
@@ -442,6 +483,7 @@ int main (int argc, char **argv)
     free(fdec_cnvg_itr);
     free(ldec_cnvg_itr);
     free(err_num_dist);
+    free(ibex_cnvg_itr);
     free(vref);
 
 #ifdef _SIM_DUMP
@@ -564,6 +606,12 @@ void read_config_file()
     fscanf(fp, "%d", &dsp_lba_num);
     fgets(str_tmp, 800, fp);
 
+    fscanf(fp, "%d", &bytes_of_userdata);
+    fgets(str_tmp, 800, fp);
+
+    fscanf(fp, "%d", &bytes_of_parity);
+    fgets(str_tmp, 800, fp);
+
     dsp_meta_size = dsp_meta_size*8; // byte --> bit
     dsp_lba_size = dsp_lba_size*8; // byte --> bit
     dsp_lba_len = dsp_lba_size*dsp_lba_num;
@@ -591,8 +639,14 @@ void read_config_file()
     fgets(str_tmp, 800, fp);
 
     // generate pchk file（支持可配置矩阵目录）
-    sprintf(pchk_file, "%s/LDPC_%dx%dex%d_w%d_dense%d_QC_H.txt", matrix_dir, h_m, h_n, h_sc, h_wt, h_dense);
-    sprintf(drop_file, "%s/LDPC_%dx%dex%d_w%d_dense%d_drop_col.txt", matrix_dir, h_m, h_n, h_sc, h_wt, h_dense);
+    // sprintf(pchk_file, "%s/LDPC_%dx%dex%d_w%d_dense%d_QC_H.txt", matrix_dir, h_m, h_n, h_sc, h_wt, h_dense);
+    if(h_sc==512)
+    {
+        h_m = (bytes_of_parity+63)/64;
+        h_n = (bytes_of_userdata+63)/64 + h_m;
+        printf("LDPC DEBUG %d %d\n", h_m, h_n);
+    }
+
 
     // 6. max_sim_num
     fscanf(fp, "%d", &max_sim_num);
@@ -620,6 +674,8 @@ void read_config_file()
         dec_mode = FC_MIX;
     else if (strcmp(dec_sel, "FC_MIX2")==0)
         dec_mode = FC_MIX_G2;
+    else if (strcmp(dec_sel, "FC_IBEX")==0)
+        dec_mode = FC_IBEX;
 
     // 0. Maximum LDPC BF decoding iteration
     fscanf(fp, "%d", &fdec_max_itr);
@@ -632,6 +688,32 @@ void read_config_file()
     // 10. Maximum LDPC Layer decoding iteration
     fscanf(fp, "%d", &ldec_max_itr);
     fgets(str_tmp, 800, fp);
+
+    // ----------------IBEX Para-------------------------------
+    fscanf(fp, "%d", &post_iter);
+    fgets(str_tmp, 800, fp);
+
+    fscanf(fp, "%d", &max_iter);
+    fgets(str_tmp, 800, fp);
+
+    fscanf(fp, "%d", &syndrome_weight_thr_qc);
+    fgets(str_tmp, 800, fp);
+
+    fscanf(fp, "%d", &syndrome_weight_thr_post);
+    fgets(str_tmp, 800, fp);
+
+    fscanf(fp, "%d", &post_process_en);
+    fgets(str_tmp, 800, fp);
+
+    fscanf(fp, "%d", &syndrome_cal_only);
+    fgets(str_tmp, 800, fp);
+
+    fscanf(fp, "%d", &early_terminate_dis);
+    fgets(str_tmp, 800, fp);
+
+    fscanf(fp, "%d", &VN_BITS);
+    fgets(str_tmp, 800, fp);
+    // ----------------------------------------------------------
 
     // 11. alpha
     fscanf(fp, "%f", &alpha);
@@ -696,7 +778,7 @@ void read_config_file()
     }
     fgets(str_tmp, 800, fp);
 
-    if (dec_mode!=FC_RDEC)
+    if (dec_mode!=FC_RDEC && dec_mode != FC_IBEX)
     {
         sd_num = 1;
         rd_num = 1;
@@ -720,16 +802,6 @@ void read_config_file()
     fscanf(fp, "%lx", &rand32_poly_val);
     fgets(str_tmp, 800, fp);
 
-    // 25. Skip ECC encoder flag (optional, default 0)
-    if (fscanf(fp, "%d", &skip_ecc_encoder) == 1)
-    {
-        fgets(str_tmp, 800, fp);
-    }
-    else
-    {
-        skip_ecc_encoder = 0;
-    }
-
     fclose(fp);
 
     // print out simulation configuration
@@ -746,14 +818,7 @@ void read_config_file()
         printf("Error injection channel with %d random bit errors\n", (int)ch_para);
     else if (ch_mode==MAX_ERR)
         printf("Max Error injection channel with up to %d random bit errors\n", (int)ch_para);
-    else if (ch_mode==ALL_ZERO)
-        printf("ALL_ZERO channel forcing zero codeword with SNR=%f\n", ch_para);
 
-    if (skip_ecc_encoder)
-        printf("ECC encoder: SKIPPED (tx_blk uses custom/all-zero pattern)\n");
-    else
-        printf("ECC encoder: enabled\n");
-    
     if (dec_mode==FC_SKIP)
         printf("Skip ECC decoder\n");
     else if (dec_mode==FC_FDEC)
@@ -766,14 +831,25 @@ void read_config_file()
         printf("Fast decoder (GEN2) only (HD only)\n");
     else if (dec_mode==FC_MIX_G2)
         printf("Fast (GEN2) + retry decoder (HD only)\n");
+    else if (dec_mode==FC_IBEX)
+        printf("IBEX LDPC decoder (%d-bit soft data)\n", sd_num);
 
-    printf("Fast decoder: max_iter = %d\n", fdec_max_itr);
-    if (fdec_col_skip_itr == 0)
-        printf("Column skip feature OFF\n");
+    if (dec_mode != FC_IBEX)
+    {
+        printf("Fast decoder: max_iter = %d\n", fdec_max_itr);
+        if (fdec_col_skip_itr == 0)
+            printf("Column skip feature OFF\n");
+        else
+            printf("Column skip @ iterations %d\n", fdec_col_skip_itr);
+        printf(" Retry decoder: max_iter = %d\n", ldec_max_itr);
+        printf("alpha = %f\n", alpha);
+    }
     else
-        printf("Column skip @ iterations %d\n", fdec_col_skip_itr);
-    printf("alpha = %f\n", alpha);
-
+    {
+        printf("IBEX decoder: max_normal_iter = %d\n", post_iter);
+        printf("IBEX decoder: max_iter = %d\n", max_iter);
+    }
+    
     if (finite_mode==0)
         printf("Floating simulation \n");
     else

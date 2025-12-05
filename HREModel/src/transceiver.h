@@ -15,6 +15,8 @@ struct ch_packet{
           ber(0.0f),
           raw_err_num(0),
           raw_err_awgn(0),
+          hre_like_cnt(0),
+          fixed_hre_cnt(0),
           tx_blk(NULL),
           rx_blk(NULL),
           det_blk(NULL),
@@ -35,6 +37,8 @@ struct ch_packet{
           sd_asc_ord(NULL),
           bin_distr(NULL),
           max_llr_bin(0),
+          hi_conf0_bin(0),
+          hi_conf1_bin(0),
           llr_tot_num(0),
           llr_frac_num(0),
           llr_max(0.0f),
@@ -47,6 +51,8 @@ struct ch_packet{
     float  ber;
     int    raw_err_num;
     int    raw_err_awgn;
+    int    hre_like_cnt;
+    int    fixed_hre_cnt;
     char  *tx_blk;
     float *rx_blk;
     char  *det_blk;
@@ -79,6 +85,8 @@ struct ch_packet{
     int   *bin_distr;
 
     int   max_llr_bin;
+    int   hi_conf0_bin;
+    int   hi_conf1_bin;
 
     int   llr_tot_num;
     int   llr_frac_num;
