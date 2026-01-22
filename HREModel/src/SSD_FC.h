@@ -33,10 +33,11 @@ int synd_wt_thrshd;
 int hre_bit;
 int hre_mode;
 int hre_dec;
+int target_fbc;  // Target total FBC for fixed-FBC mode (0=disabled)
 
 // LDPC quantization
 int finite_mode;
-int finite_q_num;
+int finite_q_num;   
 int finite_r_num;
 int finite_f_num;
 int finite_llr_num;

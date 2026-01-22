@@ -72,8 +72,8 @@ void ldpc_packet::ldpc_rd_phck(char *pchk_file, char *mask_file)
             fscanf(fp, "%d", &col_shift);
 
             // check mask value
-            if ((mask_matrix[i][j] == 2) && (col_shift != 0) ||
-                (mask_matrix[i][j] == 1) && (col_shift != 0))
+            if (((mask_matrix[i][j] == 2) && (col_shift != 0)) ||
+                ((mask_matrix[i][j] == 1) && (col_shift != 0)))
             {
                 printf("i = %d, j = %d\n", i, j);
                 printf("[LDPC] Error: mask or drop shift value is invalid\n");
@@ -187,27 +187,27 @@ void ldpc_packet::ldpc_gen_gm()
 
     printf("[LDPC] Dump H matrix to file %s\n", MH);
     fp = fopen(MH, "w");
-    mod2sprase_print(fp, qc,hm);
+    mod2sparse_print(fp, qc,hm);
     fclose(fp);
     printf("[LDPC] Dump A matrix to file %s\n", MA);
     fp = fopen(MA, "w");
-    mod2sprase_print(fp, qc_a);
+    mod2sparse_print(fp, qc_a);
     fclose(fp);
     printf("[LDPC] Dump B matrix to file %s\n", MB);
     fp = fopen(MB, "w");
-    mod2sprase_print(fp, qc_b);
+    mod2sparse_print(fp, qc_b);
     fclose(fp);
     printf("[LDPC] Dump C matrix to file %s\n", MC);
     fp = fopen(MC, "w");
-    mod2sprase_print(fp, qc_c);
+    mod2sparse_print(fp, qc_c);
     fclose(fp);
     printf("[LDPC] Dump D matrix to file %s\n", MD);
     fp = fopen(MD, "w");
-    mod2sprase_print(fp, qc_d);
+    mod2sparse_print(fp, qc_d);
     fclose(fp);
     printf("[LDPC] Dump E matrix to file %s\n", ME);
     fp = fopen(ME, "w");
-    mod2sprase_print(fp, qc_e);
+    mod2sparse_print(fp, qc_e);
     fclose(fp);
 #endif    
 
@@ -235,7 +235,7 @@ void ldpc_packet::ldpc_gen_gm()
     sprintf(MFi, "./output/LDPC_%dx%dwx%d_w%d_dense6_Fi_matrix.txt", bm_m, bm_n, cir_sz, col_wt);
     printf("[LDPC] Dump inverse F matrix to file %s\n", MFi);
     fp = fopen(MFi, "w");
-    mod2sprase_print(fp, qc_fi);
+    mod2sparse_print(fp, qc_fi);
     fclose(fp);
 #endif
 
@@ -270,8 +270,8 @@ void ldpc_packet::ldpc_config_dq(int m, int n, int sc, int st, int wt, int pad_b
     tm_sz = st;
     cir_sz = sc;
     col_wt = wt;
-    hm_m = bm_m * sc - mask_len;
-    hm_n = bm_n * sc - mask_len;
+    hm_m = bm_m * sc;
+    hm_n = bm_n * sc;
     hm_k = hm_n - hm_m;
 
     pad_len = hm_k - info_len;
@@ -862,7 +862,7 @@ void ldpc_packet::ldpc_dec_config_dq(int max_fdec_itr, int fdec_col_skip, int ma
     flp_thrshd0_w[6] = 5;
     flp_thrshd0_w[7] = 5;
     for (int i=8; i<fdec_max_itr;i++)
-        flp_thrshd0[i] = 4;
+        flp_thrshd0_w[i] = 4;
 
     flp_thrshd1_s[0] = 3;
     flp_thrshd1_s[1] = 2;
@@ -1218,12 +1218,12 @@ void ldpc_packet::ldpc_pckt_alloc()
 {
     ch_pckt_alloc();
 
-    dec_blk = (char *)calloc(blk_len, sizeof(*dec_blk));
-    dec_do_blk = (char *)calloc(hm_n, sizeof(*dec_do_blk));
     usr_blk = (char *)calloc(info_len, sizeof(*usr_blk));
     enc_di_blk = (char *)calloc(hm_k, sizeof(*enc_di_blk));
     enc_do_blk = (char *)calloc(hm_n, sizeof(*enc_do_blk));
-    dec_di_blk = (char *)calloc(hm_n, sizeof(*dec_di_blk));
+    dec_di_blk = (char *)calloc(hm_n + mask_len, sizeof(*dec_di_blk));
+    dec_do_blk = (char *)calloc(hm_n + mask_len, sizeof(*dec_do_blk));
+    dec_blk = (char *)calloc(blk_len, sizeof(*dec_blk));
 
     cw_fail = 0;
     cw_miscorr = 0;
@@ -1243,6 +1243,144 @@ void ldpc_packet::ldpc_pckt_clean()
     free(dec_do_blk);
 } // ldpc_pckt_free
 
+
+void ldpc_packet::ldpc_encoder()
+{
+    char *az1, *eaz1, *cz1, *sumz1, *z2, *bz2, *z3;
+
+    az1 = (char *)calloc(tm_sz*cir_sz - mask_len, sizeof(*az1));
+    // Z2, E*(A*Z1), C*Z1, and their sum are size (bm_m - tm_sz) * cir_sz
+    eaz1 = (char *)calloc((bm_m - tm_sz) * cir_sz, sizeof(*eaz1));
+    cz1  = (char *)calloc((bm_m - tm_sz) * cir_sz, sizeof(*cz1));
+    sumz1= (char *)calloc((bm_m - tm_sz) * cir_sz, sizeof(*sumz1));
+    z2   = (char *)calloc((bm_m - tm_sz) * cir_sz, sizeof(*z2));
+    bz2 = (char *)calloc(tm_sz*cir_sz - mask_len, sizeof(*bz2));
+    z3 = (char *)calloc(tm_sz*cir_sz - mask_len, sizeof(*z3));
+
+#ifdef _LDPC_DEBUG_DUMP
+    FILE *aufp  = fopen("./output/au_dump.txt",  "w");
+    FILE *cufp  = fopen("./output/cu_dump.txt",  "w");
+    FILE *eaufp = fopen("./output/eau_dump.txt", "w");
+
+#define KY_PRINT_VEC_HEX(fp, label, vec, len)                                      \
+    do {                                                                           \
+        if ((fp) != NULL) {                                                        \
+            int _len = (len);                                                      \
+            fprintf((fp), "%s:\n", (label));                                       \
+            int _nib = (_len + 3) / 4;                                             \
+            int _per_line = 64; /* 32 bytes = 64 hex digits */                    \
+            int _cnt = 0;                                                          \
+            for (int _i = _nib - 1; _i >= 0; --_i)                                 \
+            {                                                                      \
+                int _tmp = 0;                                                      \
+                for (int _k = 3; _k >= 0; --_k)                                    \
+                {                                                                  \
+                    int _idx = _i * 4 + _k;                                        \
+                    _tmp <<= 1;                                                    \
+                    if (_idx < _len)                                               \
+                        _tmp += ((vec)[_idx] & 1);                                 \
+                }                                                                  \
+                fprintf((fp), "%x", _tmp);                                         \
+                _cnt++;                                                            \
+                if (_cnt == _per_line)                                             \
+                {                                                                  \
+                    fprintf((fp), "\n");                                           \
+                    _cnt = 0;                                                      \
+                }                                                                  \
+            }                                                                      \
+            if (_cnt != 0)                                                         \
+                fprintf((fp), "\n");                                               \
+        }                                                                          \
+    } while (0)
+#endif
+
+    // padding 0s
+    vec_copy(enc_di_blk, usr_blk, 0, 0, info_len);
+    for (int i=0; i<pad_len; i++)
+        enc_di_blk[hm_k-pad_len+i] = 0;
+
+#ifdef _LDPC_DEBUG_DUMP
+    KY_PRINT_VEC_HEX(aufp, "USR_BLK", usr_blk, info_len);
+    KY_PRINT_VEC_HEX(aufp, "ENC_DI_BLK", enc_di_blk, hm_k);
+#endif
+
+    // A*Z1
+    mod2sparse_mulvec(qc_a, enc_di_blk, az1);
+#ifdef _LDPC_DEBUG_DUMP
+    KY_PRINT_VEC_HEX(aufp, "AZ1", az1, tm_sz*cir_sz - mask_len);
+#endif
+
+    // E*(A*Z1)
+    mod2sparse_mulvec(qc_e, az1, eaz1);
+#ifdef _LDPC_DEBUG_DUMP
+    KY_PRINT_VEC_HEX(eaufp, "EAZ1", eaz1, (bm_m - tm_sz) * cir_sz);
+#endif
+
+    // C*Z1（KY 原实现未使用 cz1，这里补算以便 dump 完整路径）
+    mod2sparse_mulvec(qc_c, enc_di_blk, cz1);
+#ifdef _LDPC_DEBUG_DUMP
+    KY_PRINT_VEC_HEX(cufp, "CZ1", cz1, (bm_m - tm_sz) * cir_sz);
+#endif
+
+    // E*(A*Z1)+C*Z1
+    vec_mod2_add(eaz1, cz1, sumz1, (bm_m - tm_sz) * cir_sz);
+#ifdef _LDPC_DEBUG_DUMP
+    KY_PRINT_VEC_HEX(eaufp, "SUMZ1", sumz1, (bm_m - tm_sz) * cir_sz);
+#endif
+
+    // Z2 = F_inv*[E*(A*Z1)+C*Z1]
+    mod2sparse_mulvec(qc_fi, sumz1, z2);
+#ifdef _LDPC_DEBUG_DUMP
+    KY_PRINT_VEC_HEX(eaufp, "Z2", z2, (bm_m - tm_sz) * cir_sz);
+#endif
+
+    // B*Z2
+    mod2sparse_mulvec(qc_b, z2, bz2);
+#ifdef _LDPC_DEBUG_DUMP
+    KY_PRINT_VEC_HEX(eaufp, "BZ2", bz2, tm_sz*cir_sz - mask_len);
+#endif
+
+    // Z3 = BZ2 +AZ1
+    vec_mod2_add(az1, bz2, z3, tm_sz * cir_sz - mask_len);
+#ifdef _LDPC_DEBUG_DUMP
+    KY_PRINT_VEC_HEX(eaufp, "Z3", z3, tm_sz*cir_sz - mask_len);
+#endif
+
+    // encoded data
+    vec_copy(enc_do_blk, enc_di_blk, 0, 0, hm_k);
+    vec_copy(enc_do_blk, z2, hm_k, 0, (bm_m - tm_sz) * cir_sz);
+    // place Z3 at the tail after Z2, length without masked part
+    vec_copy(enc_do_blk, z3, hm_k + (bm_m - tm_sz) * cir_sz, 0, tm_sz * cir_sz - mask_len);
+#ifdef _LDPC_DEBUG_DUMP
+    KY_PRINT_VEC_HEX(aufp, "ENC_DO_BLK", enc_do_blk,
+                     hm_k + (bm_m - tm_sz) * cir_sz + (tm_sz*cir_sz - mask_len));
+#endif
+
+    // removing 0 padding
+    vec_copy(tx_blk, enc_do_blk, 0, 0, info_len);
+    vec_copy(tx_blk, enc_do_blk, hm_k, info_len, blk_len - info_len);
+#ifdef _LDPC_DEBUG_DUMP
+    KY_PRINT_VEC_HEX(aufp, "TX_BLK", tx_blk, blk_len);
+#endif
+
+    // free space
+    free(az1);
+    free(eaz1);
+    free(cz1);
+    free(sumz1);
+    free(z2);
+    free(bz2);
+    free(z3);
+
+#ifdef _LDPC_DEBUG_DUMP
+    if (aufp)  fclose(aufp);
+    if (cufp)  fclose(cufp);
+    if (eaufp) fclose(eaufp);
+#undef KY_PRINT_VEC_HEX
+#endif
+}
+
+/*
 void ldpc_packet::ldpc_encoder()
 {
     char *az1, *eaz1, *cz1, *sumz1, *z2, *bz2, *z3;
@@ -1283,7 +1421,7 @@ void ldpc_packet::ldpc_encoder()
 
     // removing 0 padding
     vec_copy(tx_blk, enc_do_blk, 0, 0, info_len);
-    vec_copy(tx_blk, enc_do_blk, hm_k, hm_k, hm_m);
+    vec_copy(tx_blk, enc_do_blk, hm_k, info_len, blk_len - info_len);
 
     // free space
     free(az1);
@@ -1294,15 +1432,20 @@ void ldpc_packet::ldpc_encoder()
     free(bz2);
     free(z3);
 }
+*/
 
 void ldpc_packet::ldpc_decoder(enum dec_model dec_mode)
 {
     // add 0 padding
+    int phy_parity_len = blk_len - info_len;
+    if (phy_parity_len < 0) phy_parity_len = 0;
+    if (phy_parity_len > hm_m) phy_parity_len = hm_m;
+
     vec_copy(det_blk, dec_di_blk, 0, 0, info_len);
     for (int i = 0; i < pad_len; i++)
         dec_di_blk[info_len + i] = max_llr_bin;
 
-    vec_copy(det_blk, dec_di_blk, info_len, hm_k, hm_m);
+    vec_copy(det_blk, dec_di_blk, info_len, hm_k, phy_parity_len);
     for (int i= 0 ; i < mask_len; i++)
         dec_di_blk[hm_n + i] = max_llr_bin;
 
@@ -1340,7 +1483,7 @@ void ldpc_packet::ldpc_decoder(enum dec_model dec_mode)
 
     //remove padding
     vec_copy(dec_do_blk, dec_blk, 0, 0, info_len);
-    vec_copy(dec_do_blk, dec_blk, hm_k, info_len, hm_m);
+    vec_copy(dec_do_blk, dec_blk, hm_k, info_len, phy_parity_len);
     // vec_copy(dec_blk, dec_do_blk, 0, 0, info_len);
     // vec_copy(dec_blk, dec_do_blk, hm_k, hm_k, hm_m);
 
@@ -1382,6 +1525,22 @@ void ldpc_packet::ldpc_decoder(enum dec_model dec_mode)
 
 void ldpc_packet::ldpc_dec_bf(int p_num, int col_skip_itr)
 {
+#ifdef _LDPC_DEBUG_DUMP
+    FILE *cfp;
+    FILE *sfp;
+    FILE *hdfp;
+    FILE *lfp;
+    int stmp, vtmp;
+    char cmem_dump[50] = "./output/fdec_cmem_dump.txt";
+    char stot_dump[50] = "./output/fdec_stot_dump.txt";
+    char hdmem_dump[50] = "./output/fdec_hdmem_dump.txt";
+    char log_dump[50] = "./output/fdec_log_dump.txt";
+    cfp = fopen(cmem_dump, "w");
+    sfp = fopen(stot_dump, "w");
+    hdfp = fopen(hdmem_dump, "w");
+    lfp = fopen(log_dump, "w");
+#endif
+
     mod2entry *e;
     int synd_wt;
     int col_updt;
@@ -1455,9 +1614,47 @@ void ldpc_packet::ldpc_dec_bf(int p_num, int col_skip_itr)
                     else if (mask_matrix[e->row][e->col] == 2)
                         vec_mask(cn_synd_sel,cir_sz - mask_len, mask_len, 0);
 
+#ifdef _LDPC_DEBUG_DUMP
+                    fprintf(cfp, "ITR%2d/COL%2d/row%2d pre_shft: \n", itr, e->col, e->row);
+                    fprintf(cfp, "c pre shft(masked): \n");
+                    for (int ii=cir_sz-1; ii>=0; ii--)
+                    {
+                        vtmp = (cn_synd_sel[ii]);
+                        fprintf(cfp, "%d", vtmp);
+                    }
+                    fprintf(cfp, "\n");
+#endif
+
                     vec_shift(cn_synd_sel,vn_synd_sel,cir_sz,e->shift);
+
+#ifdef _LDPC_DEBUG_DUMP
+                    fprintf(cfp, "ITR%2d/COL%2d/row%2d shft: \n", itr, e->col, e->row);
+                    fprintf(cfp, "c shft(masked): \n");
+                    for (int ii=cir_sz-1; ii>=0; ii--)
+                    {
+                        vtmp = (vn_synd_sel[ii]);
+                        fprintf(cfp, "%d", vtmp);
+                    }
+                    fprintf(cfp, "\n");
+#endif
+
                     vec_incr(vn_synd_cnt, vn_synd_sel,cir_sz);
                 }
+
+#ifdef _LDPC_DEBUG_DUMP
+                fprintf(sfp, "ITR%2d/COL%2d incr_val: \n", itr, i);
+                fprintf(sfp, "c shft(masked): \n");
+                for (int ii=0; ii<cir_sz/8; ii++)
+                {
+                    fprintf(sfp, "r%2d    ", ii);
+                    for (int j = 0; j<8; j++)
+                    {
+                        vtmp = (vn_synd_cnt[ii*8 + j]);
+                        fprintf(sfp, "%d", vtmp);
+                    }
+                    fprintf(sfp, "\n", vtmp);
+                }
+#endif
 
                 // previous column is skipped
                 if(col_skip)
@@ -1513,6 +1710,24 @@ void ldpc_packet::ldpc_dec_bf(int p_num, int col_skip_itr)
                     col_updt = vn_flp_col[p_num];
                     itr_updt = vn_flp_itr[p_num];
 
+#ifdef _LDPC_DEBUG_DUMP
+                    fprintf(hdfp, "ITR%2d/COL%2d hd mem info: \n", itr, i);
+                    fprintf(hdfp, "before hd flip: \n");
+                    fprintf(hdfp, "flip_flg flip: \n");
+                    for (int ii=cir_sz-1; ii>=0; ii--)
+                    {
+                        vtmp = (dec_do_blk[i*cir_sz + ii]);
+                        fprintf(hdfp, "%d", vtmp);
+                    }
+                    fprintf(hdfp, "\n");
+                    for (int ii=cir_sz-1; ii>=0; ii--)
+                    {
+                        vtmp = (vn_flp_sel[0][ii]);
+                        fprintf(hdfp, "%d", vtmp);
+                    }
+                    fprintf(hdfp, "\n");
+#endif
+
                     for(int j=0;j<cir_sz;j++)
                     {
                         if(vn_flp_sel[p_num][j] == 1)
@@ -1531,6 +1746,17 @@ void ldpc_packet::ldpc_dec_bf(int p_num, int col_skip_itr)
 
                 for(e=mod2sparse_first_in_col(qc_bm,col_updt);!mod2sparse_at_end(e);e=mod2sparse_next_in_col(e))
                 {
+#ifdef _LDPC_DEBUG_DUMP
+                    fprintf(lfp, "ITR%2d/COL%2d/row%2d pre_shft: \n", itr, col_updt, e->row);
+                    fprintf(lfp, "v pre shift: \n");
+                    for (int ii=cir_sz-1; ii>=0; ii--)
+                    {
+                        vtmp = (vn_flp_sel[p_num][ii]);
+                        fprintf(lfp, "%d", vtmp);
+                    }
+                    fprintf(lfp, "\n");
+#endif
+
                     // barrel shifter
                     vec_shift(vn_flp_sel[p_num], cn_flp_sel,cir_sz,-1*e->shift);
                     // mask
@@ -1539,12 +1765,33 @@ void ldpc_packet::ldpc_dec_bf(int p_num, int col_skip_itr)
                     else if (mask_matrix[e->row][e->col] == 2)
                         vec_mask(cn_flp_sel, cir_sz - mask_len, mask_len, 0);
 
+#ifdef _LDPC_DEBUG_DUMP
+                    fprintf(lfp, "ITR%2d/COL%2d/row%2d shft: \n", itr, col_updt, e->row);
+                    fprintf(lfp, "v shift(masked): \n");
+                    for (int ii=cir_sz-1; ii>=0; ii--)
+                    {
+                        vtmp = (cn_flp_sel[ii]);
+                        fprintf(lfp, "%d", vtmp);
+                    }
+                    fprintf(lfp, "\n");
+#endif
+
                     // read old syndrome
                     vec_copy(cn_synd_mem,cn_synd_old,e->row*cir_sz,0,cir_sz);
                     // update syndrome
                     vec_mod2_add(cn_flp_sel, cn_synd_old, cn_synd_new, cir_sz);
                     // update syndrome memory
                     vec_copy(cn_synd_new,cn_synd_mem,0,e->row*cir_sz,cir_sz);
+
+#ifdef _LDPC_DEBUG_DUMP
+                    fprintf(lfp, "ITR%2d/COL%2d/row%2d syndrome: \n", itr, e->col, e->row);
+                    for (int ii=cir_sz-1; ii>=0; ii--)
+                    {
+                        vtmp = (cn_synd_mem[e->row*cir_sz + ii]);
+                        fprintf(lfp, "%d", vtmp);
+                    }
+                    fprintf(lfp, "\n");
+#endif
                 }
 
 

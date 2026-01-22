@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""
+LSF Shim bkill Command
+Cancels jobs in the LSF shim scheduler.
+"""
+
+import os
+import sys
+import time
+import signal
+
+# Add script directory to Python path for imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from lsf_registry import LsfRegistry
+
+
+def kill_process_group(pgid, timeout=2):
+    """
+    Terminate a process group gracefully, then forcefully if needed.
+
+    Args:
+        pgid: Process group ID
+        timeout: Seconds to wait before SIGKILL
+
+    Returns:
+        bool: True if process was killed, False if already dead
+    """
+    if pgid is None or pgid <= 0:
+        return False
+
+    try:
+        # Check if process group exists
+        os.killpg(pgid, 0)
+    except (OSError, ProcessLookupError):
+        # Process group doesn't exist
+        return False
+
+    try:
+        # Send SIGTERM to entire process group
+        os.killpg(pgid, signal.SIGTERM)
+
+        # Wait for graceful termination
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                # Check if process group still exists
+                os.killpg(pgid, 0)
+                time.sleep(0.1)
+            except (OSError, ProcessLookupError):
+                # Process group terminated
+                return True
+
+        # Timeout reached, force kill
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass  # Already dead
+
+        return True
+
+    except (OSError, ProcessLookupError):
+        # Process group disappeared during kill
+        return True
+
+
+def main():
+    """Main entry point for bkill."""
+    # Parse arguments - extract job_id, ignore other flags
+    job_id = None
+    for arg in sys.argv[1:]:
+        if not arg.startswith('-'):
+            try:
+                job_id = int(arg)
+                break
+            except ValueError:
+                continue
+
+    if job_id is None:
+        print("Usage: bkill [options...] <job_id>", file=sys.stderr)
+        sys.exit(1)
+
+    # Get job from registry
+    registry = LsfRegistry()
+    job = registry.get_job(job_id)
+
+    if job is None:
+        print(f"Job <{job_id}> is not found", file=sys.stderr)
+        sys.exit(1)
+
+    # Check if job is already finished
+    if job['state'] in ('DONE', 'EXIT'):
+        print(f"Job <{job_id}> is already finished", file=sys.stderr)
+        sys.exit(0)
+
+    # Output message
+    print(f"Job <{job_id}> is being terminated")
+
+    # Kill the process group
+    pgid = job.get('pgid')
+    if pgid:
+        kill_process_group(pgid, timeout=2)
+
+    # Update job state to EXIT
+    registry.set_job_state(job_id, 'EXIT', rc=-1)
+
+    sys.exit(0)
+
+
+if __name__ == '__main__':
+    main()

@@ -4,7 +4,7 @@
 #define _CH_PACKET_H
 
 enum sd_mode {DIRECT=0, MANUAL=1, VENDOR0=2, VENDOR1=3};
-enum ch_model {CLEAN=0, AWGN=1, BSC=2, ERR_INJ=3, MAX_ERR=4};
+enum ch_model {CLEAN=0, AWGN=1, BSC=2, ERR_INJ=3, MAX_ERR=4, TRUNC_AWGN=5};
 
 struct ch_packet{
     ch_packet()
@@ -42,7 +42,8 @@ struct ch_packet{
           llr_tot_num(0),
           llr_frac_num(0),
           llr_max(0.0f),
-          llr_min(0.0f)
+          llr_min(0.0f),
+          target_fbc(0)
     {}
     enum ch_model ch_sel;
     int    info_len;
@@ -69,6 +70,7 @@ struct ch_packet{
     int *hre_vec;
     int *hre_pos;
     float rber;
+    int target_fbc;  // Target total FBC for fixed-FBC mode (0=disabled)
 
     // detector
     enum sd_mode sd_type;   // soft decision type, select LLR GEN Mode
@@ -93,7 +95,7 @@ struct ch_packet{
     float llr_max;
     float llr_min;
 
-    void ch_config(int, int, enum ch_model, float, int, int, int);
+    void ch_config(int, int, enum ch_model, float, int, int, int, int);
     void ch_pckt_alloc();
     void ch_pckt_clean();
     void ch_llr_alloc(enum sd_mode, int, float*);

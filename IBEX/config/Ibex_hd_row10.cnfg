@@ -1,0 +1,38 @@
+76                              // meta data size (B)
+512                             // LBA size(B)
+8                               // LBA # per DSP CW
+4260                            // userdata size (B)
+608                             // parity size (B)
+10                               // row number of base matrix
+77                              // column number of base matrix
+512                             // circulant number
+5                               // Dense matrix size or rows of E matrix in base matrix
+4                               // column weight of base matrix
+100                             // maximum simulation number
+10                              // maximum error number
+FC_IBEX                         // LDPC decoder(FC_SKIP/FC_FDEC/FC_RDEC/FC_MIX/FC_FDEC2/FC_IBEX)
+24                              // Fast decoder maximum iteration number 24
+0                               // Iteration to turn on FDEC column skip feature (0:always OFF)
+32                              // Retry decoder maximum iteration number
+50                              // Ibex maximum normal iteration number
+1024                            // Ibex maximum iteration number
+48                              // Ibex post iteration qc threshold
+16                              // Ibex post iteration post threshold
+1                               // Ibex post enable
+0                               // Ibex Syndrome calculate only
+1                               // Ibex early terminate disable
+1                               // Ibex likelihood width(3 is lite mode, 8 is full mode)
+0.625                           // Retry decoder alpha
+1                               // Quantization Mode
+8                               // APP/Q bit width
+6                               // R bit width (Min need 1-bit less)
+3                               // Fraction bits
+7                               // LLR bit width
+3                               // LLR fraction bits
+MANUAL                          // LLR mode (IDEAL/MANUAL/VENDOR0/VENDOR1)
+1                               // Number of NAND soft data bits
+0 0.15 -0.15 0.3 -0.3 0.5 -0.5  // VERF values
+1.875 -1.875                    // Hard decoding LLR for retry decoder
+1060                            // init_synd_wt threshold to skip FDEC
+104C11DB7                       // CRC 32 polynomial values
+104C11DB7                       // 32-bit LSFR for randomizer

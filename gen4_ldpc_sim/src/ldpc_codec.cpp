@@ -882,6 +882,7 @@ void ldpc_packet::ldpc_pckt_clean()
 
 } // ldpc_pckt_free
 
+/* 
 void ldpc_packet::ldpc_encoder()
 {
     char *az1, *eaz1, *cz1, *sumz1, *z2, *bz2, *z3, *f2z, *f1z, *gz;
@@ -1024,6 +1025,554 @@ void ldpc_packet::ldpc_encoder()
     free(f2z);
     free(gz);
 }
+*/
+
+// encoder with dump info
+void ldpc_packet::ldpc_encoder()
+{
+#ifdef _LDPC_DEBUG_DUMP
+    FILE *aufp;
+    FILE *spfp;
+    FILE *cufp;
+    FILE *gufp;
+    FILE *eaufp;
+    FILE *fi_infp;
+    FILE *fi_outfp;
+    FILE *fi_val_fp;
+
+    int stmp, vtmp;
+    char au_dump[50] = "./output/au_dump.txt";
+    char cu_dump[50] = "./output/cu_dump.txt";
+    char gu_dump[50] = "./output/gu_dump.txt";
+    char eau_dump[50] = "./output/eau_dump.txt";
+    char fi_in_dump[50] = "./output/fi_in_dump.txt";
+    char fi_out_dump[50] = "./output/fi_out_dump.txt";
+    char fi_val_f[50] = "./output/fi_val.txt";
+    char sp[50] = "./output/din_spare_mul_dump.txt";
+
+    aufp = fopen(au_dump, "w");
+    cufp = fopen(cu_dump, "w");
+    gufp = fopen(gu_dump, "w");
+    eaufp = fopen(eau_dump, "w");
+    fi_infp = fopen(fi_in_dump, "w");
+    fi_outfp = fopen(fi_out_dump, "w");
+    fi_val_fp = fopen(fi_val_f, "w");
+    spfp = fopen(sp, "w");
+#endif
+#ifdef _LDPC_DUMP_FI
+    FILE *fi_val_fp2;
+    char fi_val_f2[50];
+    sprintf(fi_val_f2, "./fi_mtx/lenc_fi_mem_%dx%dex%d_w7_dense6_QC_H.txt", bm_m, bm_n, cir_sz);
+    fi_val_fp2 = fopen(fi_val_f2, "w");
+#endif
+#ifdef _LDPC_DUMP_FI_HEX
+    FILE *fi_val_fp3;
+    char fi_val_f3[50];
+    sprintf(fi_val_f3, "./fi_mtx/lenc_fi_mem_%dx%dex%d_w7_dense6_QC_H_hex.txt", bm_m, bm_n, cir_sz);
+    fi_val_fp3 = fopen(fi_val_f3, "w");
+#endif
+    char *az1, *eaz1, *cz1, *sumz1, *z2, *bz2, *z3, *f2z, *f1z, *gz;
+
+    az1 = (char *)calloc(tm_sz*cir_sz, sizeof(*az1));;
+    eaz1 = (char *)calloc((bm_m-tm_sz-1)*cir_sz, sizeof(*eaz1));
+    cz1 = (char *)calloc((bm_m-tm_sz-1)*cir_sz, sizeof(*cz1));
+    sumz1 = (char *)calloc((bm_m-tm_sz-1)*cir_sz, sizeof(*sumz1));
+    z2 = (char *)calloc((bm_m-tm_sz-1)*cir_sz, sizeof(*z2));
+    bz2 = (char *)calloc(tm_sz*cir_sz, sizeof(*bz2));
+    z3 = (char *)calloc(tm_sz*cir_sz, sizeof(*z3));
+    f1z = (char *)calloc(tm_sz*cir_sz, sizeof(*f1z));
+    f2z = (char *)calloc((bm_m-tm_sz-1)*cir_sz, sizeof(*f2z));
+    gz = (char *)calloc(cir_sz, sizeof(*gz));
+
+    // padding 0s
+    vec_copy(usr_blk, enc_di_blk, 0, 0, info_len);
+    for (int i=0; i<pad_len; i++)
+        enc_di_blk[hm_k-pad_len+i] = 0;
+
+    mod2entry *e;
+
+    // A*Z1
+    mod2sparse_mulvec(qc_a, enc_di_blk, az1);
+    char *vn_flp_sel = (char *)calloc(cir_sz, sizeof(*vn_flp_sel));
+    char *cn_flp_sel = (char *)calloc(cir_sz, sizeof(*cn_flp_sel));
+    char *cn_synd_mem = (char *)calloc(hm_m, sizeof(*cn_synd_mem));
+    char *cn_synd_old = (char *)calloc(cir_sz, sizeof(*cn_synd_old));
+    char *cn_synd_new = (char *)calloc(cir_sz, sizeof(*cn_synd_new));
+    vec_clr(cn_synd_mem, hm_m);
+    for (int i=0; i<bm_k; i++)
+    {
+        vec_copy(enc_di_blk, vn_flp_sel, i*cir_sz, 0, cir_sz);
+        for (e=mod2sparse_first_in_col(qc_bm, i); !mod2sparse_at_end(e); e=mod2sparse_next_in_col(e))
+        {
+            int drop_start = cir_sz + 1;
+            int drop_length = 0;
+            int min_drop_ind = -1;
+#ifdef _LDPC_DEBUG_DUMP
+            fprintf(spfp, "shft_val=%d,row=%d,col=%d\n", e->shift, e->row, e->col);
+#endif
+            // barrel shifter
+            vec_shift(vn_flp_sel, cn_flp_sel, cir_sz, -1 * e->shift);
+            // read old syndrome
+            if (i==bm_n-1)
+            {
+                drop_start = (cir_sz - (e->shift) + pad_bit) % cir_sz;
+                drop_length = cir_sz - pad_bit;
+                min_drop_ind = drop_start + drop_length;
+            }
+            else 
+            {
+                if (drop_col_bit_map[e->row][e->col] == 1)
+                {
+                    if (e->row == bm_m - 1)
+                    {
+                        drop_start = pad_bit;
+                        drop_length = cir_sz - pad_bit;
+                    }
+                    else
+                    {
+                        drop_start = (e->col - e->row) / (bm_m - 1) * pad_bit %cir_sz;
+                        drop_length = pad_bit;
+                    }
+                    min_drop_ind = drop_start + drop_length;
+                }
+            }
+            for (int ii = 0; ii < cir_sz; ii++)
+            {
+                if ((min_drop_ind <= cir_sz && ii >= drop_start && ii < min_drop_ind) ||
+                    (min_drop_ind >= cir_sz && (ii >= drop_start || ii < min_drop_ind % cir_sz)))
+                    cn_flp_sel[ii] = 0;
+            }
+
+            vec_copy(cn_synd_mem, cn_synd_old, e->row*cir_sz, 0, cir_sz);
+            // update syndrome
+            vec_mod2_add(cn_flp_sel, cn_synd_old, cn_synd_new, cir_sz);
+            // update syndrome memory
+            vec_copy(cn_synd_new, cn_synd_mem, 0, e->row*cir_sz, cir_sz);
+#ifdef _LDPC_DEBUG_DUMP
+            fprintf(spfp, "enc_din data = ");
+
+            int tmp = 0;
+            for (int ii = cir_sz/4 - 1; ii >= 0; ii--)
+            {
+                tmp = 0;
+                for (int k = 3; k >= 0; k--)
+                {
+                    tmp = tmp * 2;
+                    tmp += vn_flp_sel[ii * 4 + k];
+                }
+                fprintf(spfp, "%x", tmp);
+            }
+            fprintf(spfp, "\n");
+            fprintf(spfp, "shft_vec = ");
+            for (int ii = cir_sz/4 - 1; ii >= 0; ii--)
+            {
+                tmp = 0;
+                for (int k = 3; k >= 0; k--)
+                {
+                    tmp = tmp * 2;
+                    tmp += cn_flp_sel[ii * 4 + k];
+                }
+                fprintf(spfp, "%x", tmp);
+            }
+            fprintf(spfp, "\n");
+            fprintf(spfp, "spare mulvec = ");
+            for (int ii = cir_sz/4 - 1; ii >= 0; ii--)
+            {
+                tmp = 0;
+                for (int k = 3; k >= 0; k--)
+                {
+                    tmp = tmp * 2;
+                    tmp += cn_synd_mem[e->row * cir_sz + ii * 4 + k];
+                }
+                fprintf(spfp, "%x", tmp);
+            }
+            fprintf(spfp, "\n");
+#endif
+        }
+    }
+
+    for (int i=0; i<tm_sz*cir_sz; i++)
+    {
+        if (cn_synd_mem[i] != az1[i])
+            int ind = i;
+    }
+#ifdef _LDPC_DEBUG_DUMP
+    fprintf(aufp, "au calcued: \n");
+    int tmp = 0;
+    for (int j=0; j< tmp_sz; j++)
+    {
+        for (int i=cir_sz/4 - 1; i>=0; i--)
+        {
+            tmp = 0;
+            for (int k=3; k>=0; k--)
+            {
+                tmp = tmp * 2;
+                tmp += az1[j*cir_sz + i*4 + k];
+            }
+            fprintf(aufp, "%x", tmp);
+        }
+        fprintf(aufp, "\n");
+    }
+#endif
+
+    // G*Z1
+    mod2sparse_mulvec(qc_g, enc_di_blk, gz);
+#ifdef _LDPC_DEBUG_DUMP
+    fprintf(gufp, "g*u calcued: \n");
+    for (int j = 0; j < 1; j++)
+    {
+        for (int i = cir_sz / 4 - 1; i >= 0; i--)
+        {
+            tmp = 0;
+            for (int k = 3; k >= 0; k--)
+            {
+                tmp = tmp * 2;
+                tmp += gz[j * cir_sz + i * 4 + k];
+            }
+            fprintf(gufp, "%x", tmp);
+        }
+        fprintf(gufp, "\n");
+    }
+#endif
+    vec_clr(gz+pad_bit, cir_sz-pad_bit); // zero padding bits
+
+    // F1*P2
+    mod2sparse_mulvec(qc_f1, gz, f1z);
+#ifdef _LDPC_DEBUG_DUMP
+    fprintf(gu_fp, "f1z: \n");
+    for (int j=0; j< tm_sz; j++)
+    {
+        for (int i=cir_sz/4 - 1; i>=0; i--)
+        {
+            tmp = 0;
+            for (int k=3; k>=0; k--)
+            {
+                tmp = tmp * 2;
+                tmp += f1z[j*cir_sz + i*4 + k];
+            }
+            fprintf(gufp, "%x", tmp);
+        }
+        fprintf(gufp, "\n");
+    }
+#endif
+    // F2*P2
+    mod2sparse_mulvec(qc_f2, gz, f2z);
+#ifdef _LDPC_DEBUG_DUMP
+    fprintf(gu_fp, "f2z: \n");
+    for (int j=0; j< (bm_m - tm_sz - 1); j++)
+    {
+        for (int i=cir_sz/4 - 1; i>=0; i--)
+        {
+            tmp = 0;
+            for (int k=3; k>=0; k--)
+            {
+                tmp = tmp * 2;
+                tmp += f2z[j*cir_sz + i*4 + k];
+            }
+            fprintf(gufp, "%x", tmp);
+        }
+        fprintf(gufp, "\n");
+    }
+#endif
+    // A*Z1+F1*P2
+    vec_mod2_add(az1, f1z, az1, tm_sz*cir_sz);
+#ifdef _LDPC_DEBUG_DUMP
+    fprintf(aufp, "au + f1z calcued: \n");
+    for (int j=0; j< tmp_sz; j++)
+    {
+        for (int i=cir_sz/4 - 1; i>=0; i--)
+        {
+            tmp = 0;
+            for (int k=3; k>=0; k--)
+            {
+                tmp = tmp * 2;
+                tmp += az1[j*cir_sz + i*4 + k];
+            }
+            fprintf(aufp, "%x", tmp);
+        }
+        fprintf(aufp, "\n");
+    }
+#endif
+    // E*(A*Z1)
+    mod2sparse_mulvec(qc_e, az1, eaz1);
+#ifdef _LDPC_DEBUG_DUMP
+    fprintf(eaufp, "eaz1: \n");
+    for (int j=0; j< (bm_m - tm_sz - 1); j++)
+    {
+        for (int i=cir_sz/4 - 1; i>=0; i--)
+        {
+            tmp = 0;
+            for (int k=3; k>=0; k--)
+            {
+                tmp = tmp * 2;
+                tmp += eaz1[j*cir_sz + i*4 + k];
+            }
+            fprintf(eaufp, "%x", tmp);
+        }
+        fprintf(eaufp, "\n");
+    }
+#endif
+    // C*Z1
+    mod2sparse_mulvec(qc_c, enc_di_blk, cz1);
+#ifdef _LDPC_DEBUG_DUMP
+    fprintf(cufp, "cu calcued: \n");
+    for (int j=0; j< (bm_m - tm_sz - 1); j++)
+    {
+        for (int i=cir_sz/4 - 1; i>=0; i--)
+        {
+            tmp = 0;
+            for (int k=3; k>=0; k--)
+            {
+                tmp = tmp * 2;
+                tmp += cz1[j*cir_sz + i*4 + k];
+            }
+            fprintf(cufp, "%x", tmp);
+        }
+        fprintf(cufp, "\n");
+    }
+#endif
+    // C*Z1+F2*P2
+    vec_mod2_add(cz1, f2z, cz1, (bm_m-tm_sz-1)*cir_sz);
+#ifdef _LDPC_DEBUG_DUMP
+    fprintf(cufp, "cz1 + f2z calcued: \n");
+    for (int j=0; j< (bm_m - tm_sz - 1); j++)
+    {
+        for (int i=cir_sz/4 - 1; i>=0; i--)
+        {
+            tmp = 0;
+            for (int k=3; k>=0; k--)
+            {
+                tmp = tmp * 2;
+                tmp += cz1[j*cir_sz + i*4 + k];
+            }
+            fprintf(cufp, "%x", tmp);
+        }
+        fprintf(cufp, "\n");
+    }
+#endif
+    // E*(A*Z1)+C*Z1
+    vec_mod2_add(eaz1, cz1, sumz1, (bm_m-tm_sz-1)*cir_sz);
+#ifdef _LDPC_DEBUG_DUMP
+    fprintf(eaufp, "sumz1 : \n");
+    for (int j=0; j< (bm_m - tm_sz - 1); j++)
+    {
+        for (int i=cir_sz/4 - 1; i>=0; i--)
+        {
+            tmp = 0;
+            for (int k=3; k>=0; k--)
+            {
+                tmp = tmp * 2;
+                tmp += sumz1[j*cir_sz + i*4 + k];
+            }
+            fprintf(eaufp, "%x", tmp);
+        }
+        fprintf(eaufp, "\n");
+    }
+#endif
+#ifdef _LDPC_DEBUG_DUMP
+    fprintf(fi_infp, "sumz1 calcued: \n");
+    for (int j=0; j< (bm_m - tm_sz - 1); j++)
+    {
+        for (int i=cir_sz/4 - 1; i>=0; i--)
+        {
+            tmp = 0;
+            for (int k=3; k>=0; k--)
+            {
+                tmp = tmp * 2;
+                tmp += sumz1[j*cir_sz + i*4 + k];
+            }
+            fprintf(fi_infp, "%x", tmp);
+        }
+        fprintf(fi_infp, "\n");
+    }
+#endif
+    // Z2 = F_inv*[E*(A*Z1)+C*Z1]
+    mod2sparse_mulvec(qc_fi, sumz1, z2);
+#ifdef _LDPC_DUMP_FI
+    mod2entry *ex;
+    char *v = (char*)calloc((bm_m - tm_sz - 1)*cir_sz, sizeof(*v));
+    int Me;
+    Me = mod2sparse_rows(qc_fi);
+    for (int j = 0; j< 6; j++)
+    {
+        for (int i = 0;l i<Me; i++)
+            v[i] = 0;
+        for (ex = mod2sparse_first_in_row(qc_fi, j*256); !mod2sparse_at_end(ex); ex = mod2sparse_next_in_row(ex))
+        {
+            v[mod2sparse_row(ex)] = 1;
+        }
+        for (int i=0; i<1536; i+=32)
+        {
+            for (int k=31; k>=0; k--)
+                fprintf(fi_val_fp2, "%x", v[i + k]);
+        }
+    }
+    free(v);
+    v=NULL;
+    fclose(fi_val_fp2);
+#endif
+#ifdef _LDPC_DUMP_FI_HEX
+    mod2entry *ehx;
+    chr *vhx = (char*)calloc((bm_m - tm_sz - 1)*cir_sz, sizeof(*vhx));
+    int Mhex;
+    Mhex = mod2sparse_rows(qc_fi);
+    for (int j = 5; j>=0; j--)
+    {
+        for (int i = 0; i<Mhex; i++)
+            vhx[i] = 0;
+        for (ehx = mod2sparse_first_in_row(qc_fi, j*256); !mod2sparse_at_end(ehx); ehx = mod2sparse_next_in_row(ehx))
+        {
+            vhx[mod2sparse_row(ehx)] = 1;
+        }
+        for (int i=Mhex-32; i>=0; i-=32)
+        {
+            int kk=0;
+            int hxtmp=0;
+            fprintf(fi_val_fp3, "32'h");
+            for (int k=31; k>=0; k--)
+            {
+                hxtmp *=2;
+                hxtmp += vhx[i + k];
+                kk++;
+                if (kk==4)
+                {
+                    fprintf(fi_val_fp3, "%x", hxtmp);
+                    kk=0;
+                    hxtmp=0;
+                }
+            }
+            fprintf(fi_val_fp3, "\n");
+        }
+    }
+    free(vhx);
+    vhx=NULL;
+    fclose(fi_val_fp3);
+#endif
+#ifdef _LDPC_DEBUG_DUMP
+    mod2entry *exx;
+    char *ve = (char*)calloc((bm_m - tm_sz - 1)*cir_sz, sizeof(*ve));
+    int Mex;
+
+    Mex = mod2sparse_rows(qc_fi);
+    fprintf(fi_val_fp, "fi_val: \n");
+    for (int j = 0; j< 6; j++)
+    {
+        for (int i = 0; i<Mex; i++)
+            ve[i] = 0;
+        for (exx = mod2sparse_first_in_row(qc_fi, j*256); !mod2sparse_at_end(exx); exx = mod2sparse_next_in_row(exx))
+        {
+            ve[mod2sparse_row(exx)] = 1;
+        }
+        for (int i=Mex/4 - 1; i>=0; i--)
+        {
+            tmp = 0;
+            for (int k=3; k>=0; k--)
+            {
+                tmp = tmp * 2;
+                tmp += ve[i * 4 + k];
+            }
+            fprintf(fi_val_fp, "%x", tmp);
+        }
+        fprintf(fi_val_fp, "\n");
+    }
+    free(ve);
+    ve=NULL;
+#endif
+#ifdef _LDPC_DEBUG_DUMP
+    fprintf(fi_outfp, "qc_fi calcued: \n");
+    for (int j=0; j< (bm_m - tm_sz - 1); j++)
+    {
+        for (int i=cir_sz/4 - 1; i>=0; i--)
+        {
+            tmp = 0;
+            for (int k=3; k>=0; k--)
+            {
+                tmp = tmp * 2;
+                tmp += z2[j*cir_sz + i*4 + k];
+            }
+            fprintf(fi_outfp, "%x", tmp);
+        }
+        fprintf(fi_outfp, "\n");
+    }
+#endif
+    // B*Z2
+    mod2sparse_mulvec(qc_b, z2, bz2);
+#ifdef _LDPC_DEBUG_DUMP
+    fprintf(eaufp, "bz2 calcued: \n");
+    for (int j=0; j< tm_sz; j++)
+    {
+        for (int i=cir_sz/4 - 1; i>=0; i--)
+        {
+            tmp = 0;
+            for (int k=3; k>=0; k--)
+            {
+                tmp = tmp * 2;
+                tmp += bz2[j*cir_sz + i*4 + k];
+            }
+            fprintf(eaufp, "%x", tmp);
+        }
+        fprintf(eaufp, "\n");
+    }
+#endif
+    // Z3 = BZ2 +AZ1
+    vec_mod2_add(az1, bz2, z3, tm_sz*cir_sz);
+#ifdef _LDPC_DEBUG_DUMP
+    fprintf(eaufp, "z3 calcued: \n");
+    for (int j=0; j< tm_sz; j++)
+    {
+        for (int i=cir_sz/4 - 1; i>=0; i--)
+        {
+            tmp = 0;
+            for (int k=3; k>=0; k--)
+            {                tmp = tmp * 2;
+                tmp += z3[j*cir_sz + i*4 + k];
+            }
+            fprintf(eaufp, "%x", tmp);
+        }
+        fprintf(eaufp, "\n");
+    }
+#endif
+    // encoded data
+    vec_copy(enc_di_blk, enc_do_blk, 0, 0, hm_k);
+    vec_copy(z2, enc_do_blk, 0, hm_k, (bm_m-tm_sz)*cir_sz);
+    vec_copy(z3, enc_do_blk, 0, (bm_m-tm_sz-1)*cir_sz, tm_sz*cir_sz);
+    vec_copy(gz, enc_do_blk, 0, (bm_n-1)*cir_sz, pad_bit);
+
+#ifdef _LDPC_DEBUG
+    printf("[LDPC DEBUG] Encoder done!\n");
+
+    if (ldpc_synd(enc_do_blk) != 0)
+        printf("[LDPC DEBUG] Encoder syndrome check failed!\n");
+    else
+        printf("[LDPC DEBUG] Encoder syndrome check passed!\n");
+#endif
+
+    // removing 0 padding
+    vec_copy(enc_do_blk, tx_blk, 0, 0, info_len);
+    vec_copy(enc_do_blk, tx_blk, hm_k, info_len, hm_m-cir_sz+pad_bit);
+
+    // free space
+    free(az1);
+    free(eaz1);
+    free(cz1);
+    free(sumz1);
+    free(z2);
+    free(bz2);
+    free(z3);
+    free(f1z);
+    free(f2z);
+    free(gz);
+#ifdef _LDPC_DEBUG_DUMP
+    fclose(aufp);
+    fclose(cufp);
+    fclose(gufp);
+    fclose(eaufp);
+    fclose(fi_infp);
+    fclose(fi_outfp);
+    fclose(fi_val_fp);
+    fclose(spfp);
+#endif
+}
 
 void ldpc_packet::ldpc_decoder(enum dec_model dec_mode)
 {
@@ -1101,6 +1650,7 @@ void ldpc_packet::ldpc_decoder(enum dec_model dec_mode)
 #endif
 }
 
+/*
 void ldpc_packet::ldpc_dec_bf(int p_num, int col_skip_itr)
 {
     mod2entry *e;
@@ -1323,6 +1873,368 @@ void ldpc_packet::ldpc_dec_bf(int p_num, int col_skip_itr)
                     vec_copy(cn_synd_mem,cn_synd_old,e->row*cir_sz,0,cir_sz);
                     vec_mod2_add(cn_flp_sel, cn_synd_old, cn_synd_new, cir_sz);
                     vec_copy(cn_synd_new,cn_synd_mem,0,e->row*cir_sz,cir_sz);
+                }
+
+
+                if((itr>0) || (i==(bm_n-1)))
+                {
+                    synd_wt = vec_sum(cn_synd_mem,hm_m);
+                    if(synd_wt ==0)
+                    {
+                        cw_fail = 0;
+                        cnvg_itr = itr_updt;
+                        cnvg_lyr = col_updt;
+                        if(fdec_early_term_en ==1)
+                            break;
+                    }
+                }
+            }
+        }
+    }
+
+
+    if((fdec_early_term_en == 0) || (cw_fail==1))
+    {
+        cnvg_itr = fdec_max_itr - 1;
+        cnvg_lyr = bm_n - 1;
+        fina_synd_wt = vec_sum(cn_synd_mem,hm_m);
+    }
+
+
+    free(cn_synd_mem);
+    free(cn_synd_sel);
+    free(vn_synd_sel);
+    free(vn_synd_cnt);
+    free(vn_hd_sel);
+    free(vn_raw_sel);
+    for(int i=0;i<=p_num;i++)
+        free(vn_flp_sel[i]);
+    free(vn_flp_sel);
+    free(vn_flp_col);
+    free(vn_flp_itr);
+    free(cn_flp_sel);
+    free(cn_synd_new);
+    free(cn_synd_old);
+}
+*/
+
+void ldpc_packet::ldpc_dec_bf(int p_num, int col_skip_itr)
+{
+#ifdef _LDPC_DEBUG_DUMP
+    FILE *cfp;
+    FILE *sfp;
+    FILE *hdfp;
+    FILE *lfp;
+    int stmp, vtmp;
+    char cmem_dump[50] = "./output/fdec_cmem_dump.txt";
+    char stot_dump[50] = "./output/fdec_stot_dump.txt";
+    char hdmem_dump[50] = "./output/fdec_hdmem_dump.txt";
+    char log_dump[50] = "./output/fdec_log_dump.txt";
+    cfp = fopen(cmem_dump, "w");
+    sfp = fopen(stot_dump, "w");
+    hdfp = fopen(hdmem_dump, "w");
+    lfp = fopen(log_dump, "w");
+#endif
+
+    mod2entry *e;
+    int synd_wt;
+    int col_updt;
+    int itr_updt;
+    bool col_skip;
+    char *cn_synd_mem;  //syndrome memory in CN order
+    char *cn_synd_sel;  //selected syndrome in CN order
+    char *vn_synd_sel;  //selected syndrome in VN order
+    char *vn_synd_cnt;  //syndrome weight of select columns in VN order
+    char *vn_hd_sel;    //current HD of selected column (from dec_do_blk) in VN order
+    char *vn_raw_sel;    //raw data of selected column (from dec_di_blk) in VN order
+    char **vn_flp_sel;  //flip flag of selected column in VN order
+    int *vn_flp_col;    //column index of the vn_flp_sel
+    int *vn_flp_itr;    //iteration of the vn_flp_sel
+    char *cn_flp_sel;  //flip flag of selected column in CN order
+    char *cn_synd_new;   // new syndrome in CN order
+    char *cn_synd_old;  
+
+
+    //allocate memory
+    cn_synd_mem = (char *)calloc(hm_m, sizeof(*cn_synd_mem));
+    cn_synd_sel = (char *)calloc(cir_sz, sizeof(*cn_synd_sel));
+    vn_synd_sel = (char *)calloc(cir_sz, sizeof(*vn_synd_sel));
+    vn_synd_cnt = (char *)calloc(cir_sz, sizeof(*vn_synd_cnt));
+    vn_hd_sel = (char *)calloc(cir_sz, sizeof(*vn_hd_sel));
+    vn_raw_sel = (char *)calloc(cir_sz, sizeof(*vn_raw_sel));
+    vn_flp_sel = (char **)calloc(p_num+1, sizeof(*vn_flp_sel));
+    for(int i=0;i<=p_num;i++)
+        vn_flp_sel[i] = (char *)calloc(cir_sz, sizeof(*vn_flp_sel[i]));
+    vn_flp_col = (int *)calloc(p_num+1, sizeof(*vn_flp_col));
+    vn_flp_itr = (int *)calloc(p_num+1, sizeof(*vn_flp_itr));
+    cn_flp_sel = (char *)calloc(cir_sz, sizeof(*cn_flp_sel));
+    cn_synd_old = (char *)calloc(cir_sz, sizeof(*cn_synd_old));
+    cn_synd_new = (char *)calloc(cir_sz, sizeof(*cn_synd_new));
+
+
+    cw_fail = 1;
+    cw_miscorr = 0;
+    fina_synd_wt =0;
+
+
+    vec_copy(dec_di_blk, dec_do_blk, 0,0,hm_n);
+    vec_clr(cn_synd_mem,hm_m);
+    for(int i=0;i<p_num;i++)
+        vec_clr(vn_flp_sel[i], cir_sz);
+    fdec_cyc_num = 0;
+    fdec_cyc_org = 0;
+
+
+    for(int itr=0;(itr<=fdec_max_itr)&&((fdec_early_term_en==0)||(cw_fail==1));itr++)
+    {
+        for(int i=0;i<(itr==fdec_max_itr?p_num:bm_n);i++)
+        {
+            if(itr==0)
+            {
+                vec_copy(dec_di_blk,vn_flp_sel[p_num],i*cir_sz,0,cir_sz);
+                col_updt=i;
+                itr_updt = itr;
+                col_skip=false;
+            }
+            else
+            {
+                vec_clr(vn_synd_cnt,cir_sz);
+                for(e=mod2sparse_first_in_col(qc_bm,i);!mod2sparse_at_end(e);e=mod2sparse_next_in_col(e))
+                {
+                    int drop_start = cir_sz +1;
+                    int drop_length = 0;
+                    int min_drop_ind = -1;
+                    vec_copy(cn_synd_mem,cn_synd_sel,e->row*cir_sz,0,cir_sz);
+
+
+                    if(e->col==bm_n-1)
+                    {
+                        drop_start = (cir_sz - (e->shift) + pad_bit) % cir_sz;
+                        drop_length = cir_sz - pad_bit;
+                        min_drop_ind = drop_start +drop_length;
+                    }
+                    else
+                    {
+                        if(drop_col_bit_map[e->row][e->col])
+                        {
+                            if(e->row == bm_m -1)
+                            {
+                                drop_start = pad_bit;
+                                drop_length = cir_sz - pad_bit;
+                            }
+                            else
+                            {
+                                drop_start = (e->col - e->row)/(bm_m-1)*pad_bit % cir_sz;
+                                drop_length = pad_bit;
+                            }
+                            min_drop_ind = drop_start+drop_length;
+                        }
+                    }
+
+
+                    for(int ii=0;ii<cir_sz;ii++)
+                    {
+                        if((min_drop_ind<=cir_sz && ii>=drop_start && ii < min_drop_ind)
+                        || (min_drop_ind>cir_sz && (ii>=drop_start || ii<min_drop_ind % cir_sz)))
+                            cn_synd_sel[ii] = 0;
+                    }
+#ifdef _LDPC_DEBUG_DUMP
+                    fprintf(cfp, "ITR%2d/COL%2d/row%2d pre_shft: \n", itr, e->col, e->row);
+                    fprintf(cfp, "c pre shft(masked): \n");
+                    for (int ii=cir_sz-1; ii>=0; ii--)
+                    {
+                        vtmp = (cn_synd_sel[ii]);
+                        fprintf(cfp, "%d", vtmp);
+                    }
+                    fprintf(cfp, "\n");
+#endif                    
+
+                    vec_shift(cn_synd_sel,vn_synd_sel,cir_sz,e->shift);
+#ifdef _LDPC_DEBUG_DUMP
+                    fprintf(cfp, "ITR%2d/COL%2d/row%2d shft: \n", itr, e->col, e->row);
+                    fprintf(cfp, "c shft(masked): \n");
+                    for (int ii=cir_sz-1; ii>=0; ii--)
+                    {
+                        vtmp = (vn_synd_sel[ii]);
+                        fprintf(cfp, "%d", vtmp);
+                    }
+                    fprintf(cfp, "\n");
+#endif                              
+                    vec_incr(vn_synd_cnt, vn_synd_sel,cir_sz);
+                }
+#ifdef _LDPC_DEBUG_DUMP
+                fprintf(sfp, "ITR%2d/COL%2d incr_val: \n", itr, i);
+                fprintf(sfp, "c shft(masked): \n");
+	                for (int ii=0; ii<cir_sz/8; ii++)
+	                {
+	                    fprintf(sfp, "r%2d    ", ii);
+	                    for (int j = 0; j<8; j++)
+	                    {
+	                        vtmp = (vn_synd_cnt[ii*8 + j]);
+	                        fprintf(sfp, "%d", vtmp);
+	                    }
+	                    fprintf(sfp, "\n", vtmp);
+	                }
+#endif        
+
+                // previous column is skipped
+                if(col_skip)
+                    col_skip = false;   // Column skip feature OFF
+                else
+                    if(col_skip_itr==0)
+                        col_skip = false;// non-skip iterations
+                    else
+                        if((col_skip_itr>0)&&(itr<col_skip_itr))
+                            col_skip = false;
+                        else
+                        {
+                            col_skip = true;
+                            //make a skip decision
+                            for(int j=0;j<cir_sz;j++)
+                            {
+                                if(vn_synd_cnt[j]>=flp_thrshd1[itr-1])
+                                    col_skip = false;
+                            }
+                        }
+               
+                //flip logics
+                if(col_skip == false)
+                {
+                    // read raw and current HD
+                    vec_copy(dec_di_blk,vn_raw_sel, i*cir_sz,0,cir_sz);
+                    vec_copy(dec_do_blk,vn_hd_sel, i*cir_sz,0,cir_sz);
+
+
+                    //pipelines
+                    for(int j=p_num;j>0;j--)
+                        vec_copy(vn_flp_sel[j-1],vn_flp_sel[j],0,0,cir_sz);
+                    for(int j=p_num;j>0;j--)
+                    {
+                        vn_flp_col[j] = vn_flp_col[j-1];
+                        vn_flp_itr[j] = vn_flp_itr[j-1];
+                    }
+                    vn_flp_col[0] = i;
+                    vn_flp_itr[0] = itr;
+
+
+                    for(int j=0;j<cir_sz;j++)
+                    {
+                        if(((vn_raw_sel[j]==vn_hd_sel[j]) && (vn_synd_cnt[j]>=flp_thrshd0[itr-1]))
+                        || ((vn_raw_sel[j]!=vn_hd_sel[j]) && (vn_synd_cnt[j]>=flp_thrshd1[itr-1])))
+                        {
+                            vn_flp_sel[0][j] = 1;
+                        }
+                        else
+                        {
+                            vn_flp_sel[0][j] = 0;
+                        }
+                    }
+
+                    col_updt = vn_flp_col[p_num];
+                    itr_updt = vn_flp_itr[p_num];
+#ifdef _LDPC_DEBUG_DUMP
+                    fprintf(hdfp, "ITR%2d/COL%2d hd mem info: \n", itr, i);
+                    fprintf(hdfp, "before hd flip: \n");
+                    fprintf(hdfp, "flip_flg flip: \n");
+                    for (int ii=cir_sz-1; ii>=0; ii--)
+                    {
+                        vtmp = (dec_do_blk[i*cir_sz + ii]);
+                        fprintf(hdfp, "%d", vtmp);
+                    }
+                    fprintf(hdfp, "\n");
+                    for (int ii=cir_sz-1; ii>=0; ii--)
+                    {
+                        vtmp = (vn_flp_sel[0][ii]);
+                        fprintf(hdfp, "%d", vtmp);
+                    }
+                    fprintf(hdfp, "\n");
+#endif          
+                    for(int j=0;j<cir_sz;j++)
+                    {
+                        if(vn_flp_sel[p_num][j] == 1)
+                        {
+                            dec_do_blk[col_updt*cir_sz+j] = (dec_do_blk[col_updt*cir_sz+j]+1)%2;
+                        }
+                    }
+                }//non-skipped columns(flip logic)
+            }// non-1st iteration columns
+            fdec_cyc_org++;
+
+
+            if(col_skip==false)
+            {
+                fdec_cyc_num++;
+
+                for(e=mod2sparse_first_in_col(qc_bm,col_updt);!mod2sparse_at_end(e);e=mod2sparse_next_in_col(e))
+                {
+                    int drop_start = cir_sz+1;
+                    int drop_length = 0;
+                    int min_drop_ind =-1;
+#ifdef _LDPC_DEBUG_DUMP
+                    fprintf(lfp, "ITR%2d/COL%2d/row%2d pre_shft: \n", itr, col_updt, e->row);
+                    fprintf(lfp, "v pre shift: \n");
+                    for (int ii=cir_sz-1; ii>=0; ii--)
+                    {
+                        vtmp = (vn_flp_sel[p_num][ii]);
+                        fprintf(lfp, "%d", vtmp);
+                    }
+                    fprintf(lfp, "\n");
+#endif          
+
+                    vec_shift(vn_flp_sel[p_num], cn_flp_sel,cir_sz,-1*e->shift);
+                    if(col_updt==bm_n-1)
+                    {
+                        drop_start = (cir_sz - (e->shift) + pad_bit) % cir_sz;
+                        drop_length = cir_sz - pad_bit;
+                        min_drop_ind = drop_start + drop_length;
+                    }
+                    else
+                    {
+                        if(drop_col_bit_map[e->row][e->col])
+                        {
+                            if(e->row==bm_m-1)
+                            {
+                                drop_start = pad_bit;
+                                drop_length = cir_sz - pad_bit;
+                            }
+                            else
+                            {
+                                drop_start = (e->col-e->row)/(bm_m-1) * pad_bit % cir_sz;
+                                drop_length = pad_bit;
+                            }
+                            min_drop_ind = drop_start + drop_length;
+                        }
+                    }
+                    for(int ii=0;ii<cir_sz;ii++)
+                    {
+                        if((min_drop_ind<=cir_sz && ii>=drop_start && ii < min_drop_ind)
+                        || (min_drop_ind>cir_sz && (ii>=drop_start || ii<min_drop_ind % cir_sz)))
+                            cn_flp_sel[ii] = 0;
+                    }
+
+#ifdef _LDPC_DEBUG_DUMP
+                    fprintf(lfp, "ITR%2d/COL%2d/row%2d shft: \n", itr, col_updt, e->row);
+                    fprintf(lfp, "v shift(masked): \n");
+                    for (int ii=cir_sz-1; ii>=0; ii--)
+                    {
+                        vtmp = (cn_flp_sel[ii]);
+                        fprintf(lfp, "%d", vtmp);
+                    }
+                    fprintf(lfp, "\n");
+#endif          
+
+                    vec_copy(cn_synd_mem,cn_synd_old,e->row*cir_sz,0,cir_sz);
+                    vec_mod2_add(cn_flp_sel, cn_synd_old, cn_synd_new, cir_sz);
+                    vec_copy(cn_synd_new,cn_synd_mem,0,e->row*cir_sz,cir_sz);
+#ifdef _LDPC_DEBUG_DUMP
+                    fprintf(lfp, "ITR%2d/COL%2d/row%2d syndrome: \n", itr, e->col, e->row);
+                    for (int ii=cir_sz-1; ii>=0; ii--)
+                    {
+                        vtmp = (cn_synd_mem[e->row*cir_sz + ii]);
+                        fprintf(lfp, "%d", vtmp);
+                    }
+                    fprintf(lfp, "\n");
+#endif                              
                 }
 
 

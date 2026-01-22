@@ -15,17 +15,26 @@ COMMON_CPP_SRCS := $(SRC_DIRS)/fc_dsp.cpp $(SRC_DIRS)/transceiver.cpp $(SRC_DIRS
 
 # Main program sources
 MAIN_SRCS := $(SRC_DIRS)/SSD_FC.cpp $(SRC_DIRS)/ldpc_codec.cpp
+TEST_MAIN_SRCS := $(SRC_DIRS)/SSD_FC.cpp $(SRC_DIRS)/ldpc_codec_test.cpp
+TEST2_MAIN_SRCS := $(SRC_DIRS)/SSD_FC.cpp $(SRC_DIRS)/ldpc_codec_test2.cpp
+TEST3_MAIN_SRCS := $(SRC_DIRS)/SSD_FC.cpp $(SRC_DIRS)/ldpc_codec_test3.cpp
 
 # Object files
 COMMON_C_OBJS := $(COMMON_C_SRCS:$(SRC_DIRS)/%.c=$(BUILD_DIR)/$(SRC_DIRS)/%.c.o)
 COMMON_CPP_OBJS := $(COMMON_CPP_SRCS:$(SRC_DIRS)/%.cpp=$(BUILD_DIR)/$(SRC_DIRS)/%.cpp.o)
 MAIN_OBJS := $(MAIN_SRCS:$(SRC_DIRS)/%.cpp=$(BUILD_DIR)/$(SRC_DIRS)/%.cpp.o)
+TEST_MAIN_OBJS := $(TEST_MAIN_SRCS:$(SRC_DIRS)/%.cpp=$(BUILD_DIR)/$(SRC_DIRS)/%.cpp.o)
+TEST2_MAIN_OBJS := $(TEST2_MAIN_SRCS:$(SRC_DIRS)/%.cpp=$(BUILD_DIR)/$(SRC_DIRS)/%.cpp.o)
+TEST3_MAIN_OBJS := $(TEST3_MAIN_SRCS:$(SRC_DIRS)/%.cpp=$(BUILD_DIR)/$(SRC_DIRS)/%.cpp.o)
 OBJS := $(COMMON_C_OBJS) $(COMMON_CPP_OBJS) $(MAIN_OBJS)
+TEST_OBJS := $(COMMON_C_OBJS) $(COMMON_CPP_OBJS) $(TEST_MAIN_OBJS)
+TEST2_OBJS := $(COMMON_C_OBJS) $(COMMON_CPP_OBJS) $(TEST2_MAIN_OBJS)
+TEST3_OBJS := $(COMMON_C_OBJS) $(COMMON_CPP_OBJS) $(TEST3_MAIN_OBJS)
 
 INC_DIRS := $(shell find $(SRC_DIRS) -type d)
 INC_FLAGS := $(addprefix -I,$(INC_DIRS))
 
-CPPFLAGS ?= $(INC_FLAGS) -MMD -MP -g
+CPPFLAGS ?= $(INC_FLAGS) -MMD -MP -g -D_LDPC_DUMP
 LDFLAGS ?= -lm
 
 # Default target: build the program
@@ -35,6 +44,15 @@ all: $(TARGET_EXEC)
 # Build executable
 $(TARGET_EXEC): $(OBJS)
 	$(CXX) $(OBJS) -o $@ $(LDFLAGS)
+
+ssd_fc_test: $(TEST_OBJS)
+	$(CXX) $(TEST_OBJS) -o $@ $(LDFLAGS)
+
+ssd_fc_test2: $(TEST2_OBJS)
+	$(CXX) $(TEST2_OBJS) -o $@ $(LDFLAGS)
+
+ssd_fc_test3: $(TEST3_OBJS)
+	$(CXX) $(TEST3_OBJS) -o $@ $(LDFLAGS)
 
 # C source compilation
 $(BUILD_DIR)/$(SRC_DIRS)/%.c.o: $(SRC_DIRS)/%.c

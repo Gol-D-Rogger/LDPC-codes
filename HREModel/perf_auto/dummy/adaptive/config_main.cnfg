@@ -1,0 +1,31 @@
+12                              // meta data size (B)
+512                             // LBA size(B)
+8                               // LBA # per DSP CW
+21                              // row number of base matrix
+150                             // column number of base matrix
+256                             // circulant number
+6                               // Dense matrix size or rows of E matrix in base matrix
+6                               // column weight of base matrix
+1000 // maximum simulation number
+10 // maximum error number
+FC_RDEC                         // LDPC decoder(FC_SKIP/FC_FDEC/FC_RDEC/FC_MIX/FC_FDEC2)
+10                               // HRE bit count
+0                               // HRE bit configure mode
+0                               // HRE llr process enable
+24                              // Fast decoder maximum iteration number 24
+0                               // Iteration to turn on FDEC column skip feature (0:always OFF)
+32                              // Retry decoder maximum iteration number
+0.625                           // Retry decoder alpha
+1                               // Quantization Mode
+8                               // APP/Q bit width
+6                               // R bit width (Min need 1-bit less)
+3                               // Fraction bits
+7                               // LLR bit width
+3                               // LLR fraction bits
+MANUAL                          // LLR mode (IDEAL/MANUAL/VENDOR0/VENDOR1)
+7                               // Number of NAND soft data bits
+0 0.15 -0.15 0.3 -0.3 0.5 -0.5  // VERF values
+1.875 -1.875                    // Hard decoding LLR for retry decoder
+1060                            // init_synd_wt threshold to skip FDEC
+104C11DB7                       // CRC 32 polynomial values
+104C11DB7                       // 32-bit LSFR for randomizer

@@ -6,10 +6,12 @@ CXX = g++
 TARGET_EXEC ?= ssd_fc_hre
 TARGET_EXEC_HRE_ONLY ?= ssd_fc_hre_only
 TARGET_EXEC_HRE2 ?= ssd_fc_hre2
+TARGET_EXEC_FLIP_EQ ?= ssd_fc_flip_eq
 
 BUILD_DIR ?= ./build
 BUILD_DIR_HRE_ONLY ?= ./build_hre_only
 BUILD_DIR_HRE2 ?= ./build_hre2
+BUILD_DIR_FLIP_EQ ?= ./build_flip_eq
 SRC_DIRS ?= ./src
 DUMPS_DIR ?= ./output
 
@@ -23,6 +25,8 @@ ORIG_SRCS := $(SRC_DIRS)/SSD_FC.cpp $(SRC_DIRS)/ldpc_codec.cpp
 # HRE-only version specific sources
 HRE_ONLY_SRCS := $(SRC_DIRS)/SSD_FC_hre_only.cpp $(SRC_DIRS)/transceiver_hre_only.cpp
 HRE2_MAIN_SRCS := $(SRC_DIRS)/SSD_FC_hre2.cpp $(SRC_DIRS)/ldpc_codec.cpp
+FLIP_EQ_CPP_SRCS := $(SRC_DIRS)/fc_dsp.cpp $(SRC_DIRS)/transceiver_flip_eq.cpp $(SRC_DIRS)/isoc23_compat.cpp
+FLIP_EQ_MAIN_SRCS := $(SRC_DIRS)/SSD_FC_flip_eq.cpp $(SRC_DIRS)/ldpc_codec.cpp
 
 # Object files for original version
 COMMON_C_OBJS := $(COMMON_C_SRCS:$(SRC_DIRS)/%.c=$(BUILD_DIR)/$(SRC_DIRS)/%.c.o)
@@ -42,6 +46,12 @@ HRE2_C_OBJS := $(COMMON_C_SRCS:$(SRC_DIRS)/%.c=$(BUILD_DIR_HRE2)/$(SRC_DIRS)/%.c
 HRE2_CPP_OBJS := $(COMMON_CPP_SRCS:$(SRC_DIRS)/%.cpp=$(BUILD_DIR_HRE2)/$(SRC_DIRS)/%.cpp.o)
 HRE2_MAIN_OBJS := $(HRE2_MAIN_SRCS:$(SRC_DIRS)/%.cpp=$(BUILD_DIR_HRE2)/$(SRC_DIRS)/%.cpp.o)
 OBJS_HRE2 := $(HRE2_C_OBJS) $(HRE2_CPP_OBJS) $(HRE2_MAIN_OBJS)
+
+# Object files for FLIP_EQ version (flip x0->x1 then TAWGN on x1)
+FLIP_EQ_C_OBJS := $(COMMON_C_SRCS:$(SRC_DIRS)/%.c=$(BUILD_DIR_FLIP_EQ)/$(SRC_DIRS)/%.c.o)
+FLIP_EQ_CPP_OBJS := $(FLIP_EQ_CPP_SRCS:$(SRC_DIRS)/%.cpp=$(BUILD_DIR_FLIP_EQ)/$(SRC_DIRS)/%.cpp.o)
+FLIP_EQ_MAIN_OBJS := $(FLIP_EQ_MAIN_SRCS:$(SRC_DIRS)/%.cpp=$(BUILD_DIR_FLIP_EQ)/$(SRC_DIRS)/%.cpp.o)
+OBJS_FLIP_EQ := $(FLIP_EQ_C_OBJS) $(FLIP_EQ_CPP_OBJS) $(FLIP_EQ_MAIN_OBJS)
 
 INC_DIRS := $(shell find $(SRC_DIRS) -type d)
 INC_FLAGS := $(addprefix -I,$(INC_DIRS))
@@ -66,6 +76,10 @@ $(TARGET_EXEC_HRE_ONLY): $(OBJS_HRE_ONLY)
 # Build HRE2 version (channel simulation only, new HRE flip + optional AWGN)
 $(TARGET_EXEC_HRE2): $(OBJS_HRE2)
 	$(CXX) $(OBJS_HRE2) -o $@ $(LDFLAGS)
+
+# Build FLIP_EQ version (flip x0->x1 then TAWGN on x1, full encode/decode)
+$(TARGET_EXEC_FLIP_EQ): $(OBJS_FLIP_EQ)
+	$(CXX) $(OBJS_FLIP_EQ) -o $@ $(LDFLAGS)
 
 # C source for original version
 $(BUILD_DIR)/$(SRC_DIRS)/%.c.o: $(SRC_DIRS)/%.c
@@ -97,9 +111,19 @@ $(BUILD_DIR_HRE2)/$(SRC_DIRS)/%.cpp.o: $(SRC_DIRS)/%.cpp
 	$(MKDIR_P) $(dir $@)
 	$(CXX) $(CPPFLAGS_HRE2) $(CXXFLAGS) -c $< -g -o $@
 
+# C source for FLIP_EQ version
+$(BUILD_DIR_FLIP_EQ)/$(SRC_DIRS)/%.c.o: $(SRC_DIRS)/%.c
+	$(MKDIR_P) $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -g -o $@
+
+# C++ source for FLIP_EQ version
+$(BUILD_DIR_FLIP_EQ)/$(SRC_DIRS)/%.cpp.o: $(SRC_DIRS)/%.cpp
+	$(MKDIR_P) $(dir $@)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -g -o $@
+
 .PHONY: clean
 clean:
-	$(RM) -r $(BUILD_DIR) $(BUILD_DIR_HRE_ONLY) $(BUILD_DIR_HRE2) $(TARGET_EXEC) $(TARGET_EXEC_HRE_ONLY) $(TARGET_EXEC_HRE2)
+	$(RM) -r $(BUILD_DIR) $(BUILD_DIR_HRE_ONLY) $(BUILD_DIR_HRE2) $(BUILD_DIR_FLIP_EQ) $(TARGET_EXEC) $(TARGET_EXEC_HRE_ONLY) $(TARGET_EXEC_HRE2) $(TARGET_EXEC_FLIP_EQ)
 	$(RM) $(DUMPS_DIR)/*_matrix.txt
 	$(RM) $(DUMPS_DIR)/*_matrix_*.txt
 
@@ -114,6 +138,10 @@ clean-hre-only:
 .PHONY: clean-hre2
 clean-hre2:
 	$(RM) -r $(BUILD_DIR_HRE2) $(TARGET_EXEC_HRE2)
+
+.PHONY: clean-flip-eq
+clean-flip-eq:
+	$(RM) -r $(BUILD_DIR_FLIP_EQ) $(TARGET_EXEC_FLIP_EQ)
 
 .PHONY: run
 run:
@@ -132,3 +160,4 @@ MKDIR_P ?= mkdir -p
 -include $(OBJS:.o=.d)
 -include $(OBJS_HRE_ONLY:.o=.d)
 -include $(OBJS_HRE2:.o=.d)
+-include $(OBJS_FLIP_EQ:.o=.d)

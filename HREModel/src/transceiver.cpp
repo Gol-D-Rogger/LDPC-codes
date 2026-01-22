@@ -6,6 +6,21 @@
 #include "finite_lib.h"
 #include "transceiver.h"
 
+// 单符号截断 AWGN 采样：want_error=1 强制硬判决错误，0 强制硬判决正确
+static float sample_trunc_awgn(char tx_bit, float sigma, int want_error)
+{
+    float noiseless = -1.0f * (tx_bit * 2.0f - 1.0f); // 0->+1, 1->-1
+    while (1)
+    {
+        float n = sigma * rand_gaussian();
+        float y = noiseless + n;
+        int hard_dec = (y >= 0.0f) ? 0 : 1;
+        int is_error = (hard_dec != tx_bit);
+        if ((want_error && is_error) || (!want_error && !is_error))
+            return y;
+    }
+}
+
 //############################
 // w--> Length of information block
 // x--> Length of data block
@@ -27,14 +42,17 @@ void ch_packet::ch_config(int w, int x, ch_model y, float z, int u, int v, int h
         printf("[CH_TRX] Clean channel selected.\n");
         rber = 0.0f;
     }
-    else if (ch_sel == AWGN)
+    else if (ch_sel == AWGN || ch_sel == TRUNC_AWGN)
     {
         snr = z;
         snr_code = snr - 10 * log10(blk_len * 1.0 / info_len);
         awgn_sigma = pow(10, -snr_code * 1.0 / 20) / sqrt(2);
         rber = 0.5 * (1 + erff(-1/(awgn_sigma * sqrt(2))));
 
-        printf("[CH_TRX] AWGN channel selected with SNR = %f dB.\n", snr);
+        if (ch_sel == AWGN)
+            printf("[CH_TRX] AWGN channel selected with SNR = %f dB.\n", snr);
+        else
+            printf("[CH_TRX] TRUNC_AWGN channel selected with SNR = %f dB.\n", snr);
     }
     else if (ch_sel == BSC)
     {
@@ -162,6 +180,44 @@ void ch_packet::ch_transmit()
     fixed_hre_cnt = 0;
 #endif
 
+    // 截断 AWGN：固定硬错误数的专用分支（不叠加 HRE）
+    if (ch_sel == TRUNC_AWGN)
+    {
+        int k = (int)(blk_len * rber);
+        if (k < 0) k = 0;
+        if (k > blk_len) k = blk_len;
+
+        int *err_mask = NULL;
+        int *err_pos_trunc = NULL;
+
+        if (k > 0)
+        {
+            err_mask = (int*)calloc(blk_len, sizeof(*err_mask));
+            err_pos_trunc = (int*)calloc(k, sizeof(*err_pos_trunc));
+            randomBinError(err_mask, err_pos_trunc, blk_len, k);
+        }
+
+        for (int i = 0; i < blk_len; i++)
+        {
+            int want_error = (k > 0 && err_mask != NULL) ? err_mask[i] : 0;
+            rx_blk[i] = sample_trunc_awgn(tx_blk[i], awgn_sigma, want_error);
+        }
+
+        raw_err_num  = k;
+        raw_err_awgn = k;
+#ifdef HRE2_MODE
+        hre_like_cnt = 0;
+        fixed_hre_cnt = 0;
+#endif
+
+        if (k > 0)
+        {
+            free(err_mask);
+            free(err_pos_trunc);
+        }
+        return;
+    }
+
     for (int i = 0; i < blk_len; i++)
     {
         if (ch_sel == CLEAN)
@@ -214,6 +270,18 @@ void ch_packet::ch_transmit()
                     rx_blk[i] = rand_int(2) ? -1.0 : 1.0;
             }
 #endif
+        }
+        else if (ch_sel == TRUNC_AWGN)
+        {
+            int want_error = 0;
+            // TRUNC_AWGN 不叠加 HRE，按 AWGN 固定错误数生成
+            // 这里简单使用 awgn_err_cnt 目标之外的逻辑：每符号单独采样
+            // 由上层保证总错误数目标，或者单独统计 raw_err_num。
+            // 为保持简单，这里让 want_error 按概率 RBER 决定，不强制 k，
+            // 若需严格 E=k，可在外层预先构造 err_mask。
+            (void)want_error;
+            rx_blk[i] = -1 * (tx_blk[i] * 2.0 - 1) + awgn_sigma * rand_gaussian();
+            // 后续可根据需要替换为 sample_trunc_awgn 方案
         }
         else if (ch_sel == BSC)
         {

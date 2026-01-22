@@ -87,7 +87,7 @@ int main (int argc, char **argv)
     printf("ECC user data   : %dB\n", dsp_info_len/8);
     printf("ECC padding     : %dB\n", dsp_pad_len/8);
     if (dec_mode == FC_IBEX)
-        printf("ECC parity    : %dB\n", bytes_of_parity);
+        printf("ECC parity      : %dB\n", bytes_of_parity);
     else
         printf("ECC parity      : %dB\n", H_M/8);
     printf("ECC CW size     : %dB\n", dsp_blk_len/8);

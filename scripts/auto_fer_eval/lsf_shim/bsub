@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""
+LSF Shim bsub Command
+Submits jobs to the LSF shim scheduler.
+"""
+
+import os
+import sys
+import subprocess
+from pathlib import Path
+
+# Add script directory to Python path for imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from lsf_registry import LsfRegistry
+
+
+def parse_bsub_args(args):
+    """
+    Parse bsub arguments flexibly, allowing unknown parameters.
+
+    Returns:
+        tuple: (log_path, cwd, queue, job_name, cmd)
+    """
+    log_path = None
+    cwd = os.getcwd()  # Default to current directory
+    queue = None
+    job_name = None
+    cmd = []
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+
+        if arg == '-o' and i + 1 < len(args):
+            log_path = args[i + 1]
+            i += 2
+        elif arg == '-cwd' and i + 1 < len(args):
+            cwd = args[i + 1]
+            i += 2
+        elif arg == '-q' and i + 1 < len(args):
+            queue = args[i + 1]
+            i += 2
+        elif arg == '-J' and i + 1 < len(args):
+            job_name = args[i + 1]
+            i += 2
+        elif arg.startswith('-'):
+            # Unknown option - skip it and its potential argument
+            # Try to determine if it takes an argument
+            if i + 1 < len(args) and not args[i + 1].startswith('-'):
+                # Assume it takes an argument
+                i += 2
+            else:
+                # Flag without argument
+                i += 1
+        else:
+            # First non-option argument starts the command
+            cmd = args[i:]
+            break
+
+    return log_path, cwd, queue, job_name, cmd
+
+
+def main():
+    """Main entry point for bsub."""
+    if len(sys.argv) < 2:
+        print("Usage: bsub -o <log_path> [-cwd <cwd>] [-q <queue>] [-J <job_name>] <cmd...>",
+              file=sys.stderr)
+        sys.exit(1)
+
+    # Parse arguments
+    log_path, cwd, queue, job_name, cmd = parse_bsub_args(sys.argv[1:])
+
+    # Validate required arguments
+    if not log_path:
+        print("Error: -o <log_path> is required", file=sys.stderr)
+        sys.exit(1)
+
+    if not cmd:
+        print("Error: command is required", file=sys.stderr)
+        sys.exit(1)
+
+    # Expand paths to absolute
+    log_path = os.path.abspath(log_path)
+    cwd = os.path.abspath(cwd)
+
+    # Validate working directory exists
+    if not os.path.isdir(cwd):
+        print(f"Error: Working directory does not exist: {cwd}", file=sys.stderr)
+        sys.exit(1)
+
+    # Create job in registry
+    registry = LsfRegistry()
+    job_id = registry.get_next_job_id()
+    registry.create_job(
+        job_id=job_id,
+        cwd=cwd,
+        cmd=cmd,
+        log_path=log_path,
+        queue=queue,
+        job_name=job_name
+    )
+
+    # Launch runner process
+    runner_script = Path(__file__).parent / 'lsf_runner.py'
+    subprocess.Popen(
+        [sys.executable, str(runner_script), str(job_id)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL
+    )
+
+    # Output job ID in LSF format
+    # This format is parsed by auto_fer_eval using regex
+    print(f"Job <{job_id}> is submitted to default queue <{queue or 'normal'}>.")
+
+    sys.exit(0)
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""
+LSF Shim bjobs Command
+Queries job status from the LSF shim scheduler.
+"""
+
+import os
+import sys
+
+# Add script directory to Python path for imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from lsf_registry import LsfRegistry
+
+
+def check_process_alive(pid):
+    """
+    Check if a process is still running.
+
+    Args:
+        pid: Process ID to check
+
+    Returns:
+        bool: True if process exists, False otherwise
+    """
+    if pid is None:
+        return False
+
+    try:
+        # Send signal 0 to check if process exists
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def format_job_line(job):
+    """
+    Format a job record as a bjobs output line.
+
+    Args:
+        job: Job dictionary from registry
+
+    Returns:
+        str: Formatted job line
+    """
+    job_id = job['job_id']
+    user = os.environ.get('USER', 'user')
+    state = job['state']
+    queue = job.get('queue') or 'normal'
+    from_host = 'localhost'
+    exec_host = 'localhost' if state in ('RUN', 'DONE', 'EXIT') else '-'
+    job_name = job.get('job_name') or ' '.join(job['cmd'][:2])  # First 2 words of command
+
+    # Truncate job name if too long
+    if len(job_name) > 20:
+        job_name = job_name[:17] + '...'
+
+    # Format submit time
+    import time
+    submit_time = time.strftime('%b %d %H:%M', time.localtime(job['submit_time']))
+
+    # Format line with proper spacing
+    return f"{job_id:<7} {user:<8} {state:<7} {queue:<8} {from_host:<12} {exec_host:<12} {job_name:<20} {submit_time}"
+
+
+def main():
+    """Main entry point for bjobs."""
+    # Parse arguments - extract job_id, ignore other flags
+    job_id = None
+    for arg in sys.argv[1:]:
+        if not arg.startswith('-'):
+            try:
+                job_id = int(arg)
+                break
+            except ValueError:
+                continue
+
+    if job_id is None:
+        print("Usage: bjobs [options...] <job_id>", file=sys.stderr)
+        sys.exit(1)
+
+    # Get job from registry
+    registry = LsfRegistry()
+    job = registry.get_job(job_id)
+
+    if job is None:
+        print(f"Job <{job_id}> is not found", file=sys.stderr)
+        sys.exit(1)
+
+    # Validate job state if it's RUN
+    # If process is dead but state is RUN, correct it to EXIT
+    if job['state'] == 'RUN':
+        pid = job.get('pid')
+        if not check_process_alive(pid):
+            registry.set_job_state(job_id, 'EXIT', rc=-1)
+            job = registry.get_job(job_id)  # Re-read updated job
+
+    # Print header
+    print(f"{'JOBID':<7} {'USER':<8} {'STAT':<7} {'QUEUE':<8} {'FROM_HOST':<12} {'EXEC_HOST':<12} {'JOB_NAME':<20} {'SUBMIT_TIME'}")
+
+    # Print job line
+    print(format_job_line(job))
+
+    sys.exit(0)
+
+
+if __name__ == '__main__':
+    main()

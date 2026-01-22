@@ -101,7 +101,7 @@ void ldpc_config(int h_m,
         sim_pckt->ch_config(g_info_len, g_blk_len, MAX_ERR, m_ch_para);
 
     // LDPC 配置: 当前 DVCtrans 仅有标准接口，使用扩展后的尺寸近似配置
-    sim_pckt->ldpc_config(bm_m, bm_n, h_sc, h_st + 1, h_wt, pchk_file);
+    sim_pckt->ldpc_config(bm_m, bm_n, h_sc, h_st, h_wt, pchk_file);
 
     // 缓冲分配
     sim_pckt->ldpc_pckt_alloc();
@@ -180,6 +180,13 @@ void ldpc_enc(svOpenArrayHandle usr_data_sv,
             tmp = 0;
         }
     }
+
+    if ((sim_pckt->blk_len % 32) == 16) 
+    {
+        unsigned int last = enc_data[k-1];
+        last = last << 16;
+        enc_data[k-1] = last;
+    }
 }              
 
 extern "C"
@@ -242,9 +249,7 @@ void ldpc_dec(svOpenArrayHandle det_data_sv,
 
     // 暂时替换 det_blk 指针和 blk_len 供译码使用
     char *old_det = sim_pckt->det_blk;
-    int   old_blk_len = sim_pckt->blk_len;
     sim_pckt->det_blk = tmp_blk;
-    sim_pckt->blk_len = hm_k + hm_m;
 
     // 3. 执行解码
     if (dec_mode==0)
@@ -256,7 +261,6 @@ void ldpc_dec(svOpenArrayHandle det_data_sv,
 
     // 恢复指针
     sim_pckt->det_blk = old_det;
-    sim_pckt->blk_len = old_blk_len;
     free(tmp_blk);
 
     // 4. 状态输出
@@ -294,6 +298,14 @@ void ldpc_dec(svOpenArrayHandle det_data_sv,
             k++;
         }
     }
+
+    if ((sim_pckt->blk_len % 32) == 16) 
+    {
+        unsigned int last = dec_data[k-1];
+        last = last << 16;
+        dec_data[k-1] = last;
+    }
+
     // 补齐对齐
     while (i%32 !=0)
         i++;
@@ -366,21 +378,43 @@ void ch_err_inj(svOpenArrayHandle tx_data_sv,
     sim_pckt->ch_detector(1, &vref);
 
     // data out
-    j = 0;
-    k = 0;
-    tmp = 0;
-    for (i = 0; i < sim_pckt->blk_len; i++)
-    {
-        tmp = tmp*2 + sim_pckt->det_blk[i];
-        j++;
-        j=j%32;
+    // j = 0;
+    // k = 0;
+    // tmp = 0;
+    // for (i = 0; i < sim_pckt->blk_len; i++)
+    // {
+    //     tmp = tmp*2 + sim_pckt->det_blk[i];
+    //     j++;
+    //     j=j%32;
 
-        if ((j==0) || (i==sim_pckt->blk_len-1))
+    //     if ((j==0) || (i==sim_pckt->blk_len-1))
+    //     {
+    //         det_data[k] = tmp;
+    //         tmp = 0;
+    //         k++;
+    //     }
+    // }
+
+    int n_words = (sim_pckt->blk_len + 31) / 32;
+    for (int w = 0; w < n_words; w++) 
+    {
+      unsigned int word = (unsigned int)tx_data[w];
+
+        for (int b = 0; b < 32; b++) 
         {
-            det_data[k] = tmp;
-            tmp = 0;
-            k++;
+            int bit_index = w * 32 + (31 - b);  // 与解包时相反的 MSB 顺序
+            if (bit_index >= sim_pckt->blk_len)
+                break;  // 超出码字长度的位保持 TX 原值
+
+            unsigned int bit  = (unsigned int)(sim_pckt->det_blk[bit_index] & 1u);
+            unsigned int mask = 1u << b;
+
+            if (bit)
+                word |= mask;
+            else
+                word &= ~mask;
         }
+        det_data[w] = word;
     }
 }                
 

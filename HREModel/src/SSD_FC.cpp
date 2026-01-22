@@ -480,6 +480,8 @@ void read_arg(int argc, char **argv)
         ch_mode = CLEAN;
     else if (strcmp(ch_sel, "AWGN") == 0)
         ch_mode = AWGN;
+    else if (strcmp(ch_sel, "TRUNC_AWGN") == 0 || strcmp(ch_sel, "TAWGN") == 0)
+        ch_mode = TRUNC_AWGN;
     else if (strcmp(ch_sel, "BSC") == 0)
         ch_mode = BSC;
     else if (strcmp(ch_sel, "ERR_INJ") == 0)
@@ -744,6 +746,8 @@ void read_config_file()
         printf("Clean channel\n");
     else if (ch_mode==AWGN)
         printf("AWGN channel with SNR=%f\n", ch_para);
+    else if (ch_mode==TRUNC_AWGN)
+        printf("Truncated AWGN channel with SNR=%f (fixed FBC)\n", ch_para);
     else if (ch_mode==BSC)
         printf("BSC channel with RBER=%f\n", ch_para);
     else if (ch_mode==ERR_INJ)

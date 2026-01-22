@@ -219,6 +219,7 @@ struct ldpc_packet : ch_packet
     s_ldpc_decoder_input ldpc_decoder_input;
     s_ldpc_decoder_output ldpc_decoder_output;
     s_ldpc_decoder_parameters ldpc_decoder_parameters;
+    int total_cir;
 
     // decoder config
     int fdec_max_itr;
@@ -287,6 +288,7 @@ struct ldpc_packet : ch_packet
     void ldpc_rd_phck(char *);
     void ldpc_gen_gm();
     void ldpc_clean();
+    void ldpc_ibex_phck(s_h_matrix);
 
     // IBEX core
     void ldpc_ibex_encoder();
@@ -325,6 +327,7 @@ struct ldpc_packet : ch_packet
 
     // LDPC layer decoder
     void ldpc_dec_layer();
+    void ldpc_dec_layer2();
     // Skip LDPC decoder
     void ldpc_dec_skip();
 

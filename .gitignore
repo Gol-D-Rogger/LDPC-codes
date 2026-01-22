@@ -13,6 +13,8 @@ gen4_ldpc_sim/output/
 output/
 runs/
 
+doc_untracked/
+
 # Compiled Object files
 *.o
 *.obj
@@ -38,6 +40,10 @@ runs/
 
 # Logs
 *.log
+*.xlsx
+*.csv
+*.json
+*.toml
 perf/*.log
 
 # Temporary files
@@ -65,3 +71,14 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+
+# core bf
+IBEX/doc/all core bf
+
+# white list
+!*.cpp
+!*.c
+!*.h
+!Makefile
+!*.md

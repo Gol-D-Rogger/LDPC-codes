@@ -4,7 +4,7 @@
 #define _CH_PACKET_H_HRE_ONLY
 
 enum sd_mode {DIRECT=0, MANUAL=1, VENDOR0=2, VENDOR1=3};
-enum ch_model {CLEAN=0, AWGN=1, BSC=2, ERR_INJ=3, MAX_ERR=4};
+enum ch_model {CLEAN=0, AWGN=1, BSC=2, ERR_INJ=3, MAX_ERR=4, TRUNC_AWGN=5};
 
 struct ch_packet{
     ch_packet()
