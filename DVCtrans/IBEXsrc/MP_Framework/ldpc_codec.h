@@ -19,6 +19,7 @@ enum dec_model
     BF_G2 = 4,
     BF_IBEX = 5,
     LAYER = 8,
+    LAYER_G2 = 9,
 };
 
 struct cn_msg
@@ -297,28 +298,28 @@ struct ldpc_packet : ch_packet
     void ldpc_clean();
     void ldpc_ibex_phck(s_h_matrix);
 
-	    // IBEX core
-	    void ldpc_ibex_encoder();
-	    void ldpc_ibex_input(int, int, int, int);
-	    void ldpc_ibex_parameters(int,
-	                              int,
-	                              int,
-	                              int,
-	                              int,
-	                              int,
-	                              int,
-	                              int,
-	                              int,
-	                              unsigned int,
-	                              unsigned int,
-	                              unsigned int,
-	                              unsigned int,
-	                              unsigned int,
-	                              unsigned int,
-	                              unsigned int);
-	    s_hard_codeword f_ldpc_encode(s_hard_codeword, s_h_matrix);
-	    void f_print_h_matrix(s_h_matrix);
-	    void f_print_hard_codeword(s_hard_codeword, int, int);
+    // IBEX core
+    void ldpc_ibex_encoder();
+    void ldpc_ibex_input(int, int, int, int);
+    void ldpc_ibex_parameters(int,
+                              int,
+                              int,
+                              int,
+                              int,
+                              int,
+                              int,
+                              int,
+                              int,
+                              unsigned int,
+                              unsigned int,
+                              unsigned int,
+                              unsigned int,
+                              unsigned int,
+                              unsigned int,
+                              unsigned int);
+    s_hard_codeword f_ldpc_encode(s_hard_codeword, s_h_matrix);
+    void f_print_h_matrix(s_h_matrix);
+    void f_print_hard_codeword(s_hard_codeword, int, int);
     s_check_nodes f_check_nodes(s_h_matrix, s_hard_codeword);
     int f_check_node_weight(s_h_matrix, s_check_nodes);
     s_likelihood_levels f_likelihood_levels(int, s_ldpc_decoder_parameters, int, int);

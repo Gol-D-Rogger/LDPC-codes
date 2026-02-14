@@ -41,12 +41,11 @@ class CaseConfig:
     cmd_extra_args: list[str]
     out_dir: str
     log_prefix: str
-    config_tag: str
-    job_name_prefix: str
 
-    snr_low: float
-    snr_high: float
-    snr_step: float
+    axis_type: str  # "snr" or "k"
+    x_low: float
+    x_high: float
+    x_step: float
 
     max_sim_num: int
     max_err_num: int
@@ -57,7 +56,10 @@ class RunnerConfig:
     executor: str = "local"  # local | lsf
     max_in_flight: int = 4
     poll_sec: float = 2.0
-    fail_fast: bool = True
+    fail_fast: bool = False
+    # Log flush grace window (seconds) after LSF/local reports DONE/EXIT.
+    # Shared filesystems (NFS) can delay creation/flush of bsub -o logs.
+    timeout_log_grace_sec: float = 10.0
 
 
 @dataclass(frozen=True)
@@ -106,7 +108,8 @@ def load_config(path: Path) -> tuple[list[CaseConfig], RunnerConfig, LsfConfig]:
     data = tomllib.loads(path.read_text(encoding="utf-8"))
 
     defaults = data.get("defaults", {})
-    runner_raw = data.get("runner", {})
+    # Support both [runner] and [throughput] for backward compatibility
+    runner_raw = data.get("runner", data.get("throughput", {}))
     lsf_raw = data.get("lsf", {})
     case_list = data.get("cases", [])
     if not isinstance(case_list, list) or not case_list:
@@ -131,11 +134,33 @@ def _parse_runner(raw: Any) -> RunnerConfig:
     executor = str(raw.get("executor", "local")).strip().lower()
     if executor not in {"local", "lsf"}:
         raise ValueError("runner.executor must be 'local' or 'lsf'.")
+
+    fail_fast_raw = raw.get("fail_fast", False)
+    # TOML should provide a proper boolean (true/false). Be defensive:
+    # - allow 0/1
+    # - allow strings like "false"/"true" (but recommend using boolean)
+    fail_fast: bool
+    if isinstance(fail_fast_raw, bool):
+        fail_fast = fail_fast_raw
+    elif isinstance(fail_fast_raw, (int, float)) and fail_fast_raw in (0, 1):
+        fail_fast = bool(fail_fast_raw)
+    elif isinstance(fail_fast_raw, str):
+        s = fail_fast_raw.strip().lower()
+        if s in {"false", "0", "no", "n"}:
+            fail_fast = False
+        elif s in {"true", "1", "yes", "y"}:
+            fail_fast = True
+        else:
+            raise ValueError("runner.fail_fast must be a boolean true/false (do not quote).")
+    else:
+        raise ValueError("runner.fail_fast must be a boolean true/false (do not quote).")
+
     return RunnerConfig(
         executor=executor,
         max_in_flight=int(raw.get("max_in_flight", 4)),
         poll_sec=float(raw.get("poll_sec", 2.0)),
-        fail_fast=bool(raw.get("fail_fast", True)),
+        fail_fast=fail_fast,
+        timeout_log_grace_sec=float(raw.get("timeout_log_grace_sec", 10.0)),
     )
 
 
@@ -171,18 +196,27 @@ def _parse_case(d: dict[str, Any]) -> CaseConfig:
 
     out_dir = str(d.get("out_dir", "./perf_auto_throughput"))
     log_prefix = str(d.get("log_prefix", "tp"))
-    config_tag = str(d.get("config_tag", "")).strip()
-    if not config_tag:
-        raise ValueError("config_tag must be provided (you define it in TOML).")
-    job_name_prefix = str(d.get("job_name_prefix", "Throughput Data")).strip()
 
-    snr_low = float(d["snr_low"])
-    snr_high = float(d["snr_high"])
-    snr_step = float(d["snr_step"])
-    if not math.isfinite(snr_low) or not math.isfinite(snr_high) or not math.isfinite(snr_step) or snr_step <= 0:
-        raise ValueError("snr_low/snr_high/snr_step must be finite, with snr_step>0.")
-    if snr_high < snr_low - 1e-12:
-        raise ValueError("Require snr_high >= snr_low.")
+    axis_type = str(d.get("axis_type", "")).strip().lower()
+    if not axis_type:
+        axis_type = "k" if str(ch_model).upper() == "ERR_INJ" else "snr"
+    if axis_type not in {"snr", "k"}:
+        raise ValueError(f"Unsupported axis_type: {axis_type}")
+
+    # Support both snr_min/snr_max/step and k_min/k_max/step formats (like auto_fer_eval)
+    if axis_type == "k":
+        x_low = float(d.get("k_min", d.get("k_low", d.get("snr_min", d.get("snr_low")))))
+        x_high = float(d.get("k_max", d.get("k_high", d.get("snr_max", d.get("snr_high")))))
+        x_step = float(d.get("step", d.get("k_step", d.get("snr_step"))))
+    else:
+        x_low = float(d.get("snr_min", d.get("snr_low")))
+        x_high = float(d.get("snr_max", d.get("snr_high")))
+        x_step = float(d.get("step", d.get("snr_step")))
+
+    if not math.isfinite(x_low) or not math.isfinite(x_high) or not math.isfinite(x_step) or x_step <= 0:
+        raise ValueError("axis low/high/step must be finite, with step>0.")
+    if x_high < x_low - 1e-12:
+        raise ValueError("Require x_high >= x_low.")
 
     max_sim_num = int(d.get("max_sim_num", 0))
     max_err_num = int(d.get("max_err_num", 0))
@@ -201,11 +235,10 @@ def _parse_case(d: dict[str, Any]) -> CaseConfig:
         cmd_extra_args=cmd_extra_args,
         out_dir=out_dir,
         log_prefix=log_prefix,
-        config_tag=config_tag,
-        job_name_prefix=job_name_prefix,
-        snr_low=snr_low,
-        snr_high=snr_high,
-        snr_step=snr_step,
+        axis_type=axis_type,
+        x_low=x_low,
+        x_high=x_high,
+        x_step=x_step,
         max_sim_num=max_sim_num,
         max_err_num=max_err_num,
     )
@@ -218,44 +251,41 @@ def run_case_local(c: CaseConfig, *, runner: RunnerConfig, dry_run: bool) -> Non
     manifest_path = case_dir / "manifest.json"
     manifest = load_manifest(manifest_path)
 
-    snrs = list(build_snr_grid(c.snr_low, c.snr_high, c.snr_step))
+    cfg_abs = resolve_cfg_path(c)
+    runtime_cfg = (case_dir / "config_runtime.cnfg").resolve()
+
+    xs = list(build_axis_grid(c.x_low, c.x_high, c.x_step, axis_type=c.axis_type))
     todo: list[tuple[float, Path, list[str]]] = []
     cached = 0
-    for snr in snrs:
-        log_path = log_path_for(c, snr)
-        cmd = build_cmd(c, snr)
+    for xv in xs:
+        log_path = log_path_for(c, xv)
+        cmd = build_cmd(c, xv, config_arg=str(runtime_cfg))
 
-        found = find_run(manifest, "snr", snr)
+        found = find_run(manifest, c.axis_type, xv)
         if found and found.get("raw_ber") is not None and found.get("retry_dec_avg_iter") is not None:
             cached += 1
             continue
 
-        rec_done = parse_done_log(snr=snr, log_path=log_path, cmd=cmd)
+        rec_done = parse_done_log(axis_type=c.axis_type, axis_value=xv, log_path=log_path, cmd=cmd)
         if rec_done is not None:
             upsert_run(manifest, rec_done)
             cached += 1
             continue
-        todo.append((snr, log_path, cmd))
+        todo.append((xv, log_path, cmd))
 
     save_manifest(manifest_path, manifest)
 
-    print(f"\n[auto_throughput_eval] case={c.name} grid={len(snrs)} cached={cached} todo={len(todo)} out={case_dir}")
+    print(f"\n[auto_throughput_eval] case={c.name} axis={c.axis_type} grid={len(xs)} cached={cached} todo={len(todo)} out={case_dir}")
     if dry_run:
         if todo:
             print(
-                f"[dry-run] would patch config in-place: {c.config} "
+                f"[dry-run] would generate runtime config: {runtime_cfg} (from {cfg_abs}) "
                 f"(max_sim_num={c.max_sim_num}, max_err_num={c.max_err_num})"
             )
-        for snr, log_path, cmd in todo:
-            print(f"[dry-run] snr={snr} log={log_path}")
+        for xv, log_path, cmd in todo:
+            print(f"[dry-run] axis={c.axis_type} x={xv} log={log_path}")
             print(f"          cmd: {' '.join(cmd)}")
         return
-
-    cfg_abs = resolve_cfg_path(c)
-    orig_cfg_text: Optional[str] = None
-    if todo:
-        orig_cfg_text = cfg_abs.read_text(encoding="utf-8")
-        patch_config_max_sim_num(cfg_abs, cfg_abs, c.max_sim_num, max_error_num=c.max_err_num)
 
     ex = LocalExecutor()
     max_in_flight = max(1, int(runner.max_in_flight))
@@ -269,29 +299,32 @@ def run_case_local(c: CaseConfig, *, runner: RunnerConfig, dry_run: bool) -> Non
                 ex.cancel(info["job"])
             except Exception:
                 pass
-            print(f"[auto_throughput_eval] cancel snr={xv} reason={reason}")
+            print(f"[auto_throughput_eval] cancel axis={c.axis_type} x={xv} reason={reason}")
             in_flight.pop(xv, None)
 
     try:
+        if todo:
+            patch_config_max_sim_num(cfg_abs, runtime_cfg, c.max_sim_num, max_error_num=c.max_err_num)
+
         while todo or in_flight:
             while todo and len(in_flight) < max_in_flight:
-                snr, log_path, cmd = todo.pop(0)
+                xv, log_path, cmd = todo.pop(0)
                 job = ex.submit(cmd, cwd=c.workdir, log_path=log_path)
-                in_flight[snr] = {"job": job, "log_path": log_path, "cmd": cmd}
-                print(f"[auto_throughput_eval] submit snr={snr} -> {log_path.name}")
+                in_flight[xv] = {"job": job, "log_path": log_path, "cmd": cmd}
+                print(f"[auto_throughput_eval] submit axis={c.axis_type} x={xv} -> {log_path.name}")
 
             if not in_flight:
                 break
 
             time.sleep(poll_sec)
-            for snr, info in list(in_flight.items()):
+            for xv, info in list(in_flight.items()):
                 st = ex.poll(info["job"])
                 if not st.done:
                     continue
 
-                in_flight.pop(snr, None)
+                in_flight.pop(xv, None)
                 if not st.ok:
-                    msg = f"job EXIT: snr={snr} log={info['log_path']}"
+                    msg = f"job EXIT: axis={c.axis_type} x={xv} log={info['log_path']}"
                     print(f"[auto_throughput_eval] {msg}")
                     if runner.fail_fast:
                         cancel_all(reason=msg)
@@ -299,9 +332,15 @@ def run_case_local(c: CaseConfig, *, runner: RunnerConfig, dry_run: bool) -> Non
                         raise SystemExit(msg)
                     continue
 
-                rec = parse_done_log(snr=snr, log_path=Path(info["log_path"]), cmd=list(info["cmd"]))
+                rec = parse_done_log_with_grace(
+                    axis_type=c.axis_type,
+                    axis_value=xv,
+                    log_path=Path(info["log_path"]),
+                    cmd=list(info["cmd"]),
+                    grace_sec=float(runner.timeout_log_grace_sec),
+                )
                 if rec is None:
-                    msg = f"parse failed: snr={snr} log={info['log_path']}"
+                    msg = f"parse failed: axis={c.axis_type} x={xv} log={info['log_path']}"
                     print(f"[auto_throughput_eval] {msg}")
                     if runner.fail_fast:
                         cancel_all(reason=msg)
@@ -311,10 +350,9 @@ def run_case_local(c: CaseConfig, *, runner: RunnerConfig, dry_run: bool) -> Non
 
                 upsert_run(manifest, rec)
                 save_manifest(manifest_path, manifest)
-                print(f"[auto_throughput_eval] done snr={snr} RBER={rec.raw_ber} aver_iter={rec.retry_dec_avg_iter}")
+                print(f"[auto_throughput_eval] done axis={c.axis_type} x={xv} RBER={rec.raw_ber} aver_iter={rec.retry_dec_avg_iter}")
     finally:
-        if orig_cfg_text is not None:
-            cfg_abs.write_text(orig_cfg_text, encoding="utf-8")
+        pass
 
 
 def run_case_lsf(c: CaseConfig, *, runner: RunnerConfig, lsf: LsfConfig, dry_run: bool) -> None:
@@ -325,40 +363,41 @@ def run_case_lsf(c: CaseConfig, *, runner: RunnerConfig, lsf: LsfConfig, dry_run
     manifest = load_manifest(manifest_path)
 
     cfg_abs = resolve_cfg_path(c)
+    runtime_cfg = (case_dir / "config_runtime.cnfg").resolve()
     matrix_size = parse_matrix_size(cfg_abs)
-    snrs = list(build_snr_grid(c.snr_low, c.snr_high, c.snr_step))
+    xs = list(build_axis_grid(c.x_low, c.x_high, c.x_step, axis_type=c.axis_type))
 
     todo: list[tuple[float, Path, list[str], str]] = []
     cached = 0
-    for snr in snrs:
-        log_path = log_path_for_submission(c, snr, lsf=lsf)
-        cmd = build_cmd(c, snr)
-        job_name = build_job_name(c, matrix_size=matrix_size, snr=snr)
+    for xv in xs:
+        log_path = log_path_for_submission(c, xv, lsf=lsf)
+        cmd = build_cmd(c, xv, config_arg=str(runtime_cfg))
+        job_name = build_job_name(c, matrix_size=matrix_size, axis_value=xv)
 
-        found = find_run(manifest, "snr", snr)
+        found = find_run(manifest, c.axis_type, xv)
         if found and found.get("raw_ber") is not None and found.get("retry_dec_avg_iter") is not None:
             cached += 1
             continue
 
-        rec_done = parse_done_log(snr=snr, log_path=log_path, cmd=cmd)
+        rec_done = parse_done_log(axis_type=c.axis_type, axis_value=xv, log_path=log_path, cmd=cmd)
         if rec_done is not None:
             upsert_run(manifest, rec_done)
             cached += 1
             continue
 
-        todo.append((snr, log_path, cmd, job_name))
+        todo.append((xv, log_path, cmd, job_name))
 
     save_manifest(manifest_path, manifest)
 
-    print(f"\n[auto_throughput_eval] case={c.name} grid={len(snrs)} cached={cached} todo={len(todo)} out={case_dir}")
+    print(f"\n[auto_throughput_eval] case={c.name} axis={c.axis_type} grid={len(xs)} cached={cached} todo={len(todo)} out={case_dir}")
     if dry_run:
         if todo:
             print(
-                f"[dry-run] would patch config in-place: {c.config} "
+                f"[dry-run] would generate runtime config: {runtime_cfg} (from {cfg_abs}) "
                 f"(max_sim_num={c.max_sim_num}, max_err_num={c.max_err_num})"
             )
         cwd_abs = str(Path(c.workdir).resolve())
-        for snr, log_path, cmd, job_name in todo:
+        for xv, log_path, cmd, job_name in todo:
             bsub_cmd = build_bsub_command_line(
                 cmd,
                 cwd_abs=cwd_abs,
@@ -367,14 +406,12 @@ def run_case_lsf(c: CaseConfig, *, runner: RunnerConfig, lsf: LsfConfig, dry_run
                 queue=lsf.queue,
                 bsub_extra=lsf.bsub_extra,
             )
-            print(f"[dry-run] snr={snr}")
+            print(f"[dry-run] axis={c.axis_type} x={xv}")
             print(f"          {bsub_cmd}")
         return
 
-    orig_cfg_text: Optional[str] = None
     if todo:
-        orig_cfg_text = cfg_abs.read_text(encoding="utf-8")
-        patch_config_max_sim_num(cfg_abs, cfg_abs, c.max_sim_num, max_error_num=c.max_err_num)
+        patch_config_max_sim_num(cfg_abs, runtime_cfg, c.max_sim_num, max_error_num=c.max_err_num)
 
     ex = LsfExecutor(
         queue=lsf.queue,
@@ -394,29 +431,29 @@ def run_case_lsf(c: CaseConfig, *, runner: RunnerConfig, lsf: LsfConfig, dry_run
                 ex.cancel(info["job"])
             except Exception:
                 pass
-            print(f"[auto_throughput_eval] cancel snr={xv} reason={reason}")
+            print(f"[auto_throughput_eval] cancel axis={c.axis_type} x={xv} reason={reason}")
             in_flight.pop(xv, None)
     try:
         while todo or in_flight:
             while todo and len(in_flight) < max_in_flight:
-                snr, log_path, cmd, job_name = todo.pop(0)
+                xv, log_path, cmd, job_name = todo.pop(0)
                 job = ex.submit(cmd, cwd=c.workdir, log_path=Path(log_path), job_name=job_name, queue=lsf.queue)
-                in_flight[snr] = {"job": job, "log_path": log_path, "cmd": cmd, "job_name": job_name}
+                in_flight[xv] = {"job": job, "log_path": log_path, "cmd": cmd, "job_name": job_name}
                 jid = getattr(job, "job_id", "?")
-                print(f"[auto_throughput_eval] bsub snr={snr} job_id={jid} job_name={job_name}")
+                print(f"[auto_throughput_eval] bsub axis={c.axis_type} x={xv} job_id={jid} job_name={job_name}")
 
             if not in_flight:
                 break
 
             time.sleep(poll_sec)
-            for snr, info in list(in_flight.items()):
+            for xv, info in list(in_flight.items()):
                 st = ex.poll(info["job"])
                 if not st.done:
                     continue
 
-                in_flight.pop(snr, None)
+                in_flight.pop(xv, None)
                 if not st.ok:
-                    msg = f"job EXIT: snr={snr} log={info['log_path']} job_name={info.get('job_name')}"
+                    msg = f"job EXIT: axis={c.axis_type} x={xv} log={info['log_path']} job_name={info.get('job_name')}"
                     print(f"[auto_throughput_eval] {msg}")
                     if runner.fail_fast:
                         cancel_all(reason=msg)
@@ -424,9 +461,16 @@ def run_case_lsf(c: CaseConfig, *, runner: RunnerConfig, lsf: LsfConfig, dry_run
                         raise SystemExit(msg)
                     continue
 
-                rec = parse_done_log(snr=snr, log_path=Path(info["log_path"]), cmd=list(info["cmd"]))
+                # LSF can report DONE before bsub -o is flushed; use a grace window.
+                rec = parse_done_log_with_grace(
+                    axis_type=c.axis_type,
+                    axis_value=xv,
+                    log_path=Path(info["log_path"]),
+                    cmd=list(info["cmd"]),
+                    grace_sec=max(float(runner.timeout_log_grace_sec), 30.0),
+                )
                 if rec is None:
-                    msg = f"parse failed: snr={snr} log={info['log_path']} job_name={info.get('job_name')}"
+                    msg = f"parse failed: axis={c.axis_type} x={xv} log={info['log_path']} job_name={info.get('job_name')}"
                     print(f"[auto_throughput_eval] {msg}")
                     if runner.fail_fast:
                         cancel_all(reason=msg)
@@ -436,10 +480,9 @@ def run_case_lsf(c: CaseConfig, *, runner: RunnerConfig, lsf: LsfConfig, dry_run
 
                 upsert_run(manifest, rec)
                 save_manifest(manifest_path, manifest)
-                print(f"[auto_throughput_eval] done snr={snr} RBER={rec.raw_ber} aver_iter={rec.retry_dec_avg_iter}")
+                print(f"[auto_throughput_eval] done axis={c.axis_type} x={xv} RBER={rec.raw_ber} aver_iter={rec.retry_dec_avg_iter}")
     finally:
-        if orig_cfg_text is not None:
-            cfg_abs.write_text(orig_cfg_text, encoding="utf-8")
+        pass
 
 
 def patch_config_max_sim_num(src: Path, dst: Path, max_sim_num: int, max_error_num: Optional[int] = None) -> None:
@@ -498,26 +541,47 @@ def resolve_cfg_path(c: CaseConfig) -> Path:
     return (Path(c.workdir) / p).resolve()
 
 
-def build_cmd(c: CaseConfig, snr: float) -> list[str]:
-    # Keep the config path as-is from TOML (typically "config/xxx.cnfg"),
-    # so that the bsub command does not depend on out_dir/log_base_dir.
-    cmd: list[str] = [c.exe, c.sim_mode, c.config, c.ch_model]
+def build_cmd(c: CaseConfig, axis_value: float, *, config_arg: Optional[str] = None) -> list[str]:
+    cfg = str(config_arg) if config_arg is not None else c.config
+    cmd: list[str] = [c.exe, c.sim_mode, cfg, c.ch_model]
     if c.ch_model.upper() != "CLEAN":
-        cmd.append(str(snr))
+        if c.axis_type == "k":
+            cmd.append(str(int(round(axis_value))))
+        else:
+            cmd.append(str(axis_value))
     cmd.extend(c.cmd_extra_args)
     return cmd
 
 
-def parse_done_log(*, snr: float, log_path: Path, cmd: list[str]) -> Optional[RunRecord]:
+def parse_done_log(
+    *,
+    axis_type: str,
+    axis_value: float,
+    log_path: Path,
+    cmd: list[str],
+    debug: bool = True,
+) -> Optional[RunRecord]:
     if not log_path.exists():
+        if debug:
+            print(f"[auto_throughput_eval] DEBUG: Log file does not exist: {log_path}")
         return None
+
     txt = log_path.read_text(encoding="utf-8", errors="replace")
     m = parse_log_text(txt)
+
     if m.raw_ber is None or m.retry_dec_avg_iter is None:
+        if debug:
+            print(
+                f"[auto_throughput_eval] DEBUG: Parse incomplete - raw_ber={m.raw_ber}, retry_dec_avg_iter={m.retry_dec_avg_iter}"
+            )
+            print(f"[auto_throughput_eval] DEBUG: Log file size: {log_path.stat().st_size} bytes")
+            print(f"[auto_throughput_eval] DEBUG: Last 500 chars of log:")
+            print(txt[-500:] if len(txt) > 500 else txt)
         return None
+
     return RunRecord(
-        axis_type="snr",
-        axis_value=float(snr),
+        axis_type=str(axis_type),
+        axis_value=float(axis_value),
         log_path=str(log_path),
         cmd=cmd,
         raw_ber=m.raw_ber,
@@ -529,25 +593,55 @@ def parse_done_log(*, snr: float, log_path: Path, cmd: list[str]) -> Optional[Ru
     )
 
 
-def log_path_for(c: CaseConfig, snr: float) -> Path:
+def parse_done_log_with_grace(
+    *,
+    axis_type: str,
+    axis_value: float,
+    log_path: Path,
+    cmd: list[str],
+    grace_sec: float,
+) -> Optional[RunRecord]:
+    """
+    Best-effort parse with a bounded grace window.
+
+    Rationale: on shared filesystems (NFS), bjobs may report DONE/EXIT before the
+    bsub -o log is created/flushed. We retry parsing for a short grace window.
+    """
+    t_end = time.time() + max(0.0, float(grace_sec))
+    sleep_s = 0.2
+    while True:
+        rec = parse_done_log(axis_type=axis_type, axis_value=axis_value, log_path=log_path, cmd=cmd, debug=False)
+        if rec is not None:
+            return rec
+        if time.time() >= t_end:
+            break
+        time.sleep(sleep_s)
+        sleep_s = min(2.0, sleep_s * 1.5)
+    # Final attempt with debug enabled.
+    return parse_done_log(axis_type=axis_type, axis_value=axis_value, log_path=log_path, cmd=cmd, debug=True)
+
+
+def log_path_for(c: CaseConfig, axis_value: float) -> Path:
     case_dir = Path(c.out_dir) / c.name
-    return (case_dir / f"{c.log_prefix}_{format_snr(snr)}.log").resolve()
+    return (case_dir / f"{c.log_prefix}_{format_axis_tag(axis_value, axis_type=c.axis_type)}.log").resolve()
 
 
-def format_snr(x: float) -> str:
+def format_axis_tag(x: float, *, axis_type: str) -> str:
+    if axis_type == "k":
+        return f"k{int(round(x))}"
     s = f"{x:.3f}".rstrip("0").rstrip(".")
     return f"snr{s}"
 
 
-def build_snr_grid(low: float, high: float, step: float) -> list[float]:
+def build_axis_grid(low: float, high: float, step: float, *, axis_type: str) -> list[float]:
     origin = float(low)
-    x = quantize_axis(origin, step, origin=origin)
+    x = quantize_axis(origin, step, axis_type=axis_type, origin=origin)
     out: list[float] = []
     while x <= high + 1e-12:
         out.append(float(x))
-        x = quantize_axis(x + step, step, origin=origin)
+        x = quantize_axis(x + step, step, axis_type=axis_type, origin=origin)
         if len(out) > 1000000:
-            raise RuntimeError("SNR grid too large; check snr_step.")
+            raise RuntimeError("Axis grid too large; check step.")
     return out
 
 
@@ -562,9 +656,13 @@ def step_decimals(step: float) -> int:
     return len(s.split(".")[1].rstrip("0"))
 
 
-def quantize_axis(x: float, step: float, *, origin: float = 0.0) -> float:
+def quantize_axis(x: float, step: float, *, axis_type: str, origin: float = 0.0) -> float:
     if step <= 0:
         return x
+    if axis_type == "k":
+        step_i = max(1, int(round(step)))
+        q = origin + round((x - origin) / float(step_i)) * float(step_i)
+        return float(int(round(q)))
     q = origin + round((x - origin) / step) * step
     q = round(q, step_decimals(step))
     if abs(q) < 1e-12:
@@ -572,7 +670,7 @@ def quantize_axis(x: float, step: float, *, origin: float = 0.0) -> float:
     return float(q)
 
 
-def log_path_for_submission(c: CaseConfig, snr: float, *, lsf: LsfConfig) -> Path:
+def log_path_for_submission(c: CaseConfig, axis_value: float, *, lsf: LsfConfig) -> Path:
     """
     Determine the log path that LSF should write to.
 
@@ -581,7 +679,7 @@ def log_path_for_submission(c: CaseConfig, snr: float, *, lsf: LsfConfig) -> Pat
     Otherwise use:
       <out_dir>/<case_name>/<log_file>
     """
-    log_path = log_path_for(c, snr)
+    log_path = log_path_for(c, axis_value)
     if not lsf.log_base_dir:
         return log_path
 
@@ -632,13 +730,15 @@ def parse_matrix_size(cfg_path: Path) -> str:
     return f"{row}x{col}"
 
 
-def build_job_name(c: CaseConfig, *, matrix_size: str, snr: float) -> str:
-    snr_s = format_snr_value(snr)
-    prefix = c.job_name_prefix.strip() or "Throughput Data"
-    return f"{prefix} {matrix_size} {c.config_tag} snr-{snr_s}"
+def build_job_name(c: CaseConfig, *, matrix_size: str, axis_value: float) -> str:
+    x_s = format_axis_value(axis_value, axis_type=c.axis_type)
+    # Simplified job name format: case_name + axis value
+    return f"{c.name} {c.axis_type}-{x_s}"
 
 
-def format_snr_value(x: float) -> str:
+def format_axis_value(x: float, *, axis_type: str) -> str:
+    if axis_type == "k":
+        return str(int(round(x)))
     return f"{x:.3f}".rstrip("0").rstrip(".")
 
 
@@ -682,7 +782,7 @@ def quote_shell(s: str) -> str:
 
 def export_case_csv(c: CaseConfig, *, lsf: LsfConfig) -> Path:
     """
-    Export snr/RBER/aver_iter to a CSV under the case directory.
+    Export axis/RBER/aver_iter to a CSV under the case directory.
     The data source is manifest.json (filled from parsing logs if needed).
     """
     case_dir = (Path(c.out_dir) / c.name).resolve()
@@ -691,12 +791,12 @@ def export_case_csv(c: CaseConfig, *, lsf: LsfConfig) -> Path:
     manifest_path = case_dir / "manifest.json"
     manifest = load_manifest(manifest_path)
 
-    snrs = list(build_snr_grid(c.snr_low, c.snr_high, c.snr_step))
+    xs = list(build_axis_grid(c.x_low, c.x_high, c.x_step, axis_type=c.axis_type))
     rows: list[list[object]] = []
     missing: list[float] = []
 
-    for snr in snrs:
-        rec = find_run(manifest, "snr", snr)
+    for xv in xs:
+        rec = find_run(manifest, c.axis_type, xv)
         raw_ber = rec.get("raw_ber") if rec else None
         avg_it = rec.get("retry_dec_avg_iter") if rec else None
 
@@ -705,28 +805,28 @@ def export_case_csv(c: CaseConfig, *, lsf: LsfConfig) -> Path:
             if rec and rec.get("log_path"):
                 log_p = Path(str(rec["log_path"]))
             if log_p is None:
-                log_p = log_path_for_submission(c, snr, lsf=lsf)
-            cmd = list(rec.get("cmd")) if rec and isinstance(rec.get("cmd"), list) else build_cmd(c, snr)
-            rec_done = parse_done_log(snr=snr, log_path=log_p, cmd=cmd)
+                log_p = log_path_for_submission(c, xv, lsf=lsf)
+            cmd = list(rec.get("cmd")) if rec and isinstance(rec.get("cmd"), list) else build_cmd(c, xv)
+            rec_done = parse_done_log(axis_type=c.axis_type, axis_value=xv, log_path=log_p, cmd=cmd)
             if rec_done is not None:
                 upsert_run(manifest, rec_done)
                 raw_ber = rec_done.raw_ber
                 avg_it = rec_done.retry_dec_avg_iter
 
         if raw_ber is None or avg_it is None:
-            missing.append(float(snr))
-        rows.append([float(snr), None if raw_ber is None else float(raw_ber), None if avg_it is None else float(avg_it)])
+            missing.append(float(xv))
+        rows.append([float(xv), None if raw_ber is None else float(raw_ber), None if avg_it is None else float(avg_it)])
 
     save_manifest(manifest_path, manifest)
 
     csv_path = (case_dir / "throughput.csv").resolve()
-    write_csv(csv_path, headers=["snr", "RBER", "aver_iter"], rows=rows)
+    write_csv(csv_path, headers=[c.axis_type, "RBER", "aver_iter"], rows=rows)
     print(f"[auto_throughput_eval] export csv: {csv_path}")
 
     if missing:
-        miss_s = ", ".join([format_snr_value(x) for x in missing[:20]])
+        miss_s = ", ".join([format_axis_value(x, axis_type=c.axis_type) for x in missing[:20]])
         more = "" if len(missing) <= 20 else f" ...(+{len(missing)-20})"
-        raise SystemExit(f"Missing metrics for SNR points: {miss_s}{more}. See {manifest_path}")
+        raise SystemExit(f"Missing metrics for {c.axis_type} points: {miss_s}{more}. See {manifest_path}")
 
     return csv_path
 

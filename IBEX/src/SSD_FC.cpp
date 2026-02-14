@@ -59,7 +59,7 @@ int main (int argc, char **argv)
     H_N = h_n*h_sc;
     H_K = h_k*h_sc;
 
-    if (dec_mode == FC_IBEX)
+    if (dec_mode == FC_IBEX || dec_mode == FC_RDEC2)
     {
         dsp_info_len =bytes_of_userdata*8;
         dsp_pad_len = H_K - dsp_info_len;
@@ -86,8 +86,11 @@ int main (int argc, char **argv)
     printf("MCRC size       : 4B\n");
     printf("ECC user data   : %dB\n", dsp_info_len/8);
     printf("ECC padding     : %dB\n", dsp_pad_len/8);
-    if (dec_mode == FC_IBEX)
+    if (dec_mode == FC_IBEX || dec_mode == FC_RDEC2)
+    {
         printf("ECC parity      : %dB\n", bytes_of_parity);
+        printf("IBEX VN_BITS    : %d\n", VN_BITS);
+    }
     else
         printf("ECC parity      : %dB\n", H_M/8);
     printf("ECC CW size     : %dB\n", dsp_blk_len/8);
@@ -180,7 +183,7 @@ int main (int argc, char **argv)
         }
         else if (sim_mode==LDPC_SIM)
         {
-            if (dec_mode != FC_IBEX)
+            if (dec_mode != FC_IBEX && dec_mode != FC_RDEC2)
             {
                 for (int i=0; i<dsp_src_len; i++)
                 {
@@ -227,7 +230,7 @@ int main (int argc, char **argv)
 #endif
         sim_pckt->ch_detector();        
 
-        if (dec_mode == FC_IBEX)
+        if (dec_mode == FC_IBEX || dec_mode == FC_RDEC2)
         {
             sim_pckt->ldpc_ibex_parameters(post_process_en, syndrome_weight_thr_qc, syndrome_weight_thr_post, early_terminate_dis);
             sim_pckt->ldpc_ibex_input(syndrome_cal_only, max_iter, post_iter);
@@ -381,12 +384,12 @@ int main (int argc, char **argv)
 
     printf("--------------------------------------------------------\n");
     printf("[STATISTICS] Total packets simulated: %d\n", sim_cnt);
-    printf("[STATISTICS] RAW BER   : %e\n", raw_err_tot*1.0/sim_cnt/dsp_blk_len);
-    printf("[STATISTICS] LDPC BER  : %e\n", dec_err_tot*1.0/sim_cnt/dsp_blk_len);
-    printf("[STATISTICS] LDPC FER  : %e\n", cw_fail_tot*1.0/sim_cnt);
-    printf("[STATISTICS] LDPC MIS  : %e\n", cw_misc_tot*1.0/sim_cnt);
-    printf("[STATISTICS] MCRC FER  : %e\n", cw_mcrc_tot*1.0/sim_cnt);
-    printf("[STATISTICS] DATA FER  : %e\n", (lba_err_tot+meta_err_tot)*1.0/sim_cnt);
+    printf("[STATISTICS] RAW  BER: %e\n", raw_err_tot*1.0/sim_cnt/dsp_blk_len);
+    printf("[STATISTICS] LDPC BER: %e\n", dec_err_tot*1.0/sim_cnt/dsp_blk_len);
+    printf("[STATISTICS] LDPC FER: %e\n", cw_fail_tot*1.0/sim_cnt);
+    printf("[STATISTICS] LDPC MIS: %e\n", cw_misc_tot*1.0/sim_cnt);
+    printf("[STATISTICS] MCRC FER: %e\n", cw_mcrc_tot*1.0/sim_cnt);
+    printf("[STATISTICS] DATA FER: %e\n", (lba_err_tot+meta_err_tot)*1.0/sim_cnt);
 
     if ((dec_mode == FC_MIX) || (dec_mode==FC_MIX_G2))
     {
@@ -432,11 +435,12 @@ int main (int argc, char **argv)
         }
     }
 
-    if ((dec_mode==FC_RDEC) || ((dec_mode==FC_MIX) && ldec_tot>0) || ((dec_mode==FC_MIX_G2) && ldec_tot>0))
+    if ((dec_mode==FC_RDEC) || ((dec_mode==FC_MIX) && ldec_tot>0) || ((dec_mode==FC_MIX_G2) && ldec_tot>0)  || dec_mode == FC_RDEC2)
     {
         printf("[STATISTICS] Retry Decoder average iterations: %f\n", ldec_itr_tot*1.0/ldec_tot);
-
         printf("[STATISTICS] Retry Decoder iteration distribution as below: \n");
+        printf("-------------------------------------------------------------------------------------\n");
+
         for (int i=0; i<sim_pckt->ldec_max_itr; i=i+8)
         {
             printf("Itr: ");
@@ -450,20 +454,20 @@ int main (int argc, char **argv)
             for (int j=0; j<8; j++)
             {
                 if ((i+j) < sim_pckt->ldec_max_itr)
-                    printf("%8ld ", ldec_cnvg_itr[i+j]);
+                    printf("%8ld |", ldec_cnvg_itr[i+j]);
             }
             printf("\n");
-            printf("------------------------------------------------------------\n");
+            printf("-------------------------------------------------------------------------------------\n");
         }
     }
     else
     {
-        printf("--------------------------------------------------------------\n");
+        printf("-------------------------------------------------------------------------------------\n");
         for (int i=0; i<max_iter+1; i++)
             ibex_itr_tot += i*ibex_cnvg_itr[i];
 
         printf("[STATISTICS] IBEX Decoder average iterations: %f\n", ibex_itr_tot*1.0/sim_cnt);
-        printf("--------------------------------------------------------------\n");
+        printf("-------------------------------------------------------------------------------------\n");
     }
 
 #ifdef _SIM_DUMP
@@ -616,6 +620,16 @@ void read_config_file()
     dsp_lba_size = dsp_lba_size*8; // byte --> bit
     dsp_lba_len = dsp_lba_size*dsp_lba_num;
     dsp_src_len = dsp_meta_size + dsp_lba_len;
+    // MCRC generator always appends 4 bytes (32 bits) after the DSP source data.
+    // For IBEX sc=512 configs, `bytes_of_userdata` must therefore be >= (DSP in data bytes + 4).
+    // Some cnfg files mistakenly set `bytes_of_userdata == DSP in data bytes` and will corrupt heap in `mcrc_gen()`.
+    const int dsp_src_bytes = dsp_src_len / 8;
+    const int mcrc_bytes = 4;
+    if (bytes_of_userdata < dsp_src_bytes + mcrc_bytes) {
+        printf("[CFG Warning] bytes_of_userdata=%dB is smaller than DSP in data=%dB + %dB MCRC; auto-fix to %dB\n",
+               bytes_of_userdata, dsp_src_bytes, mcrc_bytes, dsp_src_bytes + mcrc_bytes);
+        bytes_of_userdata = dsp_src_bytes + mcrc_bytes;
+    }
 
     // 1. h_m (row number of base matrix)
     fscanf(fp, "%d", &h_m);
@@ -670,6 +684,8 @@ void read_config_file()
         dec_mode = FC_FDEC_G2;
     else if (strcmp(dec_sel, "FC_RDEC")==0)
         dec_mode = FC_RDEC;
+    else if (strcmp(dec_sel, "FC_RDEC2")==0)
+        dec_mode = FC_RDEC2;
     else if (strcmp(dec_sel, "FC_MIX")==0)
         dec_mode = FC_MIX;
     else if (strcmp(dec_sel, "FC_MIX2")==0)
@@ -778,7 +794,7 @@ void read_config_file()
     }
     fgets(str_tmp, 800, fp);
 
-    if (dec_mode!=FC_RDEC && dec_mode != FC_IBEX)
+    if (dec_mode!=FC_RDEC && dec_mode != FC_IBEX && dec_mode != FC_RDEC2)
     {
         sd_num = 1;
         rd_num = 1;
@@ -823,7 +839,7 @@ void read_config_file()
         printf("Skip ECC decoder\n");
     else if (dec_mode==FC_FDEC)
         printf("Fast decoder only (HD only)\n");
-    else if (dec_mode==FC_RDEC)
+    else if (dec_mode==FC_RDEC || dec_mode == FC_RDEC2)
         printf("Retry decoder only (%d-bit soft data)\n", sd_num);
     else if (dec_mode==FC_MIX)
         printf("LDPC decoder: Fast + Retry decoder (HD only)\n");

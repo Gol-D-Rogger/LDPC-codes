@@ -1,10 +1,10 @@
-12                              // meta data size (B)
+76                              // meta data size (B)
 512                             // LBA size(B)
 8                               // LBA # per DSP CW
-4112                            // userdata size (B)
-672                             // parity size (B)
-11                               // row number of base matrix
-76                              // column number of base matrix
+4260                            // userdata size (B)
+640                             // parity size (B)
+10                               // row number of base matrix
+77                              // column number of base matrix
 512                             // circulant number
 5                               // Dense matrix size or rows of E matrix in base matrix
 4                               // column weight of base matrix
@@ -21,7 +21,7 @@ FC_IBEX                         // LDPC decoder(FC_SKIP/FC_FDEC/FC_RDEC/FC_MIX/F
 1                               // Ibex post enable
 0                               // Ibex Syndrome calculate only
 1                               // Ibex early terminate disable
-2                               // Ibex likelihood width(3 is lite mode, 8 is full mode)
+1                               // Ibex likelihood width(3 is lite mode, 8 is full mode)
 0.625                           // Retry decoder alpha
 1                               // Quantization Mode
 8                               // APP/Q bit width
@@ -31,7 +31,7 @@ FC_IBEX                         // LDPC decoder(FC_SKIP/FC_FDEC/FC_RDEC/FC_MIX/F
 3                               // LLR fraction bits
 MANUAL                          // LLR mode (IDEAL/MANUAL/VENDOR0/VENDOR1)
 1                               // Number of NAND soft data bits
-0 0.21 -0.21 0.42 -0.42 0.63 -0.63  // 0 0.15 -0.15 0.3 -0.3 0.5 -0.5  // VERF values
+0 0.15 -0.15 0.3 -0.3 0.5 -0.5  // VERF values
 1.875 -1.875                    // Hard decoding LLR for retry decoder
 1060                            // init_synd_wt threshold to skip FDEC
 104C11DB7                       // CRC 32 polynomial values

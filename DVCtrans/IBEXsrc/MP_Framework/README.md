@@ -334,3 +334,62 @@ MP_Framework 仅保留 IBEX 的 “内部生成/裁剪” 配置路径，因此�
 3) **vref 一致性**：`sd_err_inj` 会检测 call 侧 `vref` 与 config 侧 `vref` 是否一致（允许浮点微小误差）。  
 4) **尾 word 对齐**：若出现“最后 16bit 翻转/挪位”，优先复核 MSB-first 与 2Byte-align 的假设（参见 `DVCtrans/doc/2Byte_Align_DVC.md`）。  
 5) **`BF_IBEX` 输入来源**：若不调用 `sd_err_inj`，`rx_blk` 可能不是当前码字的模拟样本；建议先用推荐调用序列验证对拍，再考虑优化链路。
+
+---
+
+## 8. 问题记录：`LAYER_G2` 在 full-parity 场景的 parity 列错位（已修复）
+
+> 本节只记录“数据链路/拼装逻辑”类问题；不记录与 `alpha` 缩放相关的性能问题。
+
+### 8.1 现象（症状）
+
+在 `dec_mode=LAYER_G2`（`enum dec_model=9`）且 **非 shortening/full-parity** 的配置下（典型特征：$Z=512$、`pad_len=0`、`unused_bytes_of_parity=0`，因此 $parity\_bytes = M\cdot Z/8$），出现：
+
+- 全 0 `user_data` 时看起来“可以解码”，但全 1 `user_data` 时即便注错很少也会解码失败；
+- `init_synd`/`fina_synd` 呈现“异常偏大且不随注错数量线性变化”的特征；
+- 解码输出的 parity 段发生以 $Z=512$ 为单位的列级错位，并伴随“第一列 parity 变成全 0/最后一列被丢弃”的表象。
+
+该类现象优先判定为 **码字视角的列拼装错误**，而非译码器算法本身性能不足。
+
+### 8.2 证据（如何用最小打印快速判定）
+
+在 `DVCtrans/IBEXsrc/MP_Framework/ldpc_c_model.c` 里，`debug>=2 && model==LAYER_G2` 时会打印：
+
+- `parity_col_sig`：把 parity 段按列（每列 $Z=512$ bit）计算 FNV-1a 签名，分别对 `tx/rx/dec` 输出 10 个 32-bit 十六进制数；
+  - 对 $Z=512$：全 0 列的签名恒为 `0x4d7705c5`；全 1 列恒为 `0x89c627c5`。
+
+若观察到满足以下模式（示意）：
+
+- `dec[0] == 0x4d7705c5`（第一列 parity 被置为全 0）
+- 对 $c=1..9$：`dec[c] == rx[c-1]`（整体右移一列，最后一列丢失）
+
+则可直接锁定为“parity 列起始偏移了 $Z$ bit”这一类拼装 bug。
+
+### 8.3 根因（为何会出现“首列全 0 + 整体移位”）
+
+根因位于 IBEX 原始实现的 `ldpc_packet::ldpc_decoder()` 中 `LAYER_G2` 的 **decoder 输入拼装**：
+
+- `LAYER_G2` 的设计初衷是支持 shortening（第一列 parity 只有 `extra_bits_of_parity` 个有效 bit）；
+- 但在 full-parity（`extra_bits_of_parity==0`）场景下，原逻辑仍按“fractional first parity column”来拼装，导致：
+  - 第 0 列 parity 没有从 `det_blk[]` 拷贝进 `dec_di_blk[]`，而 `dec_di_blk` 由 `calloc` 初始化，因此保持全 0；
+  - 后续 parity 从第 1 列开始拷贝，形成以 $Z$ 为单位的整体移位，并等价于“丢掉最后一列”。
+
+> 注：该问题在全 0 `user_data` 上容易被掩盖（许多 parity 列本身可能接近全 0），而在全 1 `user_data` 上更容易暴露。
+
+### 8.4 修复（只在 full-parity case 改拼装分支）
+
+修复方式是：在 `LAYER_G2` 分支中显式区分 shortening 与 full-parity：
+
+- 若 `extra_bits_of_parity > 0`：保留原本的 fractional-first-column 拼装；
+- 若 `extra_bits_of_parity == 0`：按连续 parity 拷贝 `hm_m` bit（从 `det_blk[info_len]` 到 `dec_di_blk[hm_k]`），禁止跳过首列。
+
+对应补丁位置：`IBEX/src/ldpc_codec.cpp` 的 `ldpc_packet::ldpc_decoder(enum dec_model)`（`dec_mode==LAYER_G2` 的输入拼装段）。
+
+### 8.5 回归建议（最小集合）
+
+建议用以下用例做“接口级回归”，以避免同类拼装问题再次引入：
+
+1) **全 0 / 全 1 `user_data` 各一组**，固定注错 bit 数（例如 20）：
+   - 观察 `parity_col_sig` 是否存在 `dec[0]=all0` 且 `dec[c]=rx[c-1]` 的模式；
+   - 观察 `init_synd` 的量级是否与注错数量同阶（不应出现“注错很少但 `init_synd` 上千”的情况）。
+2) **C-Model 内部一致性**：若 `tx_synd_wt_ibex`（`ch_err_inj` 打印）非 0，应先排查码字拼装/矩阵裁剪是否一致，再谈译码性能。

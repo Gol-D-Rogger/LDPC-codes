@@ -3013,7 +3013,7 @@ void ldpc_packet::ldpc_dec_layer()
 
 #ifdef _LDPC_DEBUG_DUMP
                 fprintf(lfp, "ITR%2d/LAYER%2d/COL%2d: \n", itr, layer, e->col);
-                for (int i=0; i<cir_sz; i++)
+                for (int i=0; i<cir_sz/8; i++)
                 {
                     fprintf(lfp, "Q PRE MSG:");
 
@@ -3103,14 +3103,14 @@ void ldpc_packet::ldpc_dec_layer()
                 {
                     if (dec_do_blk[e->col*cir_sz + i] != vn_dec_hd[i])
                     {
-                        fprintf(lfp, "ITR%2d/LAYER%2d/COL%wd: flip bit %d (%d-->%d)\n", itr, layer, e->col, i, dec_do_blk[e->col*cir_sz + i], vn_dec_hd[i]);
+                        fprintf(lfp, "ITR%2d/LAYER%2d/COL%2d: flip bit %d (%d-->%d)\n", itr, layer, e->col, i, dec_do_blk[e->col*cir_sz + i], vn_dec_hd[i]);
                     }
                 }
 #endif
                 vec_copy(vn_dec_hd, dec_do_blk, 0, e->col*cir_sz, cir_sz);
 
 #ifdef _LDPC_DEBUG_DUMP
-                fprintf(hdfp, "ITR%2d/LAYER%2d/COL%wd: ", itr, layer, e->col);
+                fprintf(hdfp, "ITR%2d/LAYER%2d/COL%2d: ", itr, layer, e->col);
                 for (int i=cir_sz/4-1; i>=0; i--)
                 {
                     stmp = 0;

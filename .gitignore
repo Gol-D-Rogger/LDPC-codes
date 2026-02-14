@@ -14,6 +14,7 @@ output/
 runs/
 
 doc_untracked/
+IBEX/config/AllMatrixTest
 
 # Compiled Object files
 *.o

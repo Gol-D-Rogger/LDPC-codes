@@ -2,14 +2,14 @@
 512                             // LBA size(B)
 8                               // LBA # per DSP CW
 4112                            // userdata size (B)
-672                             // parity size (B)
-11                               // row number of base matrix
-76                              // column number of base matrix
+512                             // parity size (B)
+8                               // row number of base matrix
+73                              // column number of base matrix
 512                             // circulant number
 5                               // Dense matrix size or rows of E matrix in base matrix
 4                               // column weight of base matrix
-100                             // maximum simulation number
-10                              // maximum error number
+200                             // maximum simulation number
+0                               // maximum error number
 FC_IBEX                         // LDPC decoder(FC_SKIP/FC_FDEC/FC_RDEC/FC_MIX/FC_FDEC2/FC_IBEX)
 24                              // Fast decoder maximum iteration number 24
 0                               // Iteration to turn on FDEC column skip feature (0:always OFF)
@@ -31,7 +31,7 @@ FC_IBEX                         // LDPC decoder(FC_SKIP/FC_FDEC/FC_RDEC/FC_MIX/F
 3                               // LLR fraction bits
 MANUAL                          // LLR mode (IDEAL/MANUAL/VENDOR0/VENDOR1)
 1                               // Number of NAND soft data bits
-0 0.21 -0.21 0.42 -0.42 0.63 -0.63  // 0 0.15 -0.15 0.3 -0.3 0.5 -0.5  // VERF values
+0 0.15 -0.15 0.3 -0.3 0.5 -0.5  // VERF values
 1.875 -1.875                    // Hard decoding LLR for retry decoder
 1060                            // init_synd_wt threshold to skip FDEC
 104C11DB7                       // CRC 32 polynomial values

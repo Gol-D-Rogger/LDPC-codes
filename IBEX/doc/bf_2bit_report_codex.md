@@ -633,3 +633,884 @@
   - 结果与 `bf_2bit_report.md` 一致：这类“高 syndrome 再开 aggr”的策略在 2bit 平台上实际上是灾难性的——一旦 syndrome_weight 已经很高，再加 aggr 会进一步放大误翻，完全无法拉回。
   - 相比 H/I，J 的 FER 从 0.18 降级到 1.0，说明在 2bit 下 aggr 的使用必须高度谨慎，简单门控无法避免其破坏性。
   - 结论：方案 J 是一个显著的负样本，说明“在高 syndrome 下开启 aggr”并不可取；后续方案 K/L/M/N 等都在这一基础上做进一步变化，这里继续按顺序验证。
+
+## Row11 参数扫参（SNR=5.0，2bit）
+
+- 配置与前提：
+  - 配置文件：`config/Ibex_hd_row11.cnfg`
+  - `Ibex likelihood width = 2`（即 `VN_BITS=2`）
+  - 扫描对象：
+    - `aggr_iter_hi = A`
+    - `aggr_iter_lo = B`
+    - `aggr_synd_th = C`
+    - 判据：`(iteration >= A) || (iteration >= B && syndrome_weight < C)`
+
+- 代码改动位置：`src/ldpc_codec_test2.cpp:2736-2740`
+  - 采用常量化门限，便于扫参：
+    - `const int aggr_iter_hi = A;`
+    - `const int aggr_iter_lo = B;`
+    - `const int aggr_synd_th = C;`
+
+- 第一轮批量结果（`./ssd_fc_test2 LDPC config/Ibex_hd_row11.cnfg AWGN 5.0`）：
+  - `70/35/100`: `pkts=148`, `FER=6.756757e-02`
+  - `80/40/120`: `pkts=306`, `FER=3.267974e-02`
+  - `90/45/130`: `pkts=274`, `FER=3.649635e-02`
+  - `100/50/150`: `pkts=258`, `FER=3.875969e-02`
+  - `110/55/160`: `pkts=296`, `FER=3.378378e-02`
+  - `120/60/180`: `pkts=386`, `FER=2.590674e-02`
+  - `130/65/190`: `pkts=521`, `FER=1.919386e-02`
+  - `140/70/200`: `pkts=459`, `FER=1.307190e-02`
+  - `160/80/220`: `pkts=454`, `FER=1.101322e-02`
+  - `200/100/260`: 130s 内无统计（`no_stats`）
+
+- 对 `200/100/260` 的加长验证（300s）：
+  - 命令：`timeout 300s stdbuf -oL -eL ./ssd_fc_test2 LDPC config/Ibex_hd_row11.cnfg AWGN 5.0`
+  - 末尾有效统计（SIM 段）：
+    - `Total packets simulated: 1394`（对应 `SIM` 行）
+    - `FAIL CW: 5`
+    - `LDPC FER: 3.586801e-03`
+  - 结论：在更长观察窗内，`200/100/260` 明显优于 `160/80/220`（后者约 `1.10e-02`）。
+
+- 当前最优候选（SNR=5.0，row11）：
+  - `A/B/C = 200/100/260`
+  - 当前代码已设置为该参数点（`src/ldpc_codec_test2.cpp:2736-2738`）。
+
+- 分析：
+  - 随着 `A/B/C` 提高，aggr 启动被进一步后移，能够减少中前期误翻，FER 从 `6.76e-02` 持续下降到 `1.10e-02`。
+  - 更高门限 `200/100/260` 在短窗内“慢出错”特征明显，说明其 error floor 更低，但吞吐统计时间变长。
+
+## Row11 参数扫参（SNR=4.9，2bit）
+
+- 配置：`./ssd_fc_test2 LDPC config/Ibex_hd_row11.cnfg AWGN 4.9`
+- 扫描门限：
+  - `aggr_iter_hi = A`
+  - `aggr_iter_lo = B`
+  - `aggr_synd_th = C`
+
+- 第一轮粗扫结果：
+  - `140/70/200` -> `pkts=86`, `FER=1.744186e-01`
+  - `160/80/220` -> `pkts=113`, `FER=8.849558e-02`
+  - `180/90/240` -> `pkts=112`, `FER=8.928571e-02`
+  - `190/95/250` -> `pkts=152`, `FER=6.578947e-02`
+  - `200/100/260` -> `pkts=95`, `FER=1.157895e-01`
+  - `210/105/270` -> `pkts=121`, `FER=8.264463e-02`
+  - `220/110/280` -> `pkts=181`, `FER=5.524862e-02`（粗扫最优）
+  - `240/120/300` -> `pkts=87`, `FER=1.724138e-01`
+
+- 第二轮细扫（围绕 220）结果：
+  - `205/102/265` -> `FER=1.489362e-01`
+  - `215/108/275` -> `FER=9.259259e-02`
+  - `220/110/270` -> `FER=1.052632e-01`
+  - `220/110/280` -> `FER=5.000000e-02`
+  - `220/110/290` -> `FER=1.010101e-01`
+  - `230/115/290` -> `FER=4.807692e-02`（细扫最优）
+  - `230/115/310` -> `FER=1.300000e-01`
+  - `235/118/300` -> `FER=1.123596e-01`
+
+- 前两名加长复验（300s）：
+  - `220/110/280` -> `pkts=233`, `FER=4.291845e-02`
+  - `230/115/290` -> `pkts=185`, `FER=5.405405e-02`
+
+- 结论（SNR=4.9）：
+  - 最终采用 `A/B/C = 220/110/280`。
+  - 与 `SNR=5.0` 下的最优点 `200/100/260` 不同，说明低 SNR 需要更晚且更稳的 aggr 启动节奏，避免过早权重放大导致误翻扩散。
+
+## Row11 深化探索（基于当前最优门限 220/110/280，SNR=4.9）
+
+- 目标：在不改变总体框架（2bit 半步 + aggr 权重放大）的前提下，继续寻找比 `A/B/C=220/110/280` 更优的细节方案。
+- 评测口径：
+  - 主口径：`./ssd_fc_test2 LDPC config/Ibex_hd_row11.cnfg AWGN 4.9`
+  - 以 `LDPC FER` 为主，记录 `pkts` 与 `avg_iter`。
+  - 由于配置使用“达到 10 错即停”，FER 存在样本波动，新增方案均做了重复或长窗复验。
+
+### 基线复测（当前代码：220/110/280）
+- 3次复测：
+  - run1: `pkts=174`, `FER=5.747126e-02`
+  - run2: `pkts=148`, `FER=6.756757e-02`
+  - run3: `pkts=193`, `FER=5.181347e-02`
+- 中位数约：`5.747126e-02`
+- 说明：与前面长窗复验 `FER=4.291845e-02` 相比存在波动，但仍在同一量级。
+
+### 方案 V1：2bit post 仅在非 aggr 阶段启用
+- 改动：
+  - `f_update_vn_post` 2bit 分支：
+    - `do_post_flipped = post_process && !be_aggressive && ...`
+    - `do_post_unflipped = post_process && !be_aggressive && ...`
+- 3次复测：`6.666667e-02 / 6.211180e-02 / 1.111111e-01`
+- 结论：较基线更差，回退。
+
+### 方案 V2：aggr 下 soft `w=4` 放大（7->6）
+- 改动：
+  - `if (aggr && weight==4) w = weight + 2`（原为 `+3`）
+- 3次复测：`9.803922e-02 / 6.211180e-02 / 7.092199e-02`
+- 结论：整体不优，回退。
+
+### 方案 V3：w=2 且接近阈值时边界增强（delta=2）
+- 改动：
+  - 2bit 未翻转分支增加：`if (!be_aggressive && weight==2 && likelihood>=flip_thr-1) delta=2`
+- 结果：快速发散（中间 FER 上升到约 `5.8e-01`），提前中止。
+- 结论：不可用，回退。
+
+### 方案 V4：在 2bit 分支启用 post_process2 的单步上推
+- 改动：
+  - 增加：`if (post_process2 && !flipped && weight==1 && likelihood_new==flip_thr-1) likelihood_new++`
+- 长窗结果：`pkts=176`, `FER=5.681818e-02`, `avg_iter=165.24`
+- 结论：未优于当前最优，回退。
+
+### 方案 V5：高 syndrome 时临时软化 aggr 的 w=3/4 放大
+- 改动：
+  - `weight==3`：`+2 -> (syndrome_weight>1200 ? +1 : +2)`
+  - `weight==4`：`+3 -> (syndrome_weight>1200 ? +1 : +3)`
+- 长窗结果：`pkts=159`, `FER=6.289308e-02`, `avg_iter=174.67`
+- 结论：不优，回退。
+
+### 评估口径补充：eval400（更稳定的对比）
+- 背景：`config/Ibex_hd_row11.cnfg` 使用“达到 10 错即停”，`pkts` 波动较大，不利于比较“小改动”的真实收益。
+- 做法：在 `/tmp` 下复制配置（只改仿真停止阈值，不改译码参数）：
+  - `/tmp/Ibex_hd_row11_eval400.cnfg`：`max_sim_num=400`，`max_err=10`
+  - 注意：当前 `SSD_FC.cpp` 的停止条件需要同时满足 `sim_cnt>=max_sim_num` 且 `err>=max_err`，因此会强制跑满 400 包（`max_err` 仅用于避免“0 错长跑”的极端情况）。
+- 基线（当前稳定版：`A/B/C=220/110/280`，SNR=4.9）：
+  - `./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval400.cnfg AWGN 4.9`
+  - `pkts=400`, `FER=6.750000e-02`, `avg_iter=179.3175`
+
+### 方案 V6：aggr 判据改用 syndrome_weight_delayed
+- 改动：
+  - aggr 判据内 `iteration>=B && syndrome_weight<C` 改为 `iteration>=B && syndrome_weight_delayed<C`
+- eval400 结果：
+  - `pkts=400`, `FER=7.250000e-02`, `avg_iter=183.2925`
+- 分析：
+  - `syndrome_weight_delayed` 更平滑且可能偏小，在 `C=280` 不变时更容易进入 aggr，使权重放大在“不够稳”的阶段更早触发，增加误翻扩散概率。
+  - 若要继续验证该思路，需配套重新扫 `C`（更小）或叠加额外保护条件（例如与 `likelihood_levels.min` 或 `flipped_prev` 联动）。
+- 结论：相对基线更差，回退。
+
+### 方案 V7：两档 aggr 放大（mild 不放大 `w=2`）
+- 改动：
+  - aggr 触发拆分为 `aggr_strong/aggr_mild/aggr_soft`
+  - `aggr_strong`（或 soft 触发）保持原放大：`2->3, 3->5, 4->7`
+  - `aggr_mild` 仅做小放大：`3->4, 4->6`（`2` 不放大）
+- eval400 结果：
+  - 由于明显劣化，提前中止：`pkts=154`, `FER=1.428571e-01`（约 22/154）
+- 分析：
+  - 在当前 2bit “半步进攻”公式下，`weight==2` 的 `delta_attack=(w+1)>>1=1`，导致未翻转更新为 `likelihood += (delta_attack-1)=0`，等价于“无推进”。
+  - 该方案在 mild 阶段取消 `2->3` 放大后，大量 `w=2` 的比特被卡住，整体收敛动能不足，失败包比例显著上升。
+- 结论：明显更差，回退。
+
+### 方案 V8：两档 aggr 放大（mild 保留 `2->3`，减弱 `3/4` 放大）
+- 改动：
+  - `aggr_strong`（或 soft 触发）保持：`2->3, 3->5, 4->7`
+  - `aggr_mild`：`2->3, 3->4, 4->6`
+- eval400 结果：
+  - 由于灾难性劣化，提前中止：`pkts=51`, `FER≈5.294118e-01`（约 27/51）
+- 分析：
+  - 该门限组 `220/110/280` 是在“强放大”假设下找到的；mild 阶段削弱 `w=3/4` 的放大后，接近收敛时缺少关键推力，导致大量包无法在迭代限内清零 syndrome。
+  - 2bit 空间下“可用台阶”极少，这类减弱放大往往直接把系统从“偶尔可收敛”推到“普遍收敛失败”。
+- 结论：不可用，回退。
+
+### 本轮结论
+- 在 `row11@4.9` 下，上述 `V1~V8` 均未稳定优于既有最优门限方案。
+- 当前仍保留：`A/B/C = 220/110/280`。
+- 代码已回退到该稳定版本。
+
+## Row11 再扫参（SNR=4.9，2bit，基于 env 可调门限）
+
+### 方案 V9：pushing 由“常真”改为“按迭代趋势更新”
+- 改动（已回退）：
+  - 在 `ldpc_dec_bf_ibex` 中每次进入外层 `while` 时更新：
+    - `pushing = (syndrome_weight >= prev_sw)`，并滚动 `prev_sw`
+- eval400 结果（提前中止）：
+  - `pkts=121`, `FER≈2.231405e-01`
+- 分析：
+  - 该版本仅改变撤销端奇数权重取整，导致 2bit 攻守力量失衡，出现大量“syndrome 很小但清不掉”的失败包，整体 FER 恶化明显。
+- 结论：更差，回退。
+
+### 方案 V10：引入 aggr 门限 env 覆盖（便于扫参，不改变默认行为）
+- 改动：
+  - 在 `src/ldpc_codec_test2.cpp` 增加 env 覆盖：
+    - `IBEX_AGGR_ITER_HI`（A）
+    - `IBEX_AGGR_ITER_LO`（B）
+    - `IBEX_AGGR_SYND_TH`（C）
+    - 可选：`IBEX_AGGR_STRONG_SW_TH`（强 aggr 的 syndrome 上限保护，默认关闭）
+  - 默认值仍为 `220/110/280`，不设置 env 时与之前一致。
+
+### Row11@4.9 扫参结果摘要（eval400 口径）
+- baseline（默认 `A/B/C=220/110/280`）：
+  - `pkts=400`, `FER=6.750000e-02`
+- 更优候选（`A/B/C=240/120/280`）：
+  - `pkts=400`, `FER=5.250000e-02`
+  - 在 `config/Ibex_hd_row11.cnfg` 上代表结果：`pkts=187`, `FER=5.347594e-02`
+- 反例（说明过早/过弱都会崩）：
+  - `A=200,B=110,C=280`：快速劣化，`pkts=93` 时 `FER≈1.5e-01`，提前中止
+  - 把 `C` 放宽到 300：同样明显劣化，提前中止
+  - `IBEX_AGGR_STRONG_SW_TH=1200`（限制强 aggr 仅在 `syndrome_weight<1200` 触发）：`pkts=400`, `FER=7.000000e-02`（更差）
+
+### 可复现实验命令
+- `./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval400.cnfg AWGN 4.9`（默认门限）
+- `env IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval400.cnfg AWGN 4.9`
+
+## Row11 新算法探索（2bit，不再扫门限）
+
+统一评估口径：
+- `env IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval400.cnfg AWGN 4.9`
+- baseline（此前最佳门限，但算法不变）：`FER=5.250000e-02`（21/400），`avg_iter≈171.8`
+
+### 方案 V11：趋势门控（仅在 iter_stuck 时启用 mild aggr）
+- 改动（已回退）：在 `ldpc_dec_bf_ibex` 中加入“是否改善”的 guard，只在停滞时打开 mild aggr。
+- eval400 结果：`FER=6.250000e-02`
+- 结论：变差，回退。
+
+### 方案 V12：2bit 撤销端 odd rounding 软化（floor）
+- 改动（已回退）：`f_update_vn_post` 2bit flipped 分支撤销端尝试 `floor(w/2)`（保留 `w=1 -> delta=1`）。
+- eval400 结果：`FER=5.250000e-02`（无收益）
+- 结论：无明显改善，回退。
+
+### 方案 V13：2bit 下重新引入 post_process2 的“weight==1 边界 +1”
+- 改动（已回退）：`if (post_process2 && !flipped && weight==1 && likelihood_new==flip_thr-1) likelihood_new++;`
+- eval400 结果：`FER=7.000000e-02`，`avg_iter≈191`
+- 结论：明显变差，回退。
+
+### 方案 V14：2bit 引入 soft 梯度（weak/strong=1/0）尝试
+- 改动（已回退）：`f_likelihood_levels` 在 `VN_BITS<=2` 时尝试 `weak=1,strong=0` 并禁用 syndrome 自适应更新，期望 soft_bits=1 能区分“弱未翻/强未翻”。
+- eval400 结果：`FER=5.250000e-02`，`avg_iter=176.8325`
+- 结论：未带来稳定收益。
+
+### 方案 V15：soft_bits=1 初值映射反转（questionable==1 置弱）
+- 改动（已回退）：在 `soft_data -> likelihood_level` 处对 `VN_BITS<=2 && soft_bits==1` 强制映射（忽略 `likelihood_map`）。
+- eval400 结果：`FER=6.750000e-02`，`avg_iter=185.75`
+- 结论：变差，回退。
+
+### 方案 V16：late-stage 攻击“去掉 -1”（极不稳定）
+- 改动（已回退）：在 `f_update_vn_post` 2bit 未翻转分支，当 2bit-aggr gate 生效时（迭代数较大）对 `delta>=2` 采用 `likelihood += delta`（不减 1）。
+- 现象：大量包在中后期被过推导致发散，短窗 FER 直接上到 $>0.8$，因此中止。
+- 结论：不可用，回退。
+
+### 方案 V17：2bit 禁用 post disturbance（不稳定收益）
+- 改动（已回退）：`f_update_vn_post` 2bit 分支不再执行 `post_process` 的 “snap 到 thr±1”。
+- eval400 结果：
+  - run1：`FER=5.000000e-02`，`avg_iter=180.415`
+  - run2：`FER=5.250000e-02`，`avg_iter=180.855`
+- 分析：对个别随机序列有小收益，但不稳定，且平均迭代略变长。
+
+### 方案 V18：soft aggr 同时作用于 flipped（全权重放大，波动较大）
+- 改动（已回退）：aggr 的 soft 条件去掉 `!flipped_prev`，使 flipped/unflipped 都可能进入 weight 放大。
+- eval400 结果：
+  - run1：`FER=4.500000e-02`，`avg_iter=167.095`
+  - run2：`FER=5.250000e-02`，`avg_iter=170.885`
+- 结论：有潜力但波动大，需要更“温和的撤销侧放大”。
+
+### 方案 V19：flipped 侧 mild 放大（3->4,4->6）
+- 改动（已回退）：flipped_prev 为 1 时，`3->4,4->6`，unflipped 仍为 `3->5,4->7`。
+- 现象：短窗明显劣化（约 160 包时 FER $\approx 0.1$），提前中止。
+- 结论：不可用，回退。
+
+### 方案 V20（当前最优）：仅对 flipped 且 weight==2 启用放大（2->3）
+- 核心思想：
+  - 仍允许 soft aggr 覆盖 flipped（去掉 `!flipped_prev`），但**撤销侧只对 `weight==2` 做一次放大**，避免对 `weight==3/4` 过度撤销造成振荡。
+  - 进攻侧（unflipped）保持原放大：`2->3,3->5,4->7`。
+- 关键改动（`src/ldpc_codec_test2.cpp`）：
+  - aggr soft 条件：`... && ((VN_BITS <= 2) || !flipped_prev)`（2bit 下允许 flipped）
+  - weight 放大映射：
+    - `weight==2 -> w=3`（无论 flipped/unflipped）
+    - `weight==3/4` 仅在 `!flipped_prev` 时做 `3->5,4->7`；flipped 时保持 `3/4` 不变
+- eval400 结果（SNR=4.9）：
+  - run1：`FER=4.500000e-02`（18/400），`avg_iter=166.785`
+  - run2：`FER=4.750000e-02`（19/400），`avg_iter=165.5575`
+- 分析：
+  - 相比 baseline `FER=5.25e-02`（21/400），错包数下降 $2\sim 3$ 个/400 包，且平均迭代略下降。
+  - 直觉解释：flipped 且 `weight==2` 很可能是“边界振荡/弱错误翻转”区域，适度增强撤销有利于抑制扩散；但对 `weight==3/4` 不做放大，避免把“真正需要保持 flipped 的比特”过度拉回，减少振荡与失败包。
+
+---
+
+## Row11@4.9：统一 1000 包口径（eval1000）复验与新探索
+
+为降低短窗波动，后续方案统一用 1000 包做对比：
+- eval 配置：`/tmp/Ibex_hd_row11_eval1000.cnfg`（`max_sim_num=1000`，`max_err=0`，保证必跑满 1000 包）
+- SNR：4.9
+- 固定门限（env 覆盖）：`A/B/C = 240/120/280`
+- 命令：
+  - `env IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+
+### 方案 V20（长窗基线，eval1000）
+- 结果：`FER=5.600000e-02`（56/1000），`avg_iter=173.85`
+- 结论：相对 eval400 的 $<0.05$，长窗下波动变大，说明该方案对随机序列更敏感，需要进一步抑制“撤销侧振荡/误撤销”。
+
+### 方案 V21（已回退）：pushing 按 iteration 趋势动态更新（外层迭代级）
+- 改动（已回退）：将 `pushing` 从“常量”改为在每次 outer iteration 开始时按 `syndrome_weight` 趋势更新（类似 `pushing = (syndrome_weight >= prev_sw)`）。
+- 结果（短窗）：约百包内 `FER≈0.18~0.20`，明显劣化，提前中止。
+- 分析：
+  - 该更新口径与 IBEX 的 pipeline 延迟不匹配，导致撤销端在“看似下降”时过度变保守（odd rounding 不再 +1），错误翻转难以被及时撤销，失败包激增。
+
+### 方案 V22a（已回退）：用 soft 可靠性保护强比特（仅对弱比特做 attack 放大）
+- 改动（已回退）：尝试用 `bit_questionable` 作为可靠性提示，对强比特减小 attack 放大（例如 `weight==4` 由 `4->7` 改温和）。
+- 结果（短窗）：200 包时 `FER=6.500000e-02`，趋势劣于基线，提前中止。
+- 关键原因：
+  - `sd_num=1` 场景下，译码输入实际是“硬输入”（`ldpc_decoder_input.soft_bits==0`），`bit_questionable` 不会被可靠地赋值；该方向在当前配置下缺少可用软信息支撑，因此不继续。
+
+### 方案 V23（已回退）：仅把 `weight==4` attack 由 `4->7` 降为 `4->6`（且误删了 `3->5`）
+- 改动（已回退）：试图降低攻击端过推，但实现中丢失了 `weight==3` 的 attack 放大，导致整体推力不足且行为异常。
+- 结果（短窗）：几十包内 `FER≈0.45` 级，直接判定不可用并中止。
+- 结论：该实现不可用，回退。
+
+### 方案 V24（已回退）：撤销侧对“强 flipped 且 weight==3”做增强撤销（3->5）
+- 改动（已回退）：`flipped_prev==1 && weight==3 && likelihood_prev>flip_thr` 时令 `w=5`，意图清理“强错误翻转”。
+- eval1000 结果：`FER=6.500000e-02`（65/1000），`avg_iter=184.741`
+- 分析：
+  - 强化撤销引入了额外的振荡/误撤销，长窗下失败包与平均迭代都上升，属于负收益。
+
+### 方案 V25（当前最优，eval1000）：`weight==2` 只增强 attack，不增强 retract
+- 关键改动（`src/ldpc_codec_test2.cpp`，aggr 映射处）：
+  - `weight==2`：仅在 `!flipped_prev` 时做 `2->3`（attack-only），`flipped_prev` 时保持 `w=2`
+  - `weight==3/4`：保持仅对 `!flipped_prev` 做 `3->5, 4->7`
+- eval1000 结果：`FER=4.500000e-02`（45/1000），`avg_iter=167.251`
+- 分析（为什么有效）：
+  - 2bit 下撤销分支的步长非常敏感；若对 flipped 侧也把 `2->3`，会把边界比特过快拉回，触发更多反复翻转。
+  - V25 保留了“尾部清理”的 attack 推力（让未翻转且 `weight==2` 的可疑比特更容易跨过阈值），同时避免对 flipped 侧的额外撤销放大，从而在长窗下显著降低失败包并减少平均迭代。
+
+### 方案 V26（A 方向候选，eval1000）：pipeline pushing 动态更新（列级）+ V25 attack-only
+- 背景：
+  - 在 `src/ldpc_codec_test2.cpp` 的旧实现中，`pushing` 实际上是常量（且几乎恒为 true），无法体现 “syndrome_weight 未下降则更激进撤销” 的原始意图。
+  - 该方案将 `pushing` 更新口径改为“列级 + pipeline 延迟一致”，以更接近 IBEX 的硬件时序语义。
+- 关键改动（`src/ldpc_codec_test2.cpp`）：
+  - 初始化 `syndrome_weight_r[0..4]=syndrome_weight`，避免未初始化导致的不确定行为。
+  - 新增环境变量：
+    - `IBEX_PUSH_DYNAMIC=1`：在列循环内按 `pushing = (syndrome_weight_delayed >= syndrome_weight_r[3])` 动态更新；否则强制 `pushing=true`（保持旧行为）。
+    - `IBEX_W2_STOCH=1`：仅当 `IBEX_PUSH_DYNAMIC=1` 且 `pushing=true` 时，对 `weight==2` 的 attack `2->3` 做 PRNG 随机化（本次评估未启用）。
+- 评估口径：
+  - `env IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+  - 基线：不设 `IBEX_PUSH_DYNAMIC`
+  - V26：设 `IBEX_PUSH_DYNAMIC=1`
+- 结果（SNR=4.9，row11，eval1000）：
+  - 基线（V25，本次复现实测）：`FER=5.200000e-02`（52/1000），`avg_iter=170.841`
+  - V26（V25 + pushing 动态）：`FER=4.300000e-02`（43/1000），`avg_iter=159.952`
+- 分析（为什么可能有效）：
+  - 当 `pushing=false`（趋势在下降）时，2bit flipped 侧 odd rounding 不再 `+1`，撤销步长更小，相当于引入“惯性/动量”，减少“刚翻对了又被撤销”的振荡。
+  - 当 `pushing=true`（停滞或变差）时，撤销仍会更激进，有利于快速撤回错误翻转并再次探索。
+  - 该机制是对 all-core BF 中 “momentum/tabu 抑振” 思想的低开销映射：不引入 per-bit 额外状态，仅改变撤销端的离散取整。
+
+### 方案 V27（A 方向候选，eval1000）：V26 + `weight==2` boost 随机化（仅在 pushing 时）
+- 关键思想：
+  - 延续 V26 的“动态 pushing”语义（撤销端带动量），并进一步引入 PGDBF/NGDBF 式的“随机扰动”，但只作用在 **增益门控** 上而不是直接翻转。
+  - 仅对 `aggr && !flipped_prev && weight==2` 的 `2->3` boost 做 PRNG 随机化，并且仅在 `pushing=true`（停滞/变差）时启用，避免在收敛趋势良好时引入不必要的随机抖动。
+- 关键改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增 env：
+    - `IBEX_W2_STOCH=1`：开启 `weight==2` 的随机 boost（前提 `IBEX_PUSH_DYNAMIC=1`）
+  - 随机门控（使用 LFSR bit，避免与 post_process 同一位点强相关）：
+    - `if (w2_stoch && push_dynamic && pushing) w = rand_boost ? 3 : 2;`
+- 评估口径（row11，SNR=4.9，eval1000）：
+  - `env IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+- 结果：
+  - `FER=2.500000e-02`（25/1000），`avg_iter=143.797`
+- 分析：
+  - 相比 V26（确定性的 `2->3` boost），V27 在停滞阶段对 `weight==2` 的“临界推一把”做随机抽样，显著降低了同步误翻导致的级联崩坏概率；
+  - 从 log 观察，失败包的 syndrome_weight 典型值从千级降到 $\sim 650\sim 750$，同时 `LDPC BER` 也下降到 $1.24\times 10^{-3}$ 量级，说明该随机化主要减少了“被推崩”的失败类型，而不是单纯靠更激进的攻击。
+
+---
+
+## 后续探索：从 core BF 机制出发的演进尝试（Row11@4.9，eval1000）
+
+统一评估命令（除非另有说明）：
+- `env IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+
+### 方案 V28（已回退，eval1000）：对强比特降低 `weight==2` boost 概率（soft-biased）
+- 核心想法：参考 NGDBF 的 channel 项，认为“强软信息比特”更不应在 `weight==2` 这种临界证据下被频繁推进到翻转阈值；因此尝试用软信息对 `2->3` boost 做概率偏置。
+- 改动（`src/ldpc_codec_test2.cpp`，已回退）：
+  - 当 `IBEX_W2_STOCH=1` 且 `IBEX_PUSH_DYNAMIC=1` 时：
+    - `pushing=true`：questionable 比特 boost 概率 $\approx 1/2$，strong 比特 boost 概率 $\approx 1/4$
+    - `pushing=false`：仅对 questionable 比特做 `2->3`
+- 结果：`FER=2.400000e-02`（24/1000），`avg_iter=145.365`
+- 结论：整体变差，说明该 soft 偏置在当前 1-bit soft 量化下会削弱必要的尾部推进，回退。
+
+### 方案 V29（已回退，短窗即失败）：Tabu1（上一迭代翻转的 VN 本迭代跳过更新）
+- 核心想法：参考 TRGDBF 的 tabu-list，抑制“翻转-撤销-再翻转”的 ping-pong。
+- 改动（`src/ldpc_codec_test2.cpp`，已保留为开关但默认关闭）：
+  - `IBEX_TABU1=1`：若某 VN 在上一 outer-iteration 发生 `flipped` 状态变化，则本 outer-iteration 直接跳过该 VN 更新。
+- 现象：前 50 包量级即出现 `LDPC FER≈0.2~0.3` 的灾难性失败（大量包完全不收敛），因此中止。
+- 分析：该 tabu 过强，相当于把很多关键 VN 的梯度更新“冻结”一整轮，推力被明显削弱，导致无法收敛；该方向不继续。
+
+### 方案 V30（已回退，eval1000）：2bit boost 仅受 2bit gate 控制（与 soft aggr 解耦）
+- 核心想法：尝试避免 soft aggr 在高 syndrome 阶段触发过早 boost，减少早期误翻。
+- 改动（`src/ldpc_codec_test2.cpp`，已回退）：
+  - 将 `aggr` 拆成 `aggr_2bit_gate` 与 `aggr_soft`，并令 2bit 下的权重 boost 仅在 `aggr_2bit_gate` 为真时生效。
+- 结果：`FER=2.000000e-02`（20/1000），`avg_iter=141.523`
+- 结论：未优于 V27（本记录的 best-run），回退。
+
+### 方案 V31（已回退，eval1000）：提前初始化 `prng_256/512`（用于 w2 stoch）
+- 动机：避免 `IBEX_W2_STOCH` 在 `post_iteration` 之前访问未初始化的 PRNG 状态（不确定行为）。
+- 改动（`src/ldpc_codec_test2.cpp`，已回退）：
+  - 在译码开始时对 `prng_256/512` 做显式初始化（`prng_512` 用 verilog 对齐模式）。
+- 结果：`FER=2.300000e-02`（23/1000），`avg_iter=143.379`
+- 分析：显式初始化引入了更强的结构性相关（尤其 `prng_512` 的固定模式），使 w2 随机门控在某些包上更易“同步失效”，整体变差，回退。
+
+### 方案 V32（基线，eval1000）：`weight==2` boost 延后到 `post_iteration` 之后启用（early-stage 禁止 w2 boost）
+- 关键直觉：
+  - 在 `post_iteration` 之前，译码仍处于“粗收敛”阶段，`weight==2` 的 VN 数量多且证据弱；对其进行 `2->3` boost（尤其在 aggr/随机门控参与时）更容易触发同步误翻，导致部分包直接进入高 syndrome 的错误吸引域（典型失败包 syndrome_weight $\approx 650\sim 1000$）。
+  - 将 `weight==2` boost 延后到 `post_iteration` 之后，更符合“先靠高权重翻转把结构拉回，再用 w2 做尾部清理”的阶段性策略。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 当 `IBEX_W2_STOCH=1` 且 `IBEX_PUSH_DYNAMIC=1` 时：
+    - `iteration < post_iteration`：对 `weight==2` 不做 `2->3` boost（保持 `w=2`）
+    - `iteration >= post_iteration`：恢复 V27 逻辑（`pushing=true` 时随机 boost，`pushing=false` 时确定 boost）
+- 结果（历史记录）：`FER=1.400000e-02`（14/1000），`avg_iter=136.701`
+- 复现核对（2026-02-09，当前 workspace）：`FER=2.100000e-02`（21/1000），`avg_iter=142.291`
+- 备注：两者不一致，说明除 `src/ldpc_codec_test2.cpp` 外的工程状态可能已变化（例如其他源文件/配置被修改）。后续对比以“可复现结果”为准。
+
+### 方案 V33（eval1000）：失败后 smoothing（smNGDBF 风格的 hard majority vote）
+- 核心想法：参考 `doc/all core bf/ldpc_smngdbf.m`，在译码失败时，不直接输出最后一次迭代的状态，而是对末尾窗口内的 hard 判决做“多数投票”，尝试从振荡/抖动状态中恢复。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增开关：`IBEX_SMOOTH_FAIL=1`（默认关闭），窗口默认 64（可用 `IBEX_SMOOTH_WIN` 覆盖）。
+  - 在 `iteration >= iteration_limit - smooth_win` 的末尾窗口内，对每个 VN 记录 decoded hard bit 的符号累加（0 记 +1，1 记 -1）。
+  - 若最终译码失败，则对每个 VN 取 `sign(sum)` 得到 `decoded_smoothed`，重构一个候选 codeword 并重算 syndrome；若 `syndrome_weight==0` 则接受该结果。
+- 评估命令：
+  - `IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_SMOOTH_FAIL=1 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+- 结果：`FER=2.100000e-02`（21/1000），`avg_iter=140.945`
+- 分析：在该 row11@4.9 条件下，失败包更像是陷入“错误吸引域/高 syndrome 稳态”，而非围绕正确解的轻微振荡；因此多数投票很难把 syndrome 拉到 0，收益不明显。
+- 结论：该方向在当前实现下未带来 FER 改善，不作为默认方案继续推进。
+
+### 方案 V34（当前最优，eval1000）：失败后 restart/phase 重译码（reNGDBF 风格）
+- 核心想法：参考 `doc/all core bf/ldpc_reNGDBF.m` 的 multi-phase re-decoding。对于少量“陷入 trapping-set / 错误吸引域”的失败包，单次 BF 轨迹可能会卡死；通过在失败后从初始状态重启一次，并改变随机扰动路径，有机会把 syndrome 拉到 0。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增开关：`IBEX_RESTART_PHASES`（默认 1，不重启；设为 2 表示失败后重启 1 次）。
+  - 重启时：将 `vn.likelihood` 恢复到初始 soft-map 值，`vn.flipped` 清零，并重算 `cn/syndrome_weight`。
+  - 为了让第 2 phase 的随机路径不同：在 `iteration==post_iteration && j==0` 的 PRNG 初始化点，对 `prng_256/512` 额外做若干次 LFSR advance（skip）：
+    - `skip_steps = phase * IBEX_RESTART_PRNG_SKIP`，其中 `IBEX_RESTART_PRNG_SKIP` 默认 73。
+- 评估命令：
+  - `IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+- 结果：`FER=1.400000e-02`（14/1000），`avg_iter=133.768`
+- 对比基线 V32（可复现）：`FER=2.100000e-02`（21/1000）
+- 分析：
+  - 失败包数减少 7/1000，符合“少量包需要不同随机轨迹才能脱困”的直觉。
+  - 注意：当前工程的 `IBEX Decoder average iterations` 统计要求 `iterations<=max_iter`。因此该实现将 `ldpc_decoder_output.iterations` 维持在单次 phase 的范围内（不累计两次 phase 的总迭代），`avg_iter` 不可直接用于衡量真实算力开销；真实开销会在失败包上增加一次 phase 的迭代预算。
+- 结论：在不改门限/不扫参前提下，V34 属于明确的架构级改进（multi-phase re-decoding），且在 row11@4.9/1000 包上 FER 显著下降，值得作为 row11 的新默认候选进一步加包或降 SNR 验证。
+
+### 方案 V35（短窗即失败，已中止）：Tabu-Rev（TRGDBF 风格“禁止紧邻迭代反向翻转”）
+- 核心想法：TRGDBF 的 tabu-list 本质是“刚翻过的 bit 下一轮不允许再翻回去”。在 IBEX 的 likelihood/threshold 框架下等价于：允许更新 likelihood，但若上一 outer-iteration 刚发生过 toggle，则本轮不允许再次跨越 flip_thr。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增开关：`IBEX_TABU_REV=1`（默认关闭）。
+  - 若 `last_toggle_iter[vn_idx] == iteration-1` 且本轮计算将导致 `flipped` 状态再次变化，则将该 VN 的 likelihood clamp 到阈值边界以保持 `flipped` 不变。
+- 评估命令（短窗观测后中止）：
+  - `IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_TABU_REV=1 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+- 现象：极早期即出现大量包完全不收敛；`100 packets` 时 `LDPC FER≈2.2e-01`。
+- 分析：TRGDBF 的 tabu 假设通常配合“每轮只翻少量/单个 bit”的选择策略；而 IBEX 这里是列内对大量 VN 进行并行 likelihood 更新，tabu-rev 会让大量本该快速撤销的误翻无法撤销，导致错误快速扩散到高 syndrome 吸引域（失败包 syndrome_weight 可显著升高）。
+- 结论：该方向在当前并行更新框架下不适配，放弃。
+
+### 方案 V36（短窗较差，已中止）：W1-Boost（尝试对 weight==1 做随机促攻）
+- 核心想法：2-bit 半步更新下 `weight==1` 对未翻转 VN 的增量为 0（`delta=(w+1)>>1`，`likelihood += delta-1`），导致大量“边缘证据”无法积累。尝试在 tail 阶段对部分 `weight==1` 的未翻转 VN 随机提升到 `w=3`，提供一次有效推进。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增开关：`IBEX_W1_STOCH=1`（默认关闭）。
+  - 仅在 `aggr==true`、`pushing==true`、`likelihood>=flip_thr-1`、且 `iteration>=post_iteration` 时，按 PRNG 随机将 `weight==1` 的 attack 端 `w` 提升到 3。
+- 评估命令（短窗观测后中止）：
+  - `IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_W1_STOCH=1 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+- 现象：`300 packets` 时 `LDPC FER≈4.33e-02`，且失败包 syndrome_weight 明显偏高（$\approx 1200\sim 1400$）。
+- 分析：对 `w==1` 的促攻在该配置下更像“额外噪声源”，会把部分本可收敛的轨迹推入高 syndrome 吸引域；说明 row11@4.9 的主要失败模式不是“缺推力”，而是“错误推进导致发散/陷入坏稳态”。
+- 结论：不继续该方向（保留开关但默认关闭）。
+
+### 方案 V37（当前最优，eval1000）：2bit_mode=2（aggr 阶段关闭 post 扰动）
+- 核心想法：post_trigger 的 PRNG 扰动在 tail 阶段能帮助跳出局部振荡，但当 `aggr` 已经打开时（权重放大/推进更强），继续叠加 post 扰动可能会造成不必要的随机抖动与误翻。参考 `src/ldpc_codec_test.cpp` 的 `IBEX_2BIT_MODE>=2` 思路，尝试在 `aggr==true` 时 gate 掉 `prng_post_process/prng_post_process2`。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增：读取 `IBEX_2BIT_MODE`（默认 0）。
+  - 当 `IBEX_2BIT_MODE>=2`：令 `post_gate = !aggr`，即 `aggr==true` 时强制 `prng_post_process(_2)=0`。
+- 评估命令：
+  - `IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+- 结果：`FER=1.300000e-02`（13/1000），`avg_iter=135.751`
+- 对比 V32（同配置、mode=0 的一次实测）：`FER=1.600000e-02`（16/1000）
+- 分析：在 row11@4.9 下，主要失败包更像是“被随机扰动拉偏后进入坏稳态”。aggr 阶段关掉 post 扰动能减少尾部误翻，使少量包从“差一点收敛”变成收敛，从而降低 FER。
+- 结论：该改动属于明确的架构级收敛稳定性增强，当前作为 row11 的最优候选。
+
+### 方案 V38（eval1000）：V34 restart + V37 post_gate（未优于 V37）
+- 评估命令：
+  - `IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+- 结果：`FER=1.500000e-02`（15/1000），`avg_iter=138.454`
+- 分析：restart 在该次随机样本下没有带来额外脱困收益，反而可能引入更多“二次轨迹”失败包。
+- 结论：不作为默认配置；若后续需要进一步压低 FER，可考虑把 restart 作为“只有检测到 stall/坏稳态才触发”的条件性机制，而非无条件二次 phase。
+
+---
+
+## 2026-02-09 补充复现与新方案（Row11@4.9，eval1000）
+
+重要说明（解释“同一命令跑出来 FER 差很多”的现象）：
+- 当前 row11 的评估命令包含 `IBEX_W2_STOCH=1`，再叠加 AWGN 信道本身的随机性，因此 **同一命令多次运行的 `LDPC FER` 会明显波动**（1000 包样本偏小，方差不可忽略）。
+- 因此 `doc/bf_2bit_best_configs.md` 里记录的 `FER` 是“单次 best-run 的数值”，主要用于复现命令与对比方向，不代表统计意义上的均值。
+
+本次复现结果（当前 workspace，同一 cnfg `/tmp/Ibex_hd_row11_eval1000.cnfg`）：
+- V32（mode=0）：`FER=3.200000e-02`（32/1000），`avg_iter=152.361`
+  - `IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+- V37（mode=2）：`FER=2.700000e-02`（27/1000），`avg_iter=146.039`
+  - `IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+- V38（mode=2 + restart=2）：`FER=1.500000e-02`（15/1000）的一次 run；后续复现出现 `FER=2.300000e-02`、`FER=1.700000e-02`
+  - `IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+
+结论（以“趋势”而非单次结果为准）：
+- 在当前工程状态下，V38 通常能比 V37/V32 更低（给失败包一次“不同随机轨迹”的机会），但需要多次运行取统计。
+
+### 方案 V39（eval1000，较差）：restart 的第二 phase 放开 post_gate（更“探索”但会发散）
+- 核心想法：phase0 用 V38 的稳定策略；若 phase0 失败，phase1 允许在 `aggr==true` 时也启用 post 扰动，期望用更强随机性脱困。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增开关：`IBEX_RESTART_RELAX_POST_GATE=1`（默认关闭）。
+  - `phase>0` 时令 `post_gate_mode = (!aggr) || restart_relax_post_gate`，即重启 phase 放开 `prng_post_process(_2)`。
+- 评估命令：
+  - `IBEX_RESTART_RELAX_POST_GATE=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+- 结果：`FER=2.700000e-02`（27/1000），`avg_iter=150.252`
+- 分析：phase1 的“激进随机扰动”更容易把已接近收敛的轨迹拉回坏稳态，等价于浪费一次重启机会。
+- 结论：该方向在 row11@4.9 不适配，默认保持关闭。
+
+### 方案 V40（eval1000，较差）：restart 分摊总迭代预算（固定总预算的 multi-try）
+- 核心想法：将总迭代预算 $T$（cnfg 的 `Ibex maximum iteration number`）在 `restart_phases` 之间分摊，每个 phase 只跑 $\lceil T/P\rceil$ 次迭代，等价于“固定算力下做多次独立尝试”（reNGDBF 风格）。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增开关：`IBEX_RESTART_SPLIT_BUDGET=1`（默认关闭）。
+  - `phase_iter_limit = iteration_limit / restart_phases`（含余数分配），while 条件改为 `iteration < phase_iter_limit`。
+- 评估命令：
+  - `IBEX_RESTART_SPLIT_BUDGET=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+- 结果：`FER=2.000000e-02`（20/1000），`avg_iter=133.838`
+- 分析：固定总预算下，部分包需要更长单轨迹收敛，预算分摊反而降低成功率。
+- 结论：在 row11@4.9 目前不如“全预算 + 失败再重启”的 V38。
+
+### 方案 V41（eval1000，较差）：w2 stochastic 采用两 tap XOR（尝试降相关）
+- 核心想法：担心 `prng[k+37]` 的空间/时间相关导致同步误翻，尝试用两个 tap 的 XOR 生成 gate bit，期望降低相关性。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增开关：`IBEX_W2_STOCH_XOR=1`（默认关闭）。
+  - `rand_boost = prng[idx1] ^ prng[idx2]`（idx2 取 `k+173`）。
+- 评估命令：
+  - `IBEX_W2_STOCH_XOR=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+- 结果：`FER=2.300000e-02`（23/1000），`avg_iter=142.008`
+- 分析：随机门控“更随机”并不等价于更好；在该配置下更像引入额外扰动，失败包增多。
+- 结论：不继续该方向。
+
+### 方案 V42（eval1000，较差）：post 仅在 pushing 时允许（减少无谓扰动）
+- 核心想法：当 `pushing=false`（syndrome_weight 正在下降）时尽量不扰动；只有 `pushing=true`（停滞/变差）才允许 post 扰动，期望减少“差一点收敛却被抖动拉偏”的情况。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增开关：`IBEX_POST_ONLY_WHEN_PUSHING=1`（默认关闭）。
+  - `post_gate = post_gate_mode && (post_only_when_pushing ? pushing : true)`。
+- 评估命令：
+  - `IBEX_POST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+- 结果：`FER=2.300000e-02`（23/1000），`avg_iter=145.582`
+- 分析：post 扰动本身可能是少数包脱困所必需的“尾部刷子”，仅在 pushing 时开启反而会错过有效时机。
+- 结论：该 gate 在 row11@4.9 下不适配，保持默认关闭。
+
+### 方案 V43（eval1000，失败）：soft guard（用 soft questionable 门控 w2 boost / post）
+- 核心想法：减少对“可靠比特”的误翻，仿照部分 Weighted-BF/NGDBF 的 reliability-aware 保护，尝试只对 `soft_unreliable` 比特启用更激进的 w2 boost 与 post 扰动。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增开关：`IBEX_SOFT_GUARD=1`（默认关闭）。
+  - 当 `IBEX_SOFT_GUARD=1`：仅当 `soft_unreliable==true` 时允许 `weight==2` boost（`2->3`）及 post 扰动。
+- 评估命令：
+  - `IBEX_SOFT_GUARD=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+- 结果：`FER=4.460000e-01`（446/1000），`avg_iter=535.469`
+- 分析：
+  - 该结果过差且运行时间显著变长，说明该“soft_unreliable”判据要么与实际可靠性语义不一致（可能取反），要么过度抑制了必要的 w2 推进，导致大量包卡死到 `iteration_limit`。
+- 结论：该方向在当前工程/量化定义下不可用，保持默认关闭。
+
+### 方案 V44（eval1000，未见稳定收益）：init soft bias（用 soft questionable 仅影响初始 likelihood）
+- 核心想法：不在迭代更新中硬门控，而是把 1-bit soft questionable 作为“初始偏置”，给可疑比特一个更接近翻转阈值的起点，等价于引入很弱的 channel 项。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增开关：`IBEX_INIT_SOFT_BIAS=1`（默认关闭）。
+  - 当 `VN_BITS<=2 && soft_bits>0` 时：若 `soft_unreliable` 则初始化 `likelihood=1`，否则 `likelihood=0`（保持 `flip_thr=2`）。
+- 评估命令：
+  - `IBEX_INIT_SOFT_BIAS=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+- 结果：`FER=1.500000e-02`（15/1000），`avg_iter=138.224`
+- 对照（同日同参数、未开 bias 的一次 run）：`FER=1.500000e-02`（15/1000），`avg_iter=138.351`
+- 结论：单次结果看不出稳定收益，保留为可选开关但不作为默认演进方向。
+
+### 方案 V45（eval1000，较差）：stall 触发的提前 restart（adaptive multi-try）
+- 核心想法：参考 trapping-set/坏吸引域现象，若某 phase 长时间不刷新 `best_sw_phase`，则提前结束该 phase 并进入下一 phase（restart），期望在相同或更低算力下获得更多独立轨迹机会。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增开关：`IBEX_RESTART_ON_STALL=1`（默认关闭）。
+  - 参数：`IBEX_STALL_ITERS`（默认 32），`IBEX_STALL_MIN_ITER`（默认 200）。
+  - 机制：若 `iteration>=STALL_MIN_ITER` 且连续 `STALL_ITERS` 次未刷新 `best_sw_phase`，并且还有下一 phase，则 `break` 提前进入重启。
+- 评估命令：
+  - `IBEX_RESTART_ON_STALL=1 IBEX_STALL_ITERS=32 IBEX_STALL_MIN_ITER=200 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+- 结果：`FER=2.300000e-02`（23/1000），`avg_iter=143.763`
+- 分析：stall 判据过于粗糙，会把部分“慢收敛但仍在收敛”的包提前打断，反而降低成功率。
+- 结论：该实现不适配，保持默认关闭（若后续要继续该方向，需要更精细的 stuck/attractor 识别而非仅看 best_sw 刷新）。
+
+### 方案 V46（eval1000，显著提升 ⭐）：w2 boost 仅在 pushing==true 时允许（减少无谓过推）
+- 关键直觉：
+  - 目前 2bit 的 `weight==2` 属于“弱证据临界区”，`2->3` boost 会让大量 VN 获得有效正增量（从而更易跨过 `flip_thr`）。
+  - 当 `pushing=false`（syndrome_weight 在下降）时，继续对 `weight==2` 做确定性 boost，容易把一些本应保持的 VN 过推到阈值附近，引入不必要的误翻与级联；这些误翻会把少量包推入坏吸引域，形成 error floor。
+  - 因此把 w2 boost 收敛为“只有在 pushing==true（停滞/变差）时才允许”，更符合“只在需要时推进”的策略。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增开关：`IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1`（默认关闭）。
+  - 当开启时：`weight==2` 且 `!flipped_prev` 的 `2->3` boost 在 `pushing==false` 时被禁止；`pushing==true` 时保持原先的随机 boost（`IBEX_W2_STOCH=1`）。
+- 评估命令：
+  - `IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+- 结果（复现两次均为 0 错）：
+  - Run#1：`FER=0.000000e+00`（0/1000），`avg_iter=131.522`
+  - Run#2：`FER=0.000000e+00`（0/1000），`avg_iter=134.669`
+- 长窗验证（>=1000 包 + 10 错停止，2026-02-10）：
+  - 结果：`pkts=10175`, `LDPC FER=9.828010e-04`, `avg_iter=134.198722`
+  - 说明：该结果对应 `max_sim_num=1000` 且 `max_err=10` 的停止条件（即至少跑满 1000 包，并累计到 10 个失败包才停），因此比“1000 包短窗”更能代表真实 FER 水平；短窗 0 错与该量级并不矛盾（期望每 1000 包约 1 错，存在随机波动）。
+  - 终端统计输出（节选）：
+    ```text
+    [SIM] Finish simulation @ Tue Feb 10 00:03:46 2026
+    --------------------------------------------------------
+    [STATISTICS] Total packets simulated: 10175
+    [STATISTICS] RAW  BER: 1.058614e-02
+    [STATISTICS] LDPC BER: 1.126554e-05
+    [STATISTICS] LDPC FER: 9.828010e-04
+    [STATISTICS] LDPC MIS: 0.000000e+00
+    [STATISTICS] MCRC FER: 9.828010e-04
+    [STATISTICS] DATA FER: 0.000000e+00
+    ---------------------------------------------------------
+    -------------------------------------------------------------------------------------
+    [STATISTICS] IBEX Decoder average iterations: 134.198722
+    -------------------------------------------------------------------------------------
+    ```
+- 结论：在 row11@4.9 条件下，这是目前最有价值的架构级改进（从 $\sim 10^{-2}$ 级别直接压到 $\sim 10^{-3}$ 量级）；下一步建议尝试更低 SNR 或进一步降低随机性/算力开销。
+
+### 方案 V47（eval1000_0err@4.8，进一步改善 ⭐）：strong 比特的 w2 boost 增加 1-bit“候选记忆”（需二次命中才允许 boost）
+> 注意：该方案引入额外 1-bit/VN 的跨迭代状态（`w2_cand_mem`），因此按“纯 2bit（每 VN 仅 2-bit likelihood）”口径不成立。按当前约束（禁止任何额外 per-VN 状态），**该方案仅保留记录，不作为后续演进方向**。
+- 核心想法（强约束版本的 anti-misflip）：
+  - 在 2bit 下，`weight==2` 的 `2->3` boost 是“让 w2 有推力”的关键，但它也会在某些 stalled/pushing 段落里把 **strong 且本应保持的 VN** 缓慢推向阈值，带来少量误翻并触发失败包的 error floor。
+  - 对 “strong 且未翻转” 的 VN（`likelihood < flip_thr-1`），引入 1-bit 的候选记忆 `cand`：第一次遇到 stalled 且 `weight==2` 时只置位 `cand`（不 boost）；只有再次命中时才允许进入原有的 `w2` boost 逻辑。
+  - 对 “weak (flip_thr-1)” 的 VN 不做该限制（因为它们本来就接近阈值，需要更快的推进）。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增开关：`IBEX_W2_CAND_STRONG=1`（默认关闭）。
+  - phase 内为每个 VN 分配 1-bit `w2_cand_mem[vn_idx]`；phase restart 时清零。
+  - 仅当 `push_dynamic==true && pushing==true && iteration>=post_iteration && weight==2 && !flipped_prev && strong_unflipped` 时：
+    - `cand==0`：置 `cand=1`，本次禁止 w2 boost
+    - `cand==1`：允许本次 w2 boost（走原随机门控），并在 VN 变成 weak/翻转/weight!=2 时自动清零
+- 评估配置：
+  - 使用快速统计 cnfg：`/tmp/Ibex_hd_row11_eval1000_0err.cnfg`（`max_sim_num=1000`, `max_err=0`，确保固定 1000 包对比）。
+- 对比结果（Row11@4.8，1000 包）：
+  - Baseline（V46，不开 cand）：
+    - 命令：`IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000_0err.cnfg AWGN 4.8`
+    - 结果：`LDPC FER=3.700000e-02`（37/1000），`avg_iter=257.348`
+  - V47（cand strong 开启）：
+    - 命令：`IBEX_W2_CAND_STRONG=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000_0err.cnfg AWGN 4.8`
+    - 结果：`LDPC FER=2.600000e-02`（26/1000），`avg_iter=253.837`
+- Row11@4.9 快速核对（1000 包，方差较大，仅作 sanity check）：
+  - 命令：`IBEX_W2_CAND_STRONG=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000_0err.cnfg AWGN 4.9`
+  - 结果：`LDPC FER=1.000000e-03`（1/1000），`avg_iter=134.455`
+- Row11@4.9 长窗（>=1000 包 + 10 错停止，2026-02-10）：
+  - 命令：`IBEX_W2_CAND_STRONG=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+  - 结果：`pkts=11747`, `LDPC FER=8.512812e-04`, `avg_iter=136.013450`
+  - 终端统计输出（节选）：
+    ```text
+    [SIM] Finish simulation @ Tue Feb 10 09:06:13 2026
+    --------------------------------------------------------
+    [STATISTICS] Total packets simulated: 11747
+    [STATISTICS] RAW  BER: 1.058581e-02
+    [STATISTICS] LDPC BER: 7.540351e-06
+    [STATISTICS] LDPC FER: 8.512812e-04
+    [STATISTICS] LDPC MIS: 0.000000e+00
+    [STATISTICS] MCRC FER: 8.512812e-04
+    [STATISTICS] DATA FER: 0.000000e+00
+    ---------------------------------------------------------
+    -------------------------------------------------------------------------------------
+    [STATISTICS] IBEX Decoder average iterations: 136.013450
+    -------------------------------------------------------------------------------------
+    ```
+- 分析：
+  - 该改动本质是在 “strong 且 w2 证据” 处增加一个极轻量的时间一致性过滤器：**要求 w2 证据在 stalled 段落里至少出现两次才触发推进**，降低了 transient w2 对 strong 正确比特的累计漂移。
+  - 从结果看，FER 在更低 SNR 点（4.8）有明显改善，且平均迭代略有下降，说明并非单纯“更保守导致更慢”，而是减少了部分失败包的吸引域陷入。
+  - 代价：额外 1-bit/VN 的存储（row11: `76*512=38912` bits 级别），属于明确的硬件开销点；是否可接受需要结合 SRAM/寄存器预算评估。
+- 下一步：
+  - 更新：后续已在“纯 2bit（不增加任何 per-VN 额外状态）”约束下继续探索，并找到一个基于 **restart phase 非对称策略** 的可用改进（见 V50）。
+
+---
+
+### 方案 V48（纯 2bit，失败）：w2 boost tail guard（在低 syndrome 阶段抑制 strong+reliable 的 w2 boost）
+> 目标：在接近收敛时减少 strong 正确比特被 `w=2 -> 3` 缓慢推到阈值附近导致的 rare mis-flip；该思路试图用“全局 syndrome 阶段门控”近似 V47 的时间一致性过滤，但不引入 per-VN 记忆。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增开关：`IBEX_W2_TAIL_GUARD=1`（默认关闭）。
+  - 在 `iteration>=post_iteration` 且 `pushing==true` 的 `w2` 随机 boost 路径里：
+    - 若 `syndrome_weight_delayed < syndrome_weight_thr_post`：禁止对 strong+reliable VN 的 boost
+    - 若 `syndrome_weight_delayed < syndrome_weight_thr_qc`：对 strong+reliable VN 进一步降低 boost 概率
+- 评估（Row11@4.8，1000 包，固定窗）：
+  - Baseline（V46）：
+    - 命令：`IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000_0err.cnfg AWGN 4.8`
+    - 结果：`LDPC FER=4.000000e-02`（40/1000），`avg_iter=268.588`
+  - V48（tail guard 开启）：
+    - 命令：`IBEX_W2_TAIL_GUARD=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000_0err.cnfg AWGN 4.8`
+    - 现象：在前 200 包内 `LDPC FER` 明显偏高（$\sim 0.06$），趋势不佳，提前中止该 run（避免浪费时间）。
+- 分析：
+  - 该门控依赖 1-bit soft 的 `soft_unreliable` 判定；在 row11@4.8 下，部分“需要被修正”的比特在 soft 上仍表现为可靠，从而被过度保护，导致收敛被阻断。
+  - 结论：当前实现过于保守，不作为后续方向（保留开关但默认关闭）。
+
+### 方案 V49（纯 2bit，失败）：toggle-strong（强证据翻转后将 likelihood 直接 snap 到强态，试图模拟 tabu/hysteresis）
+- 核心想法：
+  - TRGDBF/Tabu 的主要作用是减少振荡；但 per-VN tabu 需要额外存储。
+  - 这里尝试用 **不新增状态** 的方式：当 `w>=5`（强证据）触发翻转时，把 VN 的 `likelihood` 直接置到 `max/min`，让其更“坚定”，降低来回抖动。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增开关：`IBEX_TOGGLE_STRONG=1`（默认关闭）。
+  - 条件：`VN_BITS<=2 && (flipped_prev != flipped_new) && (w>=5)` 时，将 `likelihood` snap 到 `max/min`。
+- 评估（Row11@4.8，1000 包，固定窗）：
+  - 命令：`IBEX_TOGGLE_STRONG=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000_0err.cnfg AWGN 4.8`
+  - 结果：前 100 包 `LDPC FER=1.300000e-01`，明显劣化，提前中止该 run。
+- 分析：
+  - 2bit 下把 likelihood snap 到极值等价于“过强磁滞”，会把少量错误翻转锁住，触发级联失败；这种现象在低 SNR 下尤其明显。
+  - 结论：该方向不可用，后续不再探索（保持默认关闭）。
+
+### 方案 V50（纯 2bit，eval1000_0err@4.8，改进 ⭐）：Phase1（retry）在 not-pushing 时允许极小概率的 w2 boost（escape hatch）
+> 目标：不增加任何 per-VN 记忆，利用已有 `restart_phases` 机制，把“更激进/更随机”的动作只放到 **失败包才会进入的 retry phase**，降低对正常包的副作用，同时提高对 trapping set 的逃逸概率。
+- 核心想法：
+  - V46 中 `IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1` 会在 `pushing==false` 时完全禁止 `w=2 -> 3` boost；这对稳定性有利，但可能让某些 bad attractor/trap 无法获得足够扰动逃逸。
+  - 由于我们本就启用 `IBEX_RESTART_PHASES=2`，因此可以让 phase0 保持保守；仅在 phase1（phase>0，retry）中，在 `pushing==false` 时对“更可疑”的 VN（weak 或 soft_unreliable）开放一个很小概率的 w2 boost，作为 escape hatch。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增开关：`IBEX_PHASE1_W2_NOT_PUSHING=1`（默认关闭）。
+  - 仅当 `phase>0 && iteration>=post_iteration && pushing==false && weight==2 && !flipped_prev`：
+    - 若 VN 为 `weak` 或 `soft_unreliable`，则用 2 个 PRNG gate（$\sim 1/4$）触发 `w=2 -> 3` boost。
+- 评估（Row11@4.8，1000 包，固定窗；2026-02-10）：
+  - Baseline（V46）：
+    - 命令：`IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000_0err.cnfg AWGN 4.8`
+    - 结果：`LDPC FER=4.000000e-02`（40/1000），`avg_iter=268.588`
+  - V50（phase1 escape hatch 开启）：
+    - 命令：`IBEX_PHASE1_W2_NOT_PUSHING=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000_0err.cnfg AWGN 4.8`
+    - 结果：`LDPC FER=3.100000e-02`（31/1000），`avg_iter=250.460`
+    - 终端统计输出（节选）：
+      ```text
+      [STATISTICS] Total packets simulated: 1000
+      [STATISTICS] LDPC FER: 3.100000e-02
+      [STATISTICS] IBEX Decoder average iterations: 250.460000
+      ```
+- Row11@4.9 快速核对（1000 包固定窗；2026-02-10）：
+  - 命令：`IBEX_PHASE1_W2_NOT_PUSHING=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000_0err.cnfg AWGN 4.9`
+  - 结果：`LDPC FER=1.000000e-03`（1/1000），`avg_iter=133.575`
+- 分析：
+  - 该方案的关键点是“把副作用隔离到失败包才会进入的 phase1”，因此相比直接在 phase0 放开 not-pushing boost，更容易得到净收益。
+  - 从 1000 包固定窗看，FER 与平均迭代均有下降，说明 escape hatch 的扰动总体上帮助部分失败包跳出吸引域，而没有显著放大平均算力。
+  - 风险：该结果仍有统计波动；若要确认对 row11@4.9 的长窗 FER 是否有稳定收益，需要用 `/tmp/Ibex_hd_row11_eval1000.cnfg`（`max_err=10`）再做长窗对比。
+
+### 方案 V51（纯 2bit，eval1000_0err@4.8，改进 ⭐）：列内 bit 扫描起点旋转（rotate-k 调度随机化）
+> 目标：不新增任何 per-VN 状态，仅通过“调度随机化”打破 layered 更新的确定性关联，降低少数包在坏吸引域附近的周期性震荡概率。
+- 核心想法：
+  - 当前 IBEX layered BF 在每列内按固定顺序扫描 `k=0..511`，其更新顺序与 PRNG/post 的扰动也存在固定关系；在某些 trapping-set 上可能形成稳定的坏周期。
+  - 对 phase1（retry）在 post 阶段引入轻量 `rotate-k`：每列内的扫描起点 `k_start` 由 PRNG 给出，等价于每列做一次循环移位扫描，从而改变局部更新的相位关系。
+  - 该策略只改变“更新顺序”，不改变每个 VN 的更新公式，因此属于架构级调度改动，且不需要任何 per-VN 记忆。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增开关：`IBEX_ROTATE_K=1`（默认关闭）。
+  - 参数：`IBEX_ROTATE_K_PHASE1_ONLY=1`（默认关闭），开启后只在 `phase>0` 生效，避免影响大多数本就能收敛的正常包。
+  - 机制：当 `rotate_k_eff` 成立时，用 PRNG 生成 `k_start`，并将列内扫描改为 `k=(kk+k_start) mod 512`。
+- 评估（Row11@4.8，1000 包固定窗；基线均为 V46：w2 boost only-when-pushing）：
+  - Baseline（V46）：
+    - Run#1：`LDPC FER=4.400000e-02`（44/1000），`avg_iter=258.934`
+    - Run#2：`LDPC FER=3.600000e-02`（36/1000），`avg_iter=253.871`
+  - V51（rotate-k phase1 only）：
+    - Run#1：`LDPC FER=3.400000e-02`（34/1000），`avg_iter=257.048`
+    - Run#2：`LDPC FER=3.400000e-02`（34/1000），`avg_iter=254.826`
+  - Run#3（并行对照，2026-02-10 15:16，`RUN_DIR=output/row11_arch_20260210_151634_snr4p8_r3`）：
+    - Baseline（V46）：`LDPC FER=3.200000e-02`（32/1000），`avg_iter=252.307`
+    - V51（rotate-k phase1 only）：`LDPC FER=4.100000e-02`（41/1000），`avg_iter=270.899`
+- 分析：
+  - 在 `IBEX_W2_STOCH=1` + AWGN 的组合下，1000 包固定窗的波动很大；V51 在 Run#1/#2 看起来有收益，但 Run#3 出现明显劣化（FER 与平均迭代均上升）。
+  - 观察到的现象更像是“少数失败包的轨迹被改变”：有时能减少坏周期（Run#1/#2），但也可能引入额外扰动导致收敛变慢甚至失败（Run#3）。
+  - 结论：rotate-k 不是稳定改进项，当前不作为默认演进方向；保留为可选开关，后续若要继续，需要引入更精细的“仅在 stuck/attractor 时启用”的触发条件。
+
+### 方案 V52（纯 2bit，eval1000_0err@4.8，失败）：stall 驱动的 w2 escape（过推导致劣化）
+> 目标：在 retry phase 进入“停滞”后，允许更激进的 `w=2 -> 3` boost 来跳出坏吸引域。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增开关：`IBEX_STALL_W2_ESC=1`（默认关闭）。
+  - 参数：`IBEX_STALL_W2_ESC_ITERS`（默认 8），`IBEX_STALL_W2_ESC_MIN_ITER`（默认 `post_iteration`）。
+  - 机制：当 `phase>0` 且 `stall_count_w2` 达到阈值时，针对 “bad candidate（weak 或 soft_unreliable）” 的 `w==2` 在 `pushing==false` 时也放开 boost（更激进）。
+- 评估（Row11@4.8，1000 包固定窗）：
+  - Run#1：`LDPC FER=3.900000e-02`（39/1000），`avg_iter=252.803`
+  - Run#2：`LDPC FER=5.100000e-02`（51/1000），`avg_iter=258.769`
+- 分析：
+  - `stall_count_w2` 作为 stuck 指标过于粗糙：很多“慢收敛但仍在收敛”的包也会触发 escape。
+  - 一旦强行放开 `w2` boost，2bit 的量化空间过窄，容易把部分 VN 过推到阈值附近，引入误翻并触发级联失败，最终表现为 FER 上升且不稳定。
+  - 结论：该实现不适配（保持默认关闭）。若后续要继续该方向，需要更精细的 stuck/attractor 识别，而不是仅看 `best_sw_phase_w2` 是否刷新。
+
+### 方案 V53（纯 2bit，eval1000_0err@4.8，轻微改进）：PPBF-like 概率 escape（按能量代理 p(E) 触发 w2 boost）
+> 目标：在 retry phase 且进入停滞后，为少数“坏候选”提供更柔和的随机逃逸，而不是像 V52 那样直接强推。
+- 核心想法：
+  - 参考 `doc/all core bf/ldpc_ppbf.m` 的思想：用概率形式而不是确定性形式做 escape，避免对本可收敛的包造成过大扰动。
+  - 在 IBEX 框架中只对 `w==2 && !pushing` 的路径加一个“概率 boost”，并且只在 retry phase（`phase>0`）启用，控制副作用。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增开关：`IBEX_PPBF_ESC=1`（默认关闭）。
+  - 参数：`IBEX_PPBF_ESC_ITERS`（默认 8），`IBEX_PPBF_ESC_MIN_ITER`（默认 `post_iteration`）。
+  - 机制：当 `ppbf_esc_active` 成立时，对 `w==2` 的 bad candidate，构造一个极简能量代理 $E$：
+    - $E = 2 + [soft\\_unreliable] + [!pushing]$
+    - 当 $E\\ge 4$：以约 $1/2$ 的概率 boost（1 个 PRNG gate）
+    - 当 $E=3$：以约 $1/4$ 的概率 boost（2 个 PRNG gate）
+- 评估（Row11@4.8，1000 包固定窗）：
+  - Run#1：`LDPC FER=3.600000e-02`（36/1000），`avg_iter=268.837`
+  - Run#2：`LDPC FER=3.300000e-02`（33/1000），`avg_iter=259.574`
+- 分析：
+  - 相比 V52 的“强推”，PPBF-like 逃逸对 FER 的影响更温和：两次 run 都没有出现灾难性发散，且一次 run 给出比基线更好的 FER。
+  - 但其平均迭代数略有上升，说明该扰动可能让一部分包走了更长的路径才收敛；是否值得作为默认演进，需要更多重复与 row11@4.9 的长窗对比确认。
+
+#### 补充：Row11@4.9 长窗对比（max_err=10，未跑满提前中止）
+> 目的：观察 V51（rotate-k）与 V53（PPBF escape）是否能降低 row11@4.9 的 error floor。该对比跑到 >6000 包后因耗时考虑手动中止（V51/V53 尚未累计到 10 个失败包，因此仅作趋势参考）。
+- 配置：`/tmp/Ibex_hd_row11_eval1000.cnfg`（`max_sim_num=1000`, `max_err=10`，达到 1000 包后继续跑直到累计到 10 个失败包才停止）
+- 运行目录：`output/row11_arch_20260210_151356_snr4p9_long`
+- 命令：
+  - Baseline（V46）：`IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+  - V51（rotate-k phase1 only）：`IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+  - V53（PPBF escape）：`IBEX_PPBF_ESC=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+- 结果（停止点统计）：
+  - Baseline（V46，已达到 10 错自动停止）：`pkts=5861`, `LDPC FER=1.706193e-03`, `avg_iter=135.244156`
+  - V51（未达到 10 错，手动中止时）：`pkts=6600`, `LDPC FER=7.575758e-04`（5/6600）
+  - V53（未达到 10 错，手动中止时）：`pkts=6600`, `LDPC FER=9.090909e-04`（6/6600）
+- 分析：
+  - 从趋势看，V51/V53 都有降低 error floor 的潜力（相同包数下失败数明显更少）。
+  - 但由于未跑满“10 错停止条件”，这组数据仍不足以下最终结论；建议后续继续跑到 `FAIL CW=10` 或改用略低 SNR（例如 4.8x）加速收敛到稳定统计。
+
+#### 补充：Row11@4.9 长窗对比（max_err=10，跑满到 FAIL CW=10）
+> 目的：在同一套“纯 2bit”基线（V46）之上，跑满到 `FAIL CW=10`，获得更稳定的 error-floor 估计，并对比“调度扰动（V51）”与“概率 escape（V53）”的净收益。
+- 配置：`/tmp/Ibex_hd_row11_eval1000.cnfg`（`max_sim_num=1000`, `max_err=10`）
+- 运行目录：`output/row11_long10err_final3_20260210_172743_snr4p9`
+- 命令：
+  - Baseline（V46）：`IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+  - V51（rotate-k phase1 only）：`IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+  - V53（PPBF escape）：`IBEX_PPBF_ESC=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+- 结果（>=1000 包 + 10 错停止）：
+  - Baseline（V46）：`pkts=6466`, `LDPC FER=1.546551e-03`, `avg_iter=135.560470`
+  - V51（rotate-k phase1 only）：`pkts=14999`, `LDPC FER=6.667111e-04`, `avg_iter=134.534436`
+  - V53（PPBF escape）：`pkts=10573`, `LDPC FER=9.458054e-04`, `avg_iter=133.952048`
+- 分析：
+  - V51/V53 都降低了 row11@4.9 的 error floor；并且 `avg_iter` 基本不变，属于“以调度/概率扰动换 error-floor”。
+  - 本次 run 中，V51 相对 baseline 的 FER 下降约 2.3 倍（$1.55e-3 \\to 6.67e-4$）；V53 的提升更温和（$1.55e-3 \\to 9.46e-4$）。
+  - 由于停止条件固定为 10 个失败包，统计相对方差约为 $\\sqrt{1/10}\\approx0.316$；若要更高置信区分 V51 与 V53，建议把 `max_err` 提高到 30 或重复多次取统计。
+
+### 方案 V54（纯 2bit，eval1000_0err@4.8，较差）：rotate-k 在所有 phase 生效（扰动过强）
+- 改动：`IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=0`（在 phase0 也启用 rotate-k）。
+- 评估（Row11@4.8，1000 包固定窗；2026-02-10 15:16）：
+  - 命令：`IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=0 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000_0err.cnfg AWGN 4.8`
+  - 结果：`LDPC FER=4.100000e-02`（41/1000），`avg_iter=271.439`
+- 分析：把调度扰动扩展到 phase0 会影响大量本可收敛的正常包，平均迭代明显上升且 FER 变差；该方向不适合作为默认策略。
+
+### 方案 V55（纯 2bit，eval1000_0err@4.8，较差）：列内翻转次数上限（tail-only，max_toggles=8）
+- 改动：`IBEX_MAX_TOGGLES_PER_COL=8`（默认 `IBEX_MAX_TOGGLES_TAIL_ONLY=1`，仅在 tail 段限流）。
+- 评估（Row11@4.8，1000 包固定窗；2026-02-10 15:16）：
+  - 命令：`IBEX_MAX_TOGGLES_PER_COL=8 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000_0err.cnfg AWGN 4.8`
+  - 结果：`LDPC FER=3.900000e-02`（39/1000），`avg_iter=259.823`
+- 分析：在当前实现里，“按列限流”更像是硬性约束，容易把少数需要多翻转才能修复的包卡住；该方向暂不继续。
+
+### 方案 V56（纯 2bit，eval1000_0err@4.8，中性）：rotate-k phase1 + max_toggles=8（未形成净收益）
+- 改动：`IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_MAX_TOGGLES_PER_COL=8`。
+- 评估（Row11@4.8，1000 包固定窗；2026-02-10 15:16）：
+  - 命令：`IBEX_MAX_TOGGLES_PER_COL=8 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000_0err.cnfg AWGN 4.8`
+  - 结果：`LDPC FER=3.400000e-02`（34/1000），`avg_iter=261.928`
+- 分析：该组合在单次 run 中比 V54/V55 好，但仍未超过同批次 baseline（`3.2e-02`）；目前看不到“稳定净收益”，先不作为后续演进方向。
+
+### 方案 V57（纯 2bit，Row11@4.8，失败/早停）：pushing 从“列内趋势”改为“迭代级趋势”（IBEX_PUSH_MODE=1）
+> 背景：你提到“用前几列相比前一列的 synd wt 对比是否合理”。当前实现的 `pushing` 是基于列内 `syndrome_weight` 的延迟差分（本质是一个很局部的趋势信号）。这里尝试一个架构级替代：把 `pushing` 变成 **每轮迭代一个常量**，由“本轮迭代开始时的 syndrome_weight”相对“上一轮迭代开始时”的变化决定，期望更稳、更少抖动。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增开关：`IBEX_PUSH_MODE`（默认 0）。
+  - `IBEX_PUSH_MODE=0`：保持原有列内趋势（`syndrome_weight_delayed >= prev_sw_col`）。
+  - `IBEX_PUSH_MODE=1`：引入 `prev_iter_sw/pushing_iter`，在 `j==0` 时计算 `pushing_iter = (sw_iter_start >= prev_iter_sw)`，并在该迭代内对所有列复用。
+- 评估（Row11@4.8，短窗早停；2026-02-10 15:43）：
+  - Baseline（`IBEX_PUSH_MODE=0`）：
+    - 命令：`IBEX_PUSH_MODE=0 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000_0err.cnfg AWGN 4.8`
+    - 结果（336 包时）：`LDPC FER=3.273810e-02`（11/336）
+  - V57（`IBEX_PUSH_MODE=1`，iter-trend）：
+    - 命令：`IBEX_PUSH_MODE=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000_0err.cnfg AWGN 4.8`
+    - 结果（289 包时）：`LDPC FER=6.574394e-02`（19/289）
+  - 说明：该对比中 V57 明显劣化，因此未继续跑满 1000 包（提前终止以节省仿真时间）。
+  - 分析：
+  - “迭代级 pushing”过于粗糙：列内 syndrome_weight 的细粒度变化被抹平后，`w2 boost only-when-pushing` 与后续 gating 的触发时机变得不准确，导致更多误翻/失败包。
+  - 结论：该方向在当前实现形态下不可用，保持默认 `IBEX_PUSH_MODE=0`。
+
+### 方案 V58（纯 2bit，Row11@4.9，eval1000_0err，值得继续 ⭐）：V51（rotate-k）+ V53（PPBF escape）组合
+> 目标：把“调度扰动”（V51）与“概率 escape”（V53）叠加到同一条 retry-phase 轨迹上，以更低的副作用提升对 trapping-set 的逃逸能力。
+- 关键直觉（为什么可能更强）：
+  - V51 通过 rotate-k 改变列内更新相位关系，打破坏周期；
+  - V53 在 stall 后对少数 bad candidate 给出概率 boost（更柔和）；
+  - 两者作用点不同，且都集中在 `phase>0`、`post_iteration`、`stall_count_w2` 触发后的 tail 区域，理论上可叠加。
+- 评估（Row11@4.9，1000 包固定窗；2026-02-12）：
+  - Baseline（V51，本次复现实测）：
+    - 命令：`IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000_0err.cnfg AWGN 4.9`
+    - 结果：`LDPC FER=1.000000e-03`（1/1000），`avg_iter=135.724`
+  - V58（V51 + PPBF escape）：
+    - 命令：`IBEX_PPBF_ESC=1 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000_0err.cnfg AWGN 4.9`
+    - Run#1：`LDPC FER=0.000000e+00`（0/1000），`avg_iter=129.434`
+    - Run#2：`LDPC FER=0.000000e+00`（0/1000），`avg_iter=137.591`
+- 分析：
+  - 在“固定 1000 包”口径下，V58 的两次 run 都未出现失败包，至少说明该组合没有明显副作用（未观察到 V52 那种灾难性发散）。
+  - 由于 `IBEX_W2_STOCH=1` 且 AWGN 信道本身随机，`1000` 包样本方差仍然不小；要判断 V58 是否真正降低 error floor，仍需用 `/tmp/Ibex_hd_row11_eval1000.cnfg`（`max_err=10` 或更高）跑长窗对比，并建议重复多次取统计。

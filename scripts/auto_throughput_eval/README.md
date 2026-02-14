@@ -1,7 +1,7 @@
-# auto_throughput_eval：固定 SNR 网格的 throughput（aver\_iter）评估与调度
+# auto_throughput_eval：固定网格的 throughput（aver\_iter）评估与调度（SNR/K）
 
 本目录提供一个 **不依赖第三方库** 的 Python 脚本 `auto_throughput_eval/auto_throughput_eval.py`，用于在给定的
-SNR 区间 $[snr\\_low, snr\\_high]$ 上按步长 $snr\\_step$ 逐点运行仿真，并从日志 `[STATISTICS]` 中提取：
+网格区间 $[x\\_{low}, x\\_{high}]$ 上按步长 $x\\_{step}$ 逐点运行仿真（`AWGN/TAWGN` 时 $x$ 为 SNR，`ERR_INJ` 时 $x$ 为 $K$），并从日志 `[STATISTICS]` 中提取：
 
 - `RAW BER`（在此脚本中记为 `RBER`）
 - `Decoder average iteration(s)`（在此脚本中记为 `aver_iter`，兼容 `Retry/Fast/IBEX` 等变体）
@@ -46,16 +46,19 @@ SNR 区间 $[snr\\_low, snr\\_high]$ 上按步长 $snr\\_step$ 逐点运行仿�
 参考 `auto_throughput_eval/example.toml`。
 
 要点：
-- `snr_low/snr_high/snr_step`：固定 SNR 网格。
-- `max_sim_num`：每个 SNR 点固定跑的 CW 数（会写入 `.cnfg` 的 `maximum simulation number`）。
+- 轴选择：
+  - `AWGN/TAWGN`：默认 `axis_type="snr"`，使用 `snr_low/snr_high/snr_step`
+  - `ERR_INJ`：默认 `axis_type="k"`，使用 `k_low/k_high/k_step`（也兼容复用 `snr_*` 作为别名）
+- `max_sim_num`：每个点固定跑的 CW 数（会写入 `.cnfg` 的 `maximum simulation number`）。
 - `max_err_num`：建议固定为 0（会写入 `.cnfg` 的 `maximum error number`）。
 - `config_tag`、`out_dir`：由你在 TOML 中定义（后续用于 LSF job name 与结果组织）。
+- `runner.fail_fast`：默认 `false`。若设为 `true`，则任一任务 `EXIT` 或 `DONE` 但日志解析失败时，会立即取消其它 in-flight 任务并退出；吞吐测试通常仿真代价很小，建议保持 `false` 以避免因共享盘刷盘延迟导致的误判。
 
 ---
 
 ## 3. 输出
 
 对每个 case：
-- 日志：`<out_dir>/<case>/ <log_prefix>_snrX.log`
+- 日志：`<out_dir>/<case>/ <log_prefix>_snrX.log` 或 `<log_prefix>_kX.log`
 - 记录：`<out_dir>/<case>/manifest.json`
 - 表格：`<out_dir>/<case>/throughput.csv`

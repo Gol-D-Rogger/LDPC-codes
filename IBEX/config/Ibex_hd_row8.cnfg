@@ -21,7 +21,7 @@ FC_IBEX                         // LDPC decoder(FC_SKIP/FC_FDEC/FC_RDEC/FC_MIX/F
 1                               // Ibex post enable
 0                               // Ibex Syndrome calculate only
 1                               // Ibex early terminate disable
-3                               // Ibex likelihood width(3 is lite mode, 8 is full mode)
+2                               // Ibex likelihood width(3 is lite mode, 8 is full mode)
 0.625                           // Retry decoder alpha
 1                               // Quantization Mode
 8                               // APP/Q bit width

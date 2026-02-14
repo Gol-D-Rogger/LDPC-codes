@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <algorithm>
+#include <cstdint>
+#include <vector>
 
 #include "finite_lib.h"
 #include "ldpc_codec.h"
@@ -30,7 +32,7 @@ void ldpc_packet::ldpc_rd_phck(char *pchk_file) {
     for (int j = 0; j < bm_n; j++) {
       fscanf(fp, "%d", &col_shift);
 
-      // check submatrix T (identity matrix)
+     // check submatrix T (identity matrix)
       if ((i < tm_sz) && (j > (bm_n - tm_sz - 1))) {
         if (((i != (j + tm_sz - bm_n)) && (col_shift >= 0)) || ((i == (j + tm_sz - bm_n)) && (col_shift != 0))) {
           printf("[LDPC] Error: Submatrix T is not identity matrix!\n");
@@ -55,6 +57,7 @@ void ldpc_packet::ldpc_rd_phck(char *pchk_file) {
 
 // Generate G matrices from H
 void ldpc_packet::ldpc_gen_gm() {
+  FILE *fp;
   mod2sparse *qc_ac, *qc_bd, *qc_te;
   mod2sparse *qc_exb, *qc_f;
   mod2dense *qc_f_d, *qc_fi_d;
@@ -481,10 +484,9 @@ s_likelihood_levels ldpc_packet::f_likelihood_levels(int strobes, s_ldpc_decoder
 
   // VN 位宽自适应的翻转阈值与强弱档初始化
   if (VN_BITS <= 2) {
-    // 方案 H 基础：2bit 梯度固定，flip_thr=2，strong=0，weak=1
-    likelihood_levels.flip_thr = 2;
-    likelihood_levels.strong = 0;
-    likelihood_levels.weak = 1;
+    likelihood_levels.flip_thr = 2;      // 3
+    likelihood_levels.weak = 0; // 2
+    likelihood_levels.strong = 0;        // 1
   } else if (VN_BITS == 3) {
     likelihood_levels.flip_thr = likelihood_levels.max - 3;
     likelihood_levels.weak = likelihood_levels.flip_thr - 4;
@@ -499,17 +501,7 @@ s_likelihood_levels ldpc_packet::f_likelihood_levels(int strobes, s_ldpc_decoder
   likelihood_levels.level[1] = likelihood_levels.weak;
   likelihood_levels.level[2] = likelihood_levels.weak;
   likelihood_levels.level[3] = likelihood_levels.weak;
-
-  // 方案 H：2bit 初值 level={0,1,1,1}
-  if (VN_BITS <= 2) {
-    likelihood_levels.level[0] = likelihood_levels.strong;
-    likelihood_levels.level[1] = likelihood_levels.weak;
-    likelihood_levels.level[2] = likelihood_levels.weak;
-    likelihood_levels.level[3] = likelihood_levels.weak;
-  }
-
-  // 2bit 模式下使用固定梯度，不做 syndrome_weight 自适应
-  if ((strobes > 0) && (VN_BITS > 2)) {
+  if (strobes > 0) {
     address = syndrome_weight >> 5;
     if (address >= 64)
       address = 63;
@@ -553,7 +545,7 @@ s_likelihood_levels ldpc_packet::f_likelihood_levels(int strobes, s_ldpc_decoder
     likelihood_levels.level[1] = likelihood_levels.level[0];
     likelihood_levels.level[2] = likelihood_levels.level[3];
   }
-  if ((strobes > 1) && (VN_BITS > 2)) {
+  if (strobes > 1) {
     likelihood_levels.level[1] = likelihood_levels.level[0];
     likelihood_levels.level[2] = likelihood_levels.level[3];
     weak_minus_strong = likelihood_levels.level[3] - likelihood_levels.level[0];
@@ -568,53 +560,48 @@ s_likelihood_levels ldpc_packet::f_likelihood_levels(int strobes, s_ldpc_decoder
   likelihood_levels.min = likelihood_levels.strong;
   return likelihood_levels;
 }
-
 int ldpc_packet::f_update_vn_post(int likelihood, int weight, int min_likelihood, int max_likelihood, bool post_process,
                                   bool post_process2, bool be_aggressive, int flip_threshold, bool pushing) {
-  // 方案 T3：2bit 使用半步更新（攻守分离），aggr 仅通过权重放大，不再依赖 be_aggressive 全步逻辑
+  int likelihood_new;
+  bool do_post_flipped;
+  bool do_post_unflipped;
+
+  // ========== 方案 T：迭代自适应步长 ==========
+  // 前期用半步防发散，后期（be_aggressive=true）用全步突破 error floor
   if (VN_BITS <= 2) {
     bool flipped = (likelihood >= flip_threshold);
-    int likelihood_new;
+    int delta;
 
-    if (!flipped) {
-      // 混合方案：统一使用半步，但在早期启用 2bit post，后期关闭 post，依赖 aggr+半步推进
-      int delta = (weight + 1) >> 1;
-      likelihood_new = likelihood + delta - 1;
-    } else {
-      int delta = (weight >> 1) + ((weight & 1) && pushing ? 1 : 0);
-      likelihood_new = likelihood - delta;
-    }
+	    if (!flipped) {
+	      if (0 && be_aggressive) {  // 禁用，只靠 aggr 权重放大
+	        delta = weight;  // 后期全步进攻
+	      } else {
+	        delta = (weight + 1) >> 1;  // 前期半步
+	      }
+	    } else {
+	      delta = (weight >> 1) + ((weight & 1) && pushing ? 1 : 0);
+	    }
 
-    // 方向2-方案2：仅在非 aggr 阶段（早期迭代）启用 2bit post 逻辑，借鉴 ldpc_codec_test.cpp
-    bool do_post_flipped = post_process && !be_aggressive && (likelihood_new == flip_threshold);
-    bool do_post_unflipped = post_process && !be_aggressive && (likelihood_new < flip_threshold);
-    if (do_post_unflipped)
-      likelihood_new = flip_threshold - 1;
-    else if (do_post_flipped)
-      likelihood_new = flip_threshold + 1;
+    likelihood_new = flipped ? (likelihood - delta) : (likelihood + delta - 1);
 
-    if (likelihood_new <= min_likelihood)
-      likelihood_new = min_likelihood;
-    if (likelihood_new >= max_likelihood)
-      likelihood_new = max_likelihood;
+    do_post_flipped = post_process && (likelihood_new == flip_threshold);
+		    do_post_unflipped = post_process && (likelihood_new < flip_threshold);
+		    if (do_post_unflipped)
+		      likelihood_new = flip_threshold - 1;
+		    else if (do_post_flipped)
+		      likelihood_new = flip_threshold + 1;
+
+    if (likelihood_new < min_likelihood) likelihood_new = min_likelihood;
+    if (likelihood_new > max_likelihood) likelihood_new = max_likelihood;
 
     return likelihood_new;
   }
-
-  // VN_BITS>2：保持原 BF 逻辑
-  int likelihood_new;
-  bool clamp_to_min;
-  bool do_post_flipped;
-  bool do_post_unflipped;
-  bool do_aggr;
+  // ========== 3-bit 及以上：原逻辑 ==========
   bool flipped = (likelihood >= flip_threshold);
-
   int delta = weight;
 
-  likelihood_new = flipped ? (likelihood - delta) : (likelihood + delta - 1); // when clamp!=1, same as strong
-  // likelihood_new = flipped ? (likelihood - weight) : (likelihood + weight - 1); // when clamp!=1, same as strong
+  likelihood_new = flipped ? (likelihood - delta) : (likelihood + delta - 1);
 
-  bool flipped_new = (likelihood_new >= flip_threshold);
   do_post_flipped = post_process && (likelihood_new == flip_threshold);
   do_post_unflipped = post_process && (likelihood_new < flip_threshold);
   if (do_post_unflipped)
@@ -631,7 +618,6 @@ int ldpc_packet::f_update_vn_post(int likelihood, int weight, int min_likelihood
 
   return likelihood_new;
 }
-
 // int ldpc_packet::f_update_vn_post(int likelihood, int weight, int min_likelihood, int max_likelihood, bool post_process,
 //                                   bool post_process2, bool be_aggressive, int flip_threshold, bool look,
 //                                   bool scale2x) {
@@ -1160,18 +1146,10 @@ void ldpc_packet::ldpc_ibex_parameters(int post_process_en = 1, int syndrome_wei
   ldpc_decoder_parameters.likelihood_init_fraction[1] = 8;
   ldpc_decoder_parameters.likelihood_init_fraction[2] = 4;
 
-  // 方案 G：2bit 固定梯度时 soft->level 映射 {0,1,2,2}，最强软值映射到 level[0]
-  if (VN_BITS <= 2) {
-    ldpc_decoder_parameters.likelihood_map[0] = 0;
-    ldpc_decoder_parameters.likelihood_map[1] = 1;
-    ldpc_decoder_parameters.likelihood_map[2] = 2;
-    ldpc_decoder_parameters.likelihood_map[3] = 2;
-  } else {
-    ldpc_decoder_parameters.likelihood_map[0] = 3;
-    ldpc_decoder_parameters.likelihood_map[1] = 2;
-    ldpc_decoder_parameters.likelihood_map[2] = 1;
-    ldpc_decoder_parameters.likelihood_map[3] = 0;
-  }
+  ldpc_decoder_parameters.likelihood_map[0] = 3;
+  ldpc_decoder_parameters.likelihood_map[1] = 2;
+  ldpc_decoder_parameters.likelihood_map[2] = 1;
+  ldpc_decoder_parameters.likelihood_map[3] = 0;
   ldpc_decoder_parameters.likelihood_map[4] = 3;
   ldpc_decoder_parameters.likelihood_map[5] = 2;
   ldpc_decoder_parameters.likelihood_map[6] = 1;
@@ -2545,11 +2523,195 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
     finished = 1;
   ldpc_decoder_output.syndrome_weight_before = syndrome_weight;
   syndrome_weight_delayed = syndrome_weight;
+  for (i = 0; i < 5; i++)
+    syndrome_weight_r[i] = syndrome_weight;
 
-  int prev_sw = (iteration == 0) ? syndrome_weight_delayed : syndrome_weight_r[3];
-  bool pushing = (syndrome_weight_delayed >= prev_sw);
+  // Tunable thresholds for 2-bit aggr gate (optional env override for quick sweeps).
+  const char *env_aggr_iter_hi = getenv("IBEX_AGGR_ITER_HI");
+  const char *env_aggr_iter_lo = getenv("IBEX_AGGR_ITER_LO");
+  const char *env_aggr_synd_th = getenv("IBEX_AGGR_SYND_TH");
+  const char *env_aggr_strong_synd_th = getenv("IBEX_AGGR_STRONG_SW_TH");
+  const int aggr_iter_hi = env_aggr_iter_hi ? atoi(env_aggr_iter_hi) : 220;
+  const int aggr_iter_lo = env_aggr_iter_lo ? atoi(env_aggr_iter_lo) : 110;
+  const int aggr_synd_th = env_aggr_synd_th ? atoi(env_aggr_synd_th) : 280;
+  const int aggr_strong_synd_th = env_aggr_strong_synd_th ? atoi(env_aggr_strong_synd_th) : (1 << 30);
+  const char *env_2bit_mode = getenv("IBEX_2BIT_MODE");
+  const int mode_2bit = env_2bit_mode ? atoi(env_2bit_mode) : 0;
 
-  ldpc_decoder_output.early_termination = 0;
+  // Pure-2bit framework profiles (global control only; MUST NOT add any per-VN state).
+  const char *env_profile = getenv("IBEX_PROFILE");
+  int ibex_profile = env_profile ? atoi(env_profile) : 0;
+  if (ibex_profile < 0)
+    ibex_profile = 0;
+  if (ibex_profile > 2)
+    ibex_profile = 2;
+
+  // UP-GDBF inspired "active iteration": delay stochastic escapes until later iterations / retry phases.
+  const char *env_upgdbf_active_iter = getenv("IBEX_UPGDBF_ACTIVE_ITER");
+  int upgdbf_active_iter_base =
+      env_upgdbf_active_iter ? atoi(env_upgdbf_active_iter)
+                             : ((ibex_profile >= 2) ? (ldpc_decoder_input.post_iteration + 32)
+                                                    : ldpc_decoder_input.post_iteration);
+  if (upgdbf_active_iter_base < 0)
+    upgdbf_active_iter_base = 0;
+  if (upgdbf_active_iter_base > ldpc_decoder_input.iteration_limit)
+    upgdbf_active_iter_base = ldpc_decoder_input.iteration_limit;
+  const char *env_upgdbf_active_phase_bonus = getenv("IBEX_UPGDBF_ACTIVE_PHASE_BONUS");
+  int upgdbf_active_phase_bonus = env_upgdbf_active_phase_bonus
+                                     ? atoi(env_upgdbf_active_phase_bonus)
+                                     : ((ibex_profile >= 2) ? 16 : 0);
+  if (upgdbf_active_phase_bonus < 0)
+    upgdbf_active_phase_bonus = 0;
+  if (upgdbf_active_phase_bonus > ldpc_decoder_input.iteration_limit)
+    upgdbf_active_phase_bonus = ldpc_decoder_input.iteration_limit;
+  const char *env_upgdbf_stall_early = getenv("IBEX_UPGDBF_STALL_EARLY");
+  const bool upgdbf_stall_early =
+      env_upgdbf_stall_early ? (atoi(env_upgdbf_stall_early) != 0) : (ibex_profile >= 2);
+
+		  // A-direction knobs: make "pushing" meaningful and add controlled stochasticity for w=2 boost.
+		  const char *env_push_dynamic = getenv("IBEX_PUSH_DYNAMIC");
+		  const bool push_dynamic =
+		      env_push_dynamic ? (atoi(env_push_dynamic) != 0) : (ibex_profile >= 1);
+		  const char *env_push_mode = getenv("IBEX_PUSH_MODE");
+		  int push_mode = env_push_mode ? atoi(env_push_mode) : 0;
+		  if (push_mode < 0) push_mode = 0;
+		  if (push_mode > 1) push_mode = 1;
+		  const char *env_w2_stoch = getenv("IBEX_W2_STOCH");
+		  const bool w2_stoch = env_w2_stoch ? (atoi(env_w2_stoch) != 0) : (ibex_profile >= 1);
+		  const char *env_w2_stoch_xor = getenv("IBEX_W2_STOCH_XOR");
+		  const bool w2_stoch_xor = env_w2_stoch_xor ? (atoi(env_w2_stoch_xor) != 0) : false;
+		  const char *env_w2_boost_only_when_pushing = getenv("IBEX_W2_BOOST_ONLY_WHEN_PUSHING");
+		  const bool w2_boost_only_when_pushing =
+		      env_w2_boost_only_when_pushing ? (atoi(env_w2_boost_only_when_pushing) != 0) : (ibex_profile >= 1);
+		  const char *env_w2_boost_weak_only = getenv("IBEX_W2_BOOST_WEAK_ONLY");
+		  const bool w2_boost_weak_only =
+		      env_w2_boost_weak_only ? (atoi(env_w2_boost_weak_only) != 0) : false;
+		  const char *env_w2_boost_soft_only = getenv("IBEX_W2_BOOST_SOFT_ONLY");
+		  const bool w2_boost_soft_only =
+		      env_w2_boost_soft_only ? (atoi(env_w2_boost_soft_only) != 0) : false;
+		  const char *env_w2_tail_guard = getenv("IBEX_W2_TAIL_GUARD");
+		  const bool w2_tail_guard = env_w2_tail_guard ? (atoi(env_w2_tail_guard) != 0) : false;
+		  const char *env_toggle_strong = getenv("IBEX_TOGGLE_STRONG");
+		  const bool toggle_strong = env_toggle_strong ? (atoi(env_toggle_strong) != 0) : false;
+		  // Temporarily forbid any extra per-VN state beyond the 2-bit likelihood (pure 2bit route).
+		  static constexpr bool k_allow_extra_vn_state = false;
+		  const char *env_w2_cand_strong = getenv("IBEX_W2_CAND_STRONG");
+		  const bool w2_cand_strong =
+		      (k_allow_extra_vn_state && env_w2_cand_strong) ? (atoi(env_w2_cand_strong) != 0) : false;
+		  const char *env_soft_guard = getenv("IBEX_SOFT_GUARD");
+		  const bool soft_guard = env_soft_guard ? (atoi(env_soft_guard) != 0) : false;
+		  const char *env_init_soft_bias = getenv("IBEX_INIT_SOFT_BIAS");
+		  const bool init_soft_bias = env_init_soft_bias ? (atoi(env_init_soft_bias) != 0) : false;
+		  const char *env_w1_stoch = getenv("IBEX_W1_STOCH");
+		  const bool w1_stoch = env_w1_stoch ? (atoi(env_w1_stoch) != 0) : false;
+		  const char *env_post_only_when_pushing = getenv("IBEX_POST_ONLY_WHEN_PUSHING");
+		  const bool post_only_when_pushing =
+		      env_post_only_when_pushing ? (atoi(env_post_only_when_pushing) != 0) : false;
+		  const char *env_tabu1 = getenv("IBEX_TABU1");
+		  const bool tabu1 = (k_allow_extra_vn_state && env_tabu1) ? (atoi(env_tabu1) != 0) : false;
+		  const char *env_tabu_rev = getenv("IBEX_TABU_REV");
+		  const bool tabu_rev = (k_allow_extra_vn_state && env_tabu_rev) ? (atoi(env_tabu_rev) != 0) : false;
+			  const char *env_restart_phases = getenv("IBEX_RESTART_PHASES");
+			  int restart_phases = env_restart_phases ? atoi(env_restart_phases) : ((ibex_profile >= 2) ? 3 : 1);
+			  if (restart_phases < 1) restart_phases = 1;
+			  if (restart_phases > 4) restart_phases = 4;
+			  const char *env_phase1_w2_not_pushing = getenv("IBEX_PHASE1_W2_NOT_PUSHING");
+			  const bool phase1_w2_not_pushing =
+			      env_phase1_w2_not_pushing ? (atoi(env_phase1_w2_not_pushing) != 0) : false;
+			  // Pure-2bit architectural exploration knobs (must NOT add any per-VN extra state).
+			  // 1) Stall-triggered escape: when a phase stalls, make w=2 boosting more decisive in retry phases.
+			  const char *env_stall_w2_esc = getenv("IBEX_STALL_W2_ESC");
+			  const bool stall_w2_esc = env_stall_w2_esc ? (atoi(env_stall_w2_esc) != 0) : (ibex_profile >= 2);
+			  const char *env_stall_w2_esc_iters = getenv("IBEX_STALL_W2_ESC_ITERS");
+			  int stall_w2_esc_iters = env_stall_w2_esc_iters ? atoi(env_stall_w2_esc_iters) : 8;
+			  if (stall_w2_esc_iters < 1) stall_w2_esc_iters = 1;
+				  const char *env_stall_w2_esc_min_iter = getenv("IBEX_STALL_W2_ESC_MIN_ITER");
+				  int stall_w2_esc_min_iter =
+				      env_stall_w2_esc_min_iter ? atoi(env_stall_w2_esc_min_iter) : ldpc_decoder_input.post_iteration;
+				  if (stall_w2_esc_min_iter < 0) stall_w2_esc_min_iter = 0;
+				  if (stall_w2_esc_min_iter > ldpc_decoder_input.iteration_limit)
+				    stall_w2_esc_min_iter = ldpc_decoder_input.iteration_limit;
+				  // 1b) PPBF-like probabilistic escape (retry-only, no per-VN state): boost w=1/2 with p(E).
+				  const char *env_ppbf_esc = getenv("IBEX_PPBF_ESC");
+				  const bool ppbf_esc = env_ppbf_esc ? (atoi(env_ppbf_esc) != 0) : (ibex_profile >= 2);
+				  const char *env_ppbf_esc_iters = getenv("IBEX_PPBF_ESC_ITERS");
+				  int ppbf_esc_iters = env_ppbf_esc_iters ? atoi(env_ppbf_esc_iters) : 8;
+				  if (ppbf_esc_iters < 1) ppbf_esc_iters = 1;
+				  const char *env_ppbf_esc_min_iter = getenv("IBEX_PPBF_ESC_MIN_ITER");
+				  int ppbf_esc_min_iter =
+				      env_ppbf_esc_min_iter ? atoi(env_ppbf_esc_min_iter) : ldpc_decoder_input.post_iteration;
+				  if (ppbf_esc_min_iter < 0) ppbf_esc_min_iter = 0;
+				  if (ppbf_esc_min_iter > ldpc_decoder_input.iteration_limit)
+				    ppbf_esc_min_iter = ldpc_decoder_input.iteration_limit;
+				  const int stall_count_w2_min_iter = std::min(stall_w2_esc_min_iter, ppbf_esc_min_iter);
+				  // 2) Randomized layered schedule: rotate bit-scan start within each column (optional retry-only).
+				  const char *env_rotate_k = getenv("IBEX_ROTATE_K");
+				  const bool rotate_k = env_rotate_k ? (atoi(env_rotate_k) != 0) : (ibex_profile >= 1);
+			  const char *env_rotate_k_phase1_only = getenv("IBEX_ROTATE_K_PHASE1_ONLY");
+			  const bool rotate_k_phase1_only =
+			      env_rotate_k_phase1_only ? (atoi(env_rotate_k_phase1_only) != 0) : (ibex_profile >= 1);
+			  // 3) Tail stabilization: cap the number of toggles per column to avoid cascade mis-flips.
+			  const char *env_max_toggles_per_col = getenv("IBEX_MAX_TOGGLES_PER_COL");
+			  int max_toggles_per_col = env_max_toggles_per_col ? atoi(env_max_toggles_per_col) : 0;
+			  if (max_toggles_per_col < 0) max_toggles_per_col = 0;
+			  const char *env_max_toggles_tail_only = getenv("IBEX_MAX_TOGGLES_TAIL_ONLY");
+			  const bool max_toggles_tail_only =
+			      env_max_toggles_tail_only ? (atoi(env_max_toggles_tail_only) != 0) : true;
+			  const char *env_restart_prng_skip = getenv("IBEX_RESTART_PRNG_SKIP");
+			  const int restart_prng_skip = env_restart_prng_skip ? atoi(env_restart_prng_skip) : 73;
+			  const char *env_restart_on_stall = getenv("IBEX_RESTART_ON_STALL");
+			  const bool restart_on_stall =
+			      env_restart_on_stall ? (atoi(env_restart_on_stall) != 0) : (ibex_profile >= 2);
+		  const char *env_stall_iters = getenv("IBEX_STALL_ITERS");
+		  int stall_iters = env_stall_iters ? atoi(env_stall_iters) : 32;
+		  if (stall_iters < 1) stall_iters = 1;
+		  if (stall_iters > ldpc_decoder_input.iteration_limit) stall_iters = ldpc_decoder_input.iteration_limit;
+		  const char *env_stall_min_iter = getenv("IBEX_STALL_MIN_ITER");
+		  int stall_min_iter = env_stall_min_iter ? atoi(env_stall_min_iter) : 200;
+		  if (stall_min_iter < 0) stall_min_iter = 0;
+		  if (stall_min_iter > ldpc_decoder_input.iteration_limit) stall_min_iter = ldpc_decoder_input.iteration_limit;
+		  const char *env_restart_relax_post_gate = getenv("IBEX_RESTART_RELAX_POST_GATE");
+		  const bool restart_relax_post_gate =
+		      env_restart_relax_post_gate ? (atoi(env_restart_relax_post_gate) != 0) : false;
+		  const char *env_restart_split_budget = getenv("IBEX_RESTART_SPLIT_BUDGET");
+		  const bool restart_split_budget =
+		      env_restart_split_budget ? (atoi(env_restart_split_budget) != 0) : (ibex_profile >= 2);
+		  const char *env_smooth_fail = getenv("IBEX_SMOOTH_FAIL");
+		  const bool smooth_fail = (k_allow_extra_vn_state && env_smooth_fail) ? (atoi(env_smooth_fail) != 0) : false;
+		  const char *env_smooth_win = getenv("IBEX_SMOOTH_WIN");
+		  int smooth_win = env_smooth_win ? atoi(env_smooth_win) : 64;
+		  if (smooth_win <= 0) smooth_win = 64;
+		  if (smooth_win > ldpc_decoder_input.iteration_limit) smooth_win = ldpc_decoder_input.iteration_limit;
+
+		  // Column-level global escape + backtracking (no per-VN state; optional small per-column buffers allowed).
+		  const char *env_col_global_esc = getenv("IBEX_COL_GLOBAL_ESC");
+		  const bool col_global_esc = env_col_global_esc ? (atoi(env_col_global_esc) != 0) : false;
+		  const char *env_col_global_esc_iters = getenv("IBEX_COL_GLOBAL_ESC_ITERS");
+		  int col_global_esc_iters = env_col_global_esc_iters ? atoi(env_col_global_esc_iters) : 8;
+		  if (col_global_esc_iters < 1) col_global_esc_iters = 1;
+		  const char *env_col_global_esc_min_iter = getenv("IBEX_COL_GLOBAL_ESC_MIN_ITER");
+		  int col_global_esc_min_iter =
+		      env_col_global_esc_min_iter ? atoi(env_col_global_esc_min_iter) : ldpc_decoder_input.post_iteration;
+		  if (col_global_esc_min_iter < 0) col_global_esc_min_iter = 0;
+		  if (col_global_esc_min_iter > ldpc_decoder_input.iteration_limit)
+		    col_global_esc_min_iter = ldpc_decoder_input.iteration_limit;
+		  const char *env_col_global_esc_max_toggles = getenv("IBEX_COL_GLOBAL_ESC_MAX_TOGGLES");
+		  int col_global_esc_max_toggles = env_col_global_esc_max_toggles ? atoi(env_col_global_esc_max_toggles) : 2;
+		  if (col_global_esc_max_toggles < 1) col_global_esc_max_toggles = 1;
+		  if (col_global_esc_max_toggles > 8) col_global_esc_max_toggles = 8;
+		  const char *env_col_global_esc_soft_only = getenv("IBEX_COL_GLOBAL_ESC_SOFT_ONLY");
+		  const bool col_global_esc_soft_only =
+		      env_col_global_esc_soft_only ? (atoi(env_col_global_esc_soft_only) != 0) : true;
+		  const char *env_col_backtrack = getenv("IBEX_COL_BACKTRACK");
+		  const bool col_backtrack = env_col_backtrack ? (atoi(env_col_backtrack) != 0) : true;
+		  const char *env_col_backtrack_slack = getenv("IBEX_COL_BACKTRACK_SLACK");
+		  int col_backtrack_slack = env_col_backtrack_slack ? atoi(env_col_backtrack_slack) : 0;
+		  if (col_backtrack_slack < 0) col_backtrack_slack = 0;
+		  const char *env_col_backtrack_require_improve = getenv("IBEX_COL_BACKTRACK_REQUIRE_IMPROVE");
+		  const bool col_backtrack_require_improve =
+		      env_col_backtrack_require_improve ? (atoi(env_col_backtrack_require_improve) != 0) : true;
+
+	  ldpc_decoder_output.early_termination = 0;
 
   if (ldpc_decoder_parameters.early_terminate_dis == 0) {
     int early_term_thr;
@@ -2596,28 +2758,36 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
     finished = 1;
   }
 
-  likelihood_levels =
-      f_likelihood_levels(ldpc_decoder_input.nand_strobes, ldpc_decoder_parameters, syndrome_weight, h_matrix.rows);
+	  likelihood_levels =
+	      f_likelihood_levels(ldpc_decoder_input.nand_strobes, ldpc_decoder_parameters, syndrome_weight, h_matrix.rows);
 
-  // soft_data -> likelihood_level
-  bool soft_data[2];
-  for (j = 0; j < h_matrix.cols; j++) {
-    for (k = 0; k < h_matrix.bits; k++) {
-      soft_data[0] = ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_questionable;
-      soft_data[1] = ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_questionable2;
-      if ((soft_data[1] == 0) && (soft_data[0] == 0))
-        vn.c[j].b[k].likelihood = likelihood_levels.level[ldpc_decoder_parameters.likelihood_map[0]]; // 3 verilog: 3
-      if ((soft_data[1] == 0) && (soft_data[0] == 1))
-        vn.c[j].b[k].likelihood = likelihood_levels.level[ldpc_decoder_parameters.likelihood_map[1]]; // 2 verilog: 2
-      if ((soft_data[1] == 1) && (soft_data[0] == 0))
-        vn.c[j].b[k].likelihood = likelihood_levels.level[ldpc_decoder_parameters.likelihood_map[2]]; // 1 verilog: 3
-      if ((soft_data[1] == 1) && (soft_data[0] == 1))
-        vn.c[j].b[k].likelihood = likelihood_levels.level[ldpc_decoder_parameters.likelihood_map[3]]; // 0 verilog: 2
+	  // soft_data -> likelihood_level
+	  std::vector<int16_t> vn_likelihood_init;
+	  vn_likelihood_init.resize(h_matrix.cols * h_matrix.bits);
+	  bool soft_data[2];
+	  for (j = 0; j < h_matrix.cols; j++) {
+	    for (k = 0; k < h_matrix.bits; k++) {
+	      soft_data[0] = ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_questionable;
+	      soft_data[1] = ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_questionable2;
+	      if ((soft_data[1] == 0) && (soft_data[0] == 0))
+	        vn.c[j].b[k].likelihood = likelihood_levels.level[ldpc_decoder_parameters.likelihood_map[0]]; // 3 verilog: 3
+	      if ((soft_data[1] == 0) && (soft_data[0] == 1))
+	        vn.c[j].b[k].likelihood = likelihood_levels.level[ldpc_decoder_parameters.likelihood_map[1]]; // 2 verilog: 2
+	      if ((soft_data[1] == 1) && (soft_data[0] == 0))
+	        vn.c[j].b[k].likelihood = likelihood_levels.level[ldpc_decoder_parameters.likelihood_map[2]]; // 1 verilog: 3
+	      if ((soft_data[1] == 1) && (soft_data[0] == 1))
+	        vn.c[j].b[k].likelihood = likelihood_levels.level[ldpc_decoder_parameters.likelihood_map[3]]; // 0 verilog: 2
+	      if (init_soft_bias && (VN_BITS <= 2) && (ldpc_decoder_input.soft_bits > 0)) {
+	        const bool soft_unreliable_init =
+	            soft_data[0] || ((ldpc_decoder_input.soft_bits > 1) && soft_data[1]);
+	        vn.c[j].b[k].likelihood = soft_unreliable_init ? 1 : 0;
+	      }
+	      vn_likelihood_init[j * h_matrix.bits + k] = static_cast<int16_t>(vn.c[j].b[k].likelihood);
 
-      if ((VERBOSITY > 0) && (ldpc_decoder_input.soft_bits == 1) &&
-          (ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_questionable ==
-           ldpc_decoder_parameters.questionable_sense))
-        printf("### INITIAL %x %x %x\n", j, k, vn.c[j].b[k].likelihood);
+	      if ((VERBOSITY > 0) && (ldpc_decoder_input.soft_bits == 1) &&
+	          (ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_questionable ==
+	           ldpc_decoder_parameters.questionable_sense))
+	        printf("### INITIAL %x %x %x\n", j, k, vn.c[j].b[k].likelihood);
     }
   }
 
@@ -2628,33 +2798,109 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
            ldpc_decoder_input.corrupted_codeword.c[71].b[405].bit_questionable2, vn.c[71].b[405].likelihood);
   }
 
-  // 4x5 statistic table init
-  for (j = 0; j <= 3; j++) {
-    for (k = 0; k <= 4; k++) {
-      hard_codeword.errors_at_level_and_weight[j][k] = 0;
+	  // 4x5 statistic table init
+	  for (j = 0; j <= 3; j++) {
+	    for (k = 0; k <= 4; k++) {
+	      hard_codeword.errors_at_level_and_weight[j][k] = 0;
       hard_codeword.correct_at_level_and_weight[j][k] = 0;
-    }
-  }
+	    }
+	  }
 
-  while ((iteration < ldpc_decoder_input.iteration_limit) && (finished == 0) && (give_up == 0)) {
-    // 方案 F：根据 syndrome_weight 的宏观趋势计算动态步长标志
-    static int last_sw[3] = {9999, 9999, 9999};
-    bool trend_good = (syndrome_weight < last_sw[0]) && (last_sw[0] < last_sw[1]);
-    last_sw[2] = last_sw[1];
-    last_sw[1] = last_sw[0];
-    last_sw[0] = syndrome_weight;
-    for (j = 0; j < h_matrix.cols; j++) {
-      clock_cycles++;
-      if ((iteration == (ldpc_decoder_input.post_iteration + 0)) && (j == 0)) {
-        for (i = 0; i < 256; i++)
-          prng_256.b[i] = (prng_init[int(i / 16)] >> (i % 16)) & 1;
-        for (i = 0; i < 512; i++)
-          prng_512.b[i] = (prng_init[int(i / 16)] >> (i % 16)) & 1;
-        for (i = 0; i < 512; i++)
-          prng_512.b[i] = (0x1fe0 >> (i % 16)) & 1; // to match verilog
-      } else if (iteration >= ldpc_decoder_input.post_iteration) {
-        prng_256 = f_256_bit_lfsr(prng_256);
-        prng_512 = f_512_bit_lfsr(prng_512);
+			  std::vector<int16_t> last_toggle_iter;
+			  if (tabu1 || tabu_rev) {
+			    last_toggle_iter.assign(h_matrix.cols * h_matrix.bits, static_cast<int16_t>(-2));
+			  }
+
+			  int prng_skip_steps = 0;
+
+			  for (int phase = 0; (phase < restart_phases) && (finished == 0) && (give_up == 0); phase++) {
+			    std::vector<uint8_t> w2_cand_mem;
+			    if (w2_cand_strong) {
+			      w2_cand_mem.assign(h_matrix.cols * h_matrix.bits, 0);
+			    }
+			    std::vector<int8_t> smooth_sum;
+			    int phase_iter_limit = ldpc_decoder_input.iteration_limit;
+			    if (restart_split_budget && (restart_phases > 1)) {
+			      const int total_budget = ldpc_decoder_input.iteration_limit;
+			      const int base_budget = total_budget / restart_phases;
+			      const int rem_budget = total_budget % restart_phases;
+			      phase_iter_limit = base_budget + ((phase < rem_budget) ? 1 : 0);
+			      if (phase_iter_limit < 1)
+			        phase_iter_limit = 1;
+			    }
+			    const int effective_smooth_win = std::min(smooth_win, phase_iter_limit);
+			    const int smooth_start_iter =
+			        smooth_fail ? std::max(0, phase_iter_limit - effective_smooth_win) : (1 << 30);
+			    if (phase > 0) {
+			      // Restart from the exact initial VN likelihoods and no flips.
+			      for (j = 0; j < h_matrix.cols; j++) {
+			        for (k = 0; k < h_matrix.bits; k++) {
+			          const int vn_idx = j * h_matrix.bits + k;
+			          vn.c[j].b[k].likelihood = vn_likelihood_init[vn_idx];
+			          vn.c[j].b[k].flipped = 0;
+			        }
+			      }
+			      cn = f_check_nodes(h_matrix, hard_codeword);
+			      syndrome_weight = f_check_node_weight(h_matrix, cn);
+			      syndrome_weight_delayed = syndrome_weight;
+			      for (i = 0; i < 5; i++)
+			        syndrome_weight_r[i] = syndrome_weight;
+			      finished = (syndrome_weight == 0);
+			      give_up = 0;
+			      if (tabu1 || tabu_rev)
+			        std::fill(last_toggle_iter.begin(), last_toggle_iter.end(), static_cast<int16_t>(-2));
+			      if (w2_cand_strong && !w2_cand_mem.empty())
+			        std::fill(w2_cand_mem.begin(), w2_cand_mem.end(), 0);
+			      iteration = 0;
+			      clock_cycles = (2 * h_matrix.cols) + 1;
+			    }
+			    prng_skip_steps = (restart_prng_skip > 0) ? (phase * restart_prng_skip) : 0;
+			    int best_sw_phase = syndrome_weight;
+			    int stall_count = 0;
+			    int best_sw_phase_w2 = syndrome_weight;
+			    int stall_count_w2 = 0;
+			    int prev_iter_sw = syndrome_weight;
+			    bool pushing_iter = true;
+			    int col_esc_target_col = 0; // selected escape column for this iteration (updated at j==0)
+
+			    while ((iteration < phase_iter_limit) && (finished == 0) && (give_up == 0)) {
+			    for (j = 0; j < h_matrix.cols; j++) {
+			      clock_cycles++;
+			      if ((iteration == (ldpc_decoder_input.post_iteration + 0)) && (j == 0)) {
+	        for (i = 0; i < 256; i++)
+	          prng_256.b[i] = (prng_init[int(i / 16)] >> (i % 16)) & 1;
+	        for (i = 0; i < 512; i++)
+	          prng_512.b[i] = (prng_init[int(i / 16)] >> (i % 16)) & 1;
+	        for (i = 0; i < 512; i++)
+	          prng_512.b[i] = (0x1fe0 >> (i % 16)) & 1; // to match verilog
+	        if (prng_skip_steps > 0) {
+	          for (int s = 0; s < prng_skip_steps; s++) {
+	            prng_256 = f_256_bit_lfsr(prng_256);
+	            prng_512 = f_512_bit_lfsr(prng_512);
+	          }
+	        }
+		      } else if (iteration >= ldpc_decoder_input.post_iteration) {
+		        prng_256 = f_256_bit_lfsr(prng_256);
+		        prng_512 = f_512_bit_lfsr(prng_512);
+		      }
+
+      if (col_global_esc && (j == 0) && (h_matrix.cols > 0)) {
+        // Pick one column per iteration for escape to cap overhead. Derived from existing PRNG state.
+        int rnd = 0;
+        if (h_matrix.bits == 512) {
+          for (int bb = 0; bb < 8; bb++) {
+            const int idx = (iteration * 13 + bb * 37) & 511;
+            if (prng_512.b[idx])
+              rnd |= (1 << bb);
+          }
+        } else {
+          for (int bb = 0; bb < 8; bb++) {
+            const int idx = (iteration * 13 + bb * 37) & 255;
+            if (prng_256.b[idx])
+              rnd |= (1 << bb);
+          }
+        }
+        col_esc_target_col = (h_matrix.cols > 0) ? (rnd % h_matrix.cols) : 0;
       }
 
       syndrome_weight_r[4] = syndrome_weight_r[3];
@@ -2666,6 +2912,15 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
         syndrome_weight_delayed = (j <= 3) ? syndrome_weight_r[0] : syndrome_weight_r[4];
       else
         syndrome_weight_delayed = syndrome_weight_r[4];
+      const int prev_sw_col = syndrome_weight_r[3];
+      if (push_dynamic && (push_mode == 1) && (j == 0)) {
+        pushing_iter = (iteration == 0) ? true : (syndrome_weight >= prev_iter_sw);
+        prev_iter_sw = syndrome_weight;
+      }
+      bool pushing = true;
+      if (push_dynamic) {
+        pushing = (push_mode == 1) ? pushing_iter : (syndrome_weight_delayed >= prev_sw_col);
+      }
 
       if (VERBOSITY > 0)
         printf("### C++ ITERATION %4d, COLUMN %2d, SYNDROME WEIGHT: %4d DELAYED WEIGHT: %4d ###\n", iteration, j,
@@ -2693,22 +2948,70 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
         post_trigger2 = 0;
       }
 
-      // be_aggressive 保留为趋势标志，T3 中 2bit 分支不再使用该标志作为全步开关
-      be_aggressive = trend_good;
-      for (k = 0; k < h_matrix.bits; k++) {
-        look = 0;
-        do_not_use_this_bit = 0;
-        do_not_use_this_bit |= ((h_matrix.extra_bits_of_parity > 0) && (j == (h_matrix.cols - h_matrix.rows)) &&
-                                (k >= h_matrix.extra_bits_of_parity));
+      // be_aggressive is different with rtl and not used
+      be_aggressive = (ldpc_decoder_input.soft_bits > 0) &&
+                      (likelihood_levels.min < ldpc_decoder_parameters.likelihood_thr) && !post_trigger &&
+                      !post_trigger2; // different with verilog, add two post trigger judge
+      // be_aggressive = (ldpc_decoder_input.soft_bits > 0) && (likelihood_levels.min <
+      // ldpc_decoder_parameters.likelihood_thr) && (iteration < (ldpc_decoder_input.post_iteration << 1));
+      // be_aggressive = (ldpc_decoder_input.soft_bits > 0) && (likelihood_levels.min <
+      // ldpc_decoder_parameters.likelihood_thr) && (iteration < (ldpc_decoder_input.post_iteration + 100));
+	      // be_aggressive = (ldpc_decoder_input.soft_bits > 0) && (likelihood_levels.min <
+	      // ldpc_decoder_parameters.likelihood_thr);
+	      const bool rotate_k_eff =
+	          rotate_k && (iteration >= ldpc_decoder_input.post_iteration) && (!rotate_k_phase1_only || (phase > 0));
+	      int k_start = 0;
+	      if (rotate_k_eff) {
+	        if (h_matrix.bits == 512) {
+	          for (int bb = 0; bb < 9; bb++) {
+	            const int idx = (j * 13 + bb * 37) & 511;
+	            if (prng_512.b[idx])
+	              k_start |= (1 << bb);
+	          }
+	          k_start &= 511;
+	        } else if (h_matrix.bits == 256) {
+	          for (int bb = 0; bb < 8; bb++) {
+	            const int idx = (j * 13 + bb * 37) & 255;
+	            if (prng_256.b[idx])
+	              k_start |= (1 << bb);
+	          }
+	          k_start &= 255;
+	        } else {
+	          // Fallback for non power-of-two circulants (not expected for IBEX 256/512 cases).
+	          for (int bb = 0; bb < 16; bb++) {
+	            const int idx = (j * 13 + bb * 37) & 255;
+	            k_start = (k_start << 1) | (prng_256.b[idx] ? 1 : 0);
+	          }
+	          if (h_matrix.bits > 0)
+	            k_start = k_start % h_matrix.bits;
+	        }
+	      }
+	      const bool cap_toggles_eff =
+	          (max_toggles_per_col > 0) && (!max_toggles_tail_only || (iteration >= ldpc_decoder_input.post_iteration));
+	      int toggles_in_col = 0;
+	      for (int kk = 0; kk < h_matrix.bits; kk++) {
+	        k = rotate_k_eff ? (((h_matrix.bits == 512) ? ((kk + k_start) & 511)
+	                                                    : ((h_matrix.bits == 256) ? ((kk + k_start) & 255)
+	                                                                              : ((kk + k_start) % h_matrix.bits))))
+	                         : kk;
+	        look = 0;
+	        do_not_use_this_bit = 0;
+	        do_not_use_this_bit |= ((h_matrix.extra_bits_of_parity > 0) && (j == (h_matrix.cols - h_matrix.rows)) &&
+	                                (k >= h_matrix.extra_bits_of_parity));
         do_not_use_this_bit |= ((h_matrix.extra_bits_of_userdata > 0) && (j == (h_matrix.cols - h_matrix.rows - 1)) &&
                                 (k >= h_matrix.extra_bits_of_userdata));
-        if ((VERBOSITY > 0) && do_not_use_this_bit)
-          printf("### DO NOT USE THIS BIT %2d %3d\n", j, k);
-        if (!do_not_use_this_bit) {
-          weight = 0;
-          for (i = 0; i < h_matrix.rows; i++) {
-            m = (k + h_matrix.bits - h_matrix.element[i][j]) % h_matrix.bits;
-            if (h_matrix.extra_bytes_of_parity == 0) {
+	        if ((VERBOSITY > 0) && do_not_use_this_bit)
+	          printf("### DO NOT USE THIS BIT %2d %3d\n", j, k);
+	        if (!do_not_use_this_bit) {
+	          const int vn_idx = j * h_matrix.bits + k;
+	          if (tabu1 && (iteration > 0) && (last_toggle_iter[vn_idx] == static_cast<int16_t>(iteration - 1))) {
+	            // One-iteration tabu: skip updating nodes that just toggled last iteration to reduce ping-pong.
+	            continue;
+	          }
+	          weight = 0;
+	          for (i = 0; i < h_matrix.rows; i++) {
+	            m = (k + h_matrix.bits - h_matrix.element[i][j]) % h_matrix.bits;
+	            if (h_matrix.extra_bytes_of_parity == 0) {
               if (h_matrix.occupied[i][j] && (cn.r[i].b[m] == 1))
                 weight++;
             } else {
@@ -2727,9 +3030,14 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
               hard_codeword
                   .correct_at_level_and_weight[ldpc_decoder_input.corrupted_codeword.c[j].b[k].level][weight]++;
           }
-          flipped_prev = vn.c[j].b[k].flipped;
-          int likelihood_prev = vn.c[j].b[k].likelihood;
-          look = (VERBOSITY > 0) && ((j == 33) && (k == 163));
+	          flipped_prev = vn.c[j].b[k].flipped;
+	          int likelihood_prev = vn.c[j].b[k].likelihood;
+	          look = (VERBOSITY > 0) && ((j == 33) && (k == 163));
+	          const bool soft_unreliable =
+	              (ldpc_decoder_input.soft_bits > 0) &&
+	              (ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_questionable ||
+	               ((ldpc_decoder_input.soft_bits > 1) &&
+	                ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_questionable2));
 
           if (iteration >= ldpc_decoder_input.post_iteration) {
             // normal disurbance
@@ -2755,51 +3063,230 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
           }
 
           // Adjust weight if aggressive mode
-          // 方向2-方案1：2bit 使用 ldpc_codec_test.cpp 风格的 aggr 启动条件
-          bool aggr = ((VN_BITS <= 2) &&
-                       (iteration >= 100 || (iteration >= 50 && syndrome_weight < 150))) ||
-                      ((ldpc_decoder_input.soft_bits > 0) &&
-                       (likelihood_levels.min < ldpc_decoder_parameters.likelihood_thr && !flipped_prev));
-          int w = weight;
-          if (aggr && (weight == 0))
-            w = weight + 0;
-          if (aggr && (weight == 1))
-            w = weight + 0; // =1, verilog delta: 0
-          if (aggr && (weight == 2))
-            w = weight + 1; // =3, verilog delta: 2
-          if (aggr && (weight == 3))
-            w = weight + 2; // =5, verilog delta: 4
-          if (aggr && (weight == 4))
-            w = weight + 3; // =7, verilog delta: 7
+	          // UP-GDBF inspired active-iteration gate for stochastic/escape actions (global only; no per-VN state).
+	          int upgdbf_active_iter_eff = upgdbf_active_iter_base;
+	          if ((phase > 0) && (upgdbf_active_phase_bonus > 0)) {
+	            upgdbf_active_iter_eff = std::max(0, upgdbf_active_iter_eff - upgdbf_active_phase_bonus);
+	          }
+	          if (upgdbf_active_iter_eff > ldpc_decoder_input.iteration_limit)
+	            upgdbf_active_iter_eff = ldpc_decoder_input.iteration_limit;
+	          const bool upgdbf_stall_trigger =
+	              upgdbf_stall_early && (phase > 0) && (iteration >= stall_count_w2_min_iter) &&
+	              (stall_count_w2 >= std::min(stall_w2_esc_iters, ppbf_esc_iters));
+	          const bool upgdbf_rand_enable = (iteration >= upgdbf_active_iter_eff) || upgdbf_stall_trigger;
+
+	          bool aggr = ((VN_BITS <= 2) &&
+	                       (((iteration >= aggr_iter_hi) && (syndrome_weight < aggr_strong_synd_th)) ||
+	                        ((iteration >= aggr_iter_lo) && (syndrome_weight < aggr_synd_th)))) ||
+	                      ((ldpc_decoder_input.soft_bits > 0) &&
+	                       (likelihood_levels.min < ldpc_decoder_parameters.likelihood_thr &&
+	                        ((VN_BITS <= 2) || !flipped_prev)));
+	          int w = weight;
+	          if (aggr) {
+	            if (w1_stoch && !flipped_prev && (weight == 1) && pushing &&
+	                (likelihood_prev >= (likelihood_levels.flip_thr - 1)) &&
+	                (iteration >= ldpc_decoder_input.post_iteration) && upgdbf_rand_enable) {
+	              // NGDBF-like noise injection in tail stage: stochastically promote w=1 to w=3 (attack only).
+	              const int prng_idx = (h_matrix.bits == 512) ? ((k + 101) & 511) : ((k + 101) & 255);
+	              const bool rand_boost = (h_matrix.bits == 512) ? prng_512.b[prng_idx] : prng_256.b[prng_idx];
+	              if (rand_boost)
+	                w = 3;
+	            }
+	            if (weight == 2) {
+	              // Only boost attack; keep retract conservative to reduce oscillation.
+	              if (!flipped_prev) {
+	                if (!soft_guard || soft_unreliable) {
+	                  const bool w2_soft_only_ok = !w2_boost_soft_only || soft_unreliable;
+	                  if (w2_soft_only_ok) {
+			                    const bool w2_strong_unflipped =
+			                        (VN_BITS <= 2) && (likelihood_prev < (likelihood_levels.flip_thr - 1));
+			                    const bool stall_w2_esc_active =
+			                        stall_w2_esc && (phase > 0) && (stall_count_w2 >= stall_w2_esc_iters) &&
+			                        (iteration >= stall_w2_esc_min_iter);
+		                    const bool ppbf_esc_active =
+		                        ppbf_esc && upgdbf_rand_enable && (phase > 0) && (stall_count_w2 >= ppbf_esc_iters) &&
+		                        (iteration >= std::max(ppbf_esc_min_iter, ldpc_decoder_input.post_iteration));
+			                    bool w2_cand_allow = true;
+			                    if (w2_cand_strong && push_dynamic && w2_strong_unflipped && !w2_cand_mem.empty()) {
+			                      if (!pushing || (iteration < ldpc_decoder_input.post_iteration)) {
+			                        w2_cand_mem[vn_idx] = 0;
+	                      } else if (!w2_cand_mem[vn_idx]) {
+	                        w2_cand_mem[vn_idx] = 1; // arm; require a second hit to boost
+	                        w2_cand_allow = false;
+	                      }
+	                    } else if (w2_cand_strong && !w2_cand_mem.empty()) {
+	                      // Clear stale cand as soon as the VN becomes weak/flipped/weight!=2.
+	                      w2_cand_mem[vn_idx] = 0;
+	                    }
+	                    if (!w2_cand_allow) {
+	                      // No boost on the first strong w=2 hit while stalled.
+	                    } else
+	                    if (w2_stoch && push_dynamic) {
+	                      if (!upgdbf_rand_enable) {
+	                        // Before active-iter enables randomness, keep w=2 unchanged (no stochastic boost).
+	                      } else if (iteration >= ldpc_decoder_input.post_iteration) {
+	                        if (pushing) {
+	                          const int prng_idx1 = (h_matrix.bits == 512) ? ((k + 37) & 511) : ((k + 37) & 255);
+	                          bool rand_boost =
+	                              (h_matrix.bits == 512) ? prng_512.b[prng_idx1] : prng_256.b[prng_idx1];
+	                          if (w2_stoch_xor) {
+	                            const int prng_idx2 = (h_matrix.bits == 512) ? ((k + 173) & 511) : ((k + 173) & 255);
+	                            const bool rand_boost2 =
+	                                (h_matrix.bits == 512) ? prng_512.b[prng_idx2] : prng_256.b[prng_idx2];
+	                            rand_boost ^= rand_boost2;
+	                          }
+	                          if (w2_boost_weak_only && w2_strong_unflipped) {
+	                            // Strong unflipped VN: reduce w2-boost probability to avoid slowly pushing correct bits.
+	                            const int prng_idx3 = (h_matrix.bits == 512) ? ((k + 211) & 511) : ((k + 211) & 255);
+	                            const bool rand_gate3 =
+	                                (h_matrix.bits == 512) ? prng_512.b[prng_idx3] : prng_256.b[prng_idx3];
+	                            rand_boost &= rand_gate3; // ~1/4 boost probability (assuming independent)
+	                          }
+		                          if (w2_tail_guard && w2_strong_unflipped && !soft_unreliable) {
+		                            // Tail-stage safety: when only a few checks remain unsatisfied, avoid w=2 boosting
+		                            // strong+reliable VNs (a common source of rare mis-flips / error-floor packets).
+		                            if (hamming_weight_lt_post_thr) {
+		                              rand_boost = false;
+		                            } else if (hamming_weight_lt_circ_thr) {
+		                              const int prng_idx4 = (h_matrix.bits == 512) ? ((k + 233) & 511) : ((k + 233) & 255);
+		                              const bool rand_gate4 =
+		                                  (h_matrix.bits == 512) ? prng_512.b[prng_idx4] : prng_256.b[prng_idx4];
+		                              rand_boost &= rand_gate4; // further reduce probability in tail
+		                            }
+		                          }
+		                          if (stall_w2_esc_active) {
+		                            // When stuck in a retry phase, make escaping more decisive for "bad" candidates.
+		                            const bool cand_bad = (!w2_strong_unflipped) || soft_unreliable;
+		                            if (cand_bad && (!w2_boost_weak_only || !w2_strong_unflipped))
+		                              rand_boost = true;
+		                          }
+		                          if (rand_boost)
+		                            w = 3; // 2->3 (attack)
+		                        } else {
+		                          if (!w2_boost_only_when_pushing) {
+		                            if (!w2_boost_weak_only || !w2_strong_unflipped)
+		                              w = 3; // 2->3 (attack)
+		                          } else if (stall_w2_esc_active) {
+		                            // If a phase has stalled, allow a small amount of w=2 boost even when not pushing.
+		                            const bool cand_bad = (!w2_strong_unflipped) || soft_unreliable;
+		                            if (cand_bad && (!w2_boost_weak_only || !w2_strong_unflipped)) {
+		                              const int prng_idx6 = (h_matrix.bits == 512) ? ((k + 101) & 511) : ((k + 101) & 255);
+		                              const bool r6 = (h_matrix.bits == 512) ? prng_512.b[prng_idx6] : prng_256.b[prng_idx6];
+		                              if (r6)
+		                                w = 3;
+		                            }
+		                          } else if (phase1_w2_not_pushing && (phase > 0)) {
+		                            // Retry-phase escape hatch: even if "only-when-pushing" is enabled, allow a very small
+		                            // probability of w=2 boost when the trend is not pushing, to escape some trap sets.
+		                            const bool cand_bad = (!w2_strong_unflipped) || soft_unreliable;
+		                            if (cand_bad && (!w2_boost_weak_only || !w2_strong_unflipped)) {
+		                              const int prng_idx4 = (h_matrix.bits == 512) ? ((k + 211) & 511) : ((k + 211) & 255);
+		                              const int prng_idx5 = (h_matrix.bits == 512) ? ((k + 233) & 511) : ((k + 233) & 255);
+		                              const bool r4 = (h_matrix.bits == 512) ? prng_512.b[prng_idx4] : prng_256.b[prng_idx4];
+		                              const bool r5 = (h_matrix.bits == 512) ? prng_512.b[prng_idx5] : prng_256.b[prng_idx5];
+		                              // ~1/4 (two independent gates) on top of the base rand_boost in the pushing path.
+		                              if (r4 && r5)
+		                                w = 3;
+		                            }
+		                          } else if (ppbf_esc_active) {
+		                            // PPBF-like escape hatch: boost w=2 with probability p(E) based on a tiny energy proxy.
+		                            const bool cand_bad = (!w2_strong_unflipped) || soft_unreliable;
+		                            if (cand_bad && (!w2_boost_weak_only || !w2_strong_unflipped)) {
+		                              int E = weight; // here weight==2
+		                              if (soft_unreliable)
+		                                E++;
+		                              if (!pushing)
+		                                E++;
+		                              const int prng_idx7 = (h_matrix.bits == 512) ? ((k + 79) & 511) : ((k + 79) & 255);
+		                              const int prng_idx8 = (h_matrix.bits == 512) ? ((k + 157) & 511) : ((k + 157) & 255);
+		                              const bool r7 = (h_matrix.bits == 512) ? prng_512.b[prng_idx7] : prng_256.b[prng_idx7];
+		                              const bool r8 = (h_matrix.bits == 512) ? prng_512.b[prng_idx8] : prng_256.b[prng_idx8];
+		                              bool rand_boost = false;
+		                              if (E >= 4) {
+		                                rand_boost = r7; // ~1/2
+		                              } else if (E == 3) {
+		                                rand_boost = r7 && r8; // ~1/4
+		                              }
+		                              if (rand_boost)
+		                                w = 3;
+		                            }
+		                          }
+		                        }
+		                      } else {
+		                        // Before post_iteration, avoid stochastic/early w=2 boost to reduce chaotic mass-flips.
+	                      }
+	                    } else {
+	                      if (!w2_boost_weak_only || !w2_strong_unflipped)
+	                        w = 3; // 2->3 (attack)
+	                    }
+	                  }
+	                }
+	              }
+	            } else if (!flipped_prev && (weight == 3)) {
+	              w = 5; // 3->5 (attack)
+	            } else if (!flipped_prev && (weight == 4)) {
+	              w = 7; // 4->7 (attack)
+            }
+          }
           if ((VERBOSITY > 0) && look)
-            printf("C++ LOOK   ITERATION: %4d BEFORE LIKELIHOOD UPDATE SW: %4d CURRENT BIT FLIP: %2d %3d  ORIGINAL: %x "
-                   "CORRUPTED: %x FLIPPED: %x WEIGHT: %1d MIN: %3d LIKELIHOOD: %3d\n",
-                   iteration, syndrome_weight, j, k, 0, ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_hard,
-                   vn.c[j].b[k].flipped, weight, likelihood_levels.min, vn.c[j].b[k].likelihood);
-          vn.c[j].b[k].likelihood =
-              f_update_vn_post(vn.c[j].b[k].likelihood, w, likelihood_levels.min, likelihood_levels.max,
-                               prng_post_process, prng_post_process2, aggr, likelihood_levels.flip_thr, pushing);
+				            printf("C++ LOOK   ITERATION: %4d BEFORE LIKELIHOOD UPDATE SW: %4d CURRENT BIT FLIP: %2d %3d  ORIGINAL: %x "
+				                   "CORRUPTED: %x FLIPPED: %x WEIGHT: %1d MIN: %3d LIKELIHOOD: %3d\n",
+				                   iteration, syndrome_weight, j, k, 0, ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_hard,
+				                   vn.c[j].b[k].flipped, weight, likelihood_levels.min, vn.c[j].b[k].likelihood);
+          const bool post_gate_mode =
+              (mode_2bit >= 2) ? (!aggr || (restart_relax_post_gate && (phase > 0))) : true;
+          const bool post_gate_push = post_only_when_pushing ? pushing : true;
+          const bool post_gate_soft = soft_guard ? soft_unreliable : true;
+          const bool post_gate = post_gate_mode && post_gate_push && post_gate_soft;
+          const bool prng_post_process_eff = prng_post_process && post_gate;
+          const bool prng_post_process2_eff = prng_post_process2 && post_gate;
+	          vn.c[j].b[k].likelihood =
+			              f_update_vn_post(vn.c[j].b[k].likelihood, w, likelihood_levels.min, likelihood_levels.max,
+			                               prng_post_process_eff, prng_post_process2_eff, aggr, likelihood_levels.flip_thr, pushing);
 
           if ((VERBOSITY > 0) && look)
             printf("C++ LOOK   ITERATION: %4d AFTER LIKELIHOOD UPDATE SW: %4d CURRENT BIT FLIP: %2d %3d  ORIGINAL: %x "
                    "CORRUPTED: %x FLIPPED: %x WEIGHT: %1d MIN: %3d LIKELIHOOD: %3d\n",
                    iteration, syndrome_weight, j, k, 0, ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_hard,
                    vn.c[j].b[k].flipped, weight, likelihood_levels.min, vn.c[j].b[k].likelihood);
-          vn.c[j].b[k].flipped = (vn.c[j].b[k].likelihood >= likelihood_levels.flip_thr);
+	          vn.c[j].b[k].flipped = (vn.c[j].b[k].likelihood >= likelihood_levels.flip_thr);
+	          if (toggle_strong && (VN_BITS <= 2) && (flipped_prev != vn.c[j].b[k].flipped) && (w >= 5)) {
+	            // Implicit 1-step hysteresis without extra per-VN state:
+	            // If a VN toggles due to strong evidence (w>=5), snap to a strong state to reduce oscillation.
+	            vn.c[j].b[k].likelihood =
+	                vn.c[j].b[k].flipped ? likelihood_levels.max : likelihood_levels.min;
+	          }
+	          if (tabu_rev && (iteration > 0) &&
+	              (last_toggle_iter[vn_idx] == static_cast<int16_t>(iteration - 1)) &&
+	              (flipped_prev != vn.c[j].b[k].flipped)) {
+	            // TRGDBF-style 1-iteration tabu: allow likelihood update, but forbid immediate toggle back.
+	            vn.c[j].b[k].likelihood = flipped_prev ? likelihood_levels.flip_thr : (likelihood_levels.flip_thr - 1);
+	            vn.c[j].b[k].flipped = flipped_prev;
+	          }
 
-          if ((VERBOSITY > 0) && look)
-            printf("C++ ITERATION: %4d AFTER FLIP CHECK  SW: %4d CURRENT BIT FLIP: %2d %3d  ORIGINAL: %x CORRUPTED: %x "
-                   "FLIPPED: %x WEIGHT: %1d MIN: %3d LIKELIHOOD: %3d THR: %3d\n",
-                   iteration, syndrome_weight, j, k, 0, ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_hard,
-                   vn.c[j].b[k].flipped, weight, likelihood_levels.min, vn.c[j].b[k].likelihood,
-                   likelihood_levels.flip_thr);
+	          if ((VERBOSITY > 0) && look)
+	            printf("C++ ITERATION: %4d AFTER FLIP CHECK  SW: %4d CURRENT BIT FLIP: %2d %3d  ORIGINAL: %x CORRUPTED: %x "
+	                   "FLIPPED: %x WEIGHT: %1d MIN: %3d LIKELIHOOD: %3d THR: %3d\n",
+	                   iteration, syndrome_weight, j, k, 0, ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_hard,
+	                   vn.c[j].b[k].flipped, weight, likelihood_levels.min, vn.c[j].b[k].likelihood,
+	                   likelihood_levels.flip_thr);
 
-          // Increment update syndrome if flipped state changed
-          if (flipped_prev != vn.c[j].b[k].flipped) {
-            for (i = 0; i < h_matrix.rows; i++) {
-              m = (k + h_matrix.bits - h_matrix.element[i][j]) % h_matrix.bits;
-              if (h_matrix.extra_bytes_of_parity == 0) {
-                if (h_matrix.occupied[i][j])
+		          if (cap_toggles_eff && (flipped_prev != vn.c[j].b[k].flipped) &&
+		              (toggles_in_col >= max_toggles_per_col)) {
+		            // Tail-stage safety: suppress excessive toggles within a column and clamp to the boundary.
+		            vn.c[j].b[k].likelihood = flipped_prev ? likelihood_levels.flip_thr : (likelihood_levels.flip_thr - 1);
+		            vn.c[j].b[k].flipped = flipped_prev;
+		          }
+
+		          // Increment update syndrome if flipped state changed
+		          if (flipped_prev != vn.c[j].b[k].flipped) {
+		            toggles_in_col++;
+		            if (tabu1 || tabu_rev)
+		              last_toggle_iter[vn_idx] = static_cast<int16_t>(iteration);
+		            for (i = 0; i < h_matrix.rows; i++) {
+		              m = (k + h_matrix.bits - h_matrix.element[i][j]) % h_matrix.bits;
+	              if (h_matrix.extra_bytes_of_parity == 0) {
+	                if (h_matrix.occupied[i][j])
                   cn.r[i].b[m] = 1 - cn.r[i].b[m];
               } else {
                 if (h_matrix.occupied[i][j] && (i < (h_matrix.rows - 1)))
@@ -2823,7 +3310,195 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
         }
       }
 
-      // 
+      // Column-level global escape + optional energy backtracking (no per-VN state; per-column tiny buffers only).
+      if (col_global_esc) {
+        int upgdbf_active_iter_eff2 = upgdbf_active_iter_base;
+        if ((phase > 0) && (upgdbf_active_phase_bonus > 0)) {
+          upgdbf_active_iter_eff2 = std::max(0, upgdbf_active_iter_eff2 - upgdbf_active_phase_bonus);
+        }
+        if (upgdbf_active_iter_eff2 > ldpc_decoder_input.iteration_limit)
+          upgdbf_active_iter_eff2 = ldpc_decoder_input.iteration_limit;
+        const bool upgdbf_stall_trigger2 =
+            upgdbf_stall_early && (phase > 0) && (iteration >= stall_count_w2_min_iter) &&
+            (stall_count_w2 >= std::min(stall_w2_esc_iters, ppbf_esc_iters));
+        const bool upgdbf_rand_enable2 = (iteration >= upgdbf_active_iter_eff2) || upgdbf_stall_trigger2;
+
+        const bool col_esc_active =
+            col_global_esc && upgdbf_rand_enable2 && (phase > 0) && (j == col_esc_target_col) &&
+            (stall_count_w2 >= col_global_esc_iters) &&
+            hamming_weight_lt_circ_thr &&
+            (iteration >= std::max(col_global_esc_min_iter, ldpc_decoder_input.post_iteration));
+        if (col_esc_active) {
+          const int sw_before_escape = f_check_node_weight(h_matrix, cn);
+
+          int max_w_in_col = -1;
+          for (int kk2 = 0; kk2 < h_matrix.bits; kk2++) {
+            const int k2 = kk2;
+            bool dnu = false;
+            dnu |= ((h_matrix.extra_bits_of_parity > 0) && (j == (h_matrix.cols - h_matrix.rows)) &&
+                    (k2 >= h_matrix.extra_bits_of_parity));
+            dnu |= ((h_matrix.extra_bits_of_userdata > 0) && (j == (h_matrix.cols - h_matrix.rows - 1)) &&
+                    (k2 >= h_matrix.extra_bits_of_userdata));
+            if (dnu)
+              continue;
+
+            int w2tmp = 0;
+            for (int ii2 = 0; ii2 < h_matrix.rows; ii2++) {
+              const int mm2 = (k2 + h_matrix.bits - h_matrix.element[ii2][j]) % h_matrix.bits;
+              if (h_matrix.extra_bytes_of_parity == 0) {
+                if (h_matrix.occupied[ii2][j] && (cn.r[ii2].b[mm2] == 1))
+                  w2tmp++;
+              } else {
+                if (h_matrix.occupied[ii2][j] && (ii2 < (h_matrix.rows - 1)) && (cn.r[ii2].b[mm2] == 1))
+                  w2tmp++;
+                if (h_matrix.occupied[ii2][j] && (ii2 == (h_matrix.rows - 1)) && (cn.r[ii2].b[mm2] == 1) &&
+                    h_matrix.mask[j][k2])
+                  w2tmp++;
+                if (h_matrix.fade[ii2][j] && (cn.r[ii2].b[mm2] == 1) && !h_matrix.mask[j][k2])
+                  w2tmp++;
+              }
+            }
+            if (w2tmp > max_w_in_col)
+              max_w_in_col = w2tmp;
+          }
+
+          if (max_w_in_col >= 2) {
+            int esc_k[8] = {};
+            int16_t esc_like[8] = {};
+            uint8_t esc_flip[8] = {};
+            int esc_cnt = 0;
+
+            for (int kk2 = 0; (kk2 < h_matrix.bits) && (esc_cnt < col_global_esc_max_toggles); kk2++) {
+              const int k2 = kk2;
+              bool dnu = false;
+              dnu |= ((h_matrix.extra_bits_of_parity > 0) && (j == (h_matrix.cols - h_matrix.rows)) &&
+                      (k2 >= h_matrix.extra_bits_of_parity));
+              dnu |= ((h_matrix.extra_bits_of_userdata > 0) && (j == (h_matrix.cols - h_matrix.rows - 1)) &&
+                      (k2 >= h_matrix.extra_bits_of_userdata));
+              if (dnu)
+                continue;
+
+              // Attack-only escape: only consider currently-unflipped bits (avoid oscillatory unflip).
+              if (vn.c[j].b[k2].flipped)
+                continue;
+              const int weak_thr = std::max(0, likelihood_levels.flip_thr - 1);
+              if (vn.c[j].b[k2].likelihood < weak_thr)
+                continue;
+
+              const bool soft0 = ldpc_decoder_input.corrupted_codeword.c[j].b[k2].bit_questionable;
+              const bool soft1 = ldpc_decoder_input.corrupted_codeword.c[j].b[k2].bit_questionable2;
+              const bool soft_unreliable2 =
+                  soft0 || ((ldpc_decoder_input.soft_bits > 1) && soft1);
+              if (col_global_esc_soft_only && !soft_unreliable2)
+                continue;
+
+              int w2tmp = 0;
+              for (int ii2 = 0; ii2 < h_matrix.rows; ii2++) {
+                const int mm2 = (k2 + h_matrix.bits - h_matrix.element[ii2][j]) % h_matrix.bits;
+                if (h_matrix.extra_bytes_of_parity == 0) {
+                  if (h_matrix.occupied[ii2][j] && (cn.r[ii2].b[mm2] == 1))
+                    w2tmp++;
+                } else {
+                  if (h_matrix.occupied[ii2][j] && (ii2 < (h_matrix.rows - 1)) && (cn.r[ii2].b[mm2] == 1))
+                    w2tmp++;
+                  if (h_matrix.occupied[ii2][j] && (ii2 == (h_matrix.rows - 1)) && (cn.r[ii2].b[mm2] == 1) &&
+                      h_matrix.mask[j][k2])
+                    w2tmp++;
+                  if (h_matrix.fade[ii2][j] && (cn.r[ii2].b[mm2] == 1) && !h_matrix.mask[j][k2])
+                    w2tmp++;
+                }
+              }
+              if (w2tmp != max_w_in_col)
+                continue;
+
+              if (cap_toggles_eff && (toggles_in_col >= max_toggles_per_col))
+                break;
+
+              // Energy-based probabilistic acceptance: p~1/2 for w>=3, p~1/4 for w==2.
+              const int prng_idx7 = (h_matrix.bits == 512) ? ((k2 + 79) & 511) : ((k2 + 79) & 255);
+              const int prng_idx8 = (h_matrix.bits == 512) ? ((k2 + 157) & 511) : ((k2 + 157) & 255);
+              const int prng_idx9 = (h_matrix.bits == 512) ? ((k2 + 211) & 511) : ((k2 + 211) & 255);
+              const bool r7 = (h_matrix.bits == 512) ? prng_512.b[prng_idx7] : prng_256.b[prng_idx7];
+              const bool r8 = (h_matrix.bits == 512) ? prng_512.b[prng_idx8] : prng_256.b[prng_idx8];
+              const bool r9 = (h_matrix.bits == 512) ? prng_512.b[prng_idx9] : prng_256.b[prng_idx9];
+              bool accept = false;
+              if (max_w_in_col >= 3) {
+                accept = r7;
+              } else if (max_w_in_col == 2) {
+                accept = r7 && r8 && r9; // ~1/8
+              }
+              if (!accept)
+                continue;
+
+              esc_k[esc_cnt] = k2;
+              esc_like[esc_cnt] = static_cast<int16_t>(vn.c[j].b[k2].likelihood);
+              esc_flip[esc_cnt] = static_cast<uint8_t>(vn.c[j].b[k2].flipped ? 1 : 0);
+              esc_cnt++;
+
+              // Force a single toggle by snapping likelihood across the threshold (pure 2bit, no extra state).
+              const bool flipped_prev2 = vn.c[j].b[k2].flipped;
+              vn.c[j].b[k2].likelihood = flipped_prev2 ? likelihood_levels.min : likelihood_levels.max;
+              vn.c[j].b[k2].flipped = (vn.c[j].b[k2].likelihood >= likelihood_levels.flip_thr);
+
+              if (flipped_prev2 != vn.c[j].b[k2].flipped) {
+                toggles_in_col++;
+                for (int ii2 = 0; ii2 < h_matrix.rows; ii2++) {
+                  const int mm2 = (k2 + h_matrix.bits - h_matrix.element[ii2][j]) % h_matrix.bits;
+                  if (h_matrix.extra_bytes_of_parity == 0) {
+                    if (h_matrix.occupied[ii2][j])
+                      cn.r[ii2].b[mm2] = 1 - cn.r[ii2].b[mm2];
+                  } else {
+                    if (h_matrix.occupied[ii2][j] && (ii2 < (h_matrix.rows - 1)))
+                      cn.r[ii2].b[mm2] = 1 - cn.r[ii2].b[mm2];
+                    if (h_matrix.occupied[ii2][j] && (ii2 == (h_matrix.rows - 1)) && h_matrix.mask[j][k2])
+                      cn.r[ii2].b[mm2] = 1 - cn.r[ii2].b[mm2];
+                    if (h_matrix.fade[ii2][j] && !h_matrix.mask[j][k2])
+                      cn.r[ii2].b[mm2] = 1 - cn.r[ii2].b[mm2];
+                  }
+                }
+              }
+            }
+
+            if (col_backtrack && (esc_cnt > 0)) {
+              const int sw_after_escape = f_check_node_weight(h_matrix, cn);
+              const bool need_backtrack =
+                  col_backtrack_require_improve ? (sw_after_escape >= sw_before_escape)
+                                                : (sw_after_escape > (sw_before_escape + col_backtrack_slack));
+              if (need_backtrack) {
+                // Backtrack: restore VN likelihoods + undo syndrome toggles for this column.
+                for (int r = 0; r < esc_cnt; r++) {
+                  const int k2 = esc_k[r];
+                  const int16_t like_prev2 = esc_like[r];
+                  const bool flip_prev2 = (esc_flip[r] != 0);
+                  const bool flip_cur2 = vn.c[j].b[k2].flipped;
+                  vn.c[j].b[k2].likelihood = like_prev2;
+                  vn.c[j].b[k2].flipped = flip_prev2;
+                  if (flip_cur2 != vn.c[j].b[k2].flipped) {
+                    if (toggles_in_col > 0)
+                      toggles_in_col--;
+                    for (int ii2 = 0; ii2 < h_matrix.rows; ii2++) {
+                      const int mm2 = (k2 + h_matrix.bits - h_matrix.element[ii2][j]) % h_matrix.bits;
+                      if (h_matrix.extra_bytes_of_parity == 0) {
+                        if (h_matrix.occupied[ii2][j])
+                          cn.r[ii2].b[mm2] = 1 - cn.r[ii2].b[mm2];
+                      } else {
+                        if (h_matrix.occupied[ii2][j] && (ii2 < (h_matrix.rows - 1)))
+                          cn.r[ii2].b[mm2] = 1 - cn.r[ii2].b[mm2];
+                        if (h_matrix.occupied[ii2][j] && (ii2 == (h_matrix.rows - 1)) && h_matrix.mask[j][k2])
+                          cn.r[ii2].b[mm2] = 1 - cn.r[ii2].b[mm2];
+                        if (h_matrix.fade[ii2][j] && !h_matrix.mask[j][k2])
+                          cn.r[ii2].b[mm2] = 1 - cn.r[ii2].b[mm2];
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // Shift check nodes for this column (for debug / alignment).
       for (i = 0; i < h_matrix.rows; i++) {
         if (h_matrix.occupied[i][j] || h_matrix.fade[i][j])
           for (k = 0; k < h_matrix.bits; k++)
@@ -2844,22 +3519,88 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
       }
     }
 
-    syndrome_weight = f_check_node_weight(h_matrix, cn);
-    finished = (syndrome_weight == 0);
-    syndrome_weight_r[4] = syndrome_weight_r[3];
-    syndrome_weight_r[3] = syndrome_weight_r[2];
-    syndrome_weight_r[2] = syndrome_weight_r[1];
-    syndrome_weight_r[1] = syndrome_weight_r[0];
-    syndrome_weight_r[0] = syndrome_weight;
+		    syndrome_weight = f_check_node_weight(h_matrix, cn);
+		    finished = (syndrome_weight == 0);
+		    syndrome_weight_r[4] = syndrome_weight_r[3];
+		    syndrome_weight_r[3] = syndrome_weight_r[2];
+		    syndrome_weight_r[2] = syndrome_weight_r[1];
+		    syndrome_weight_r[1] = syndrome_weight_r[0];
+		    syndrome_weight_r[0] = syndrome_weight;
 
-    clock_cycles++;
-    iteration++;
-  }
+			    if (smooth_fail && (finished == 0) && (iteration >= smooth_start_iter)) {
+			      if (smooth_sum.empty())
+			        smooth_sum.assign(h_matrix.cols * h_matrix.bits, 0);
+			      for (int jj = 0; jj < h_matrix.cols; jj++) {
+			        for (int kk = 0; kk < h_matrix.bits; kk++) {
+			          const int vn_idx = jj * h_matrix.bits + kk;
+			          const bool decoded_bit = ldpc_decoder_input.corrupted_codeword.c[jj].b[kk].bit_hard ^ vn.c[jj].b[kk].flipped;
+			          smooth_sum[vn_idx] += decoded_bit ? -1 : 1; // 0->+1, 1->-1
+			        }
+			      }
+			    }
 
-  if (VERBOSITY > 0) {
-    printf("### AFTER %4d ITERATIONS, CODEWORD HAS CHECK NODES:\n", iteration);
-    f_print_check_nodes(cn, h_matrix.rows, h_matrix.bits);
-  }
+					    clock_cycles++;
+					    iteration++;
+						    if ((finished == 0) && (give_up == 0) && (iteration >= stall_min_iter)) {
+						      if (syndrome_weight < best_sw_phase) {
+						        best_sw_phase = syndrome_weight;
+						        stall_count = 0;
+						      } else {
+						        stall_count++;
+						      }
+						    }
+						    if ((stall_w2_esc || ppbf_esc) && (finished == 0) && (give_up == 0)) {
+						      if (syndrome_weight < best_sw_phase_w2) {
+						        best_sw_phase_w2 = syndrome_weight;
+						        if (iteration >= stall_count_w2_min_iter)
+						          stall_count_w2 = 0;
+						      } else if (iteration >= stall_count_w2_min_iter) {
+						        stall_count_w2++;
+						      }
+						    }
+						    if (restart_on_stall && (finished == 0) && (give_up == 0) && ((phase + 1) < restart_phases) &&
+						        (iteration >= stall_min_iter) && (stall_count >= stall_iters)) {
+						      break; // early restart next phase
+						    }
+					  }
+
+				    if (smooth_fail && (finished == 0) && !smooth_sum.empty()) {
+				      // If the last phase fails, try a hard-decision majority vote over the tail window.
+				      s_hard_codeword hard_codeword_smoothed = {};
+			      for (int jj = 0; jj < h_matrix.cols; jj++) {
+			        for (int kk = 0; kk < h_matrix.bits; kk++) {
+			          const int vn_idx = jj * h_matrix.bits + kk;
+			          const int sum = smooth_sum[vn_idx];
+			          bool decoded_bit;
+			          if (sum > 0)
+			            decoded_bit = 0;
+			          else if (sum < 0)
+			            decoded_bit = 1;
+			          else
+			            decoded_bit = ldpc_decoder_input.corrupted_codeword.c[jj].b[kk].bit_hard ^ vn.c[jj].b[kk].flipped;
+			          hard_codeword_smoothed.c[jj].b[kk] = decoded_bit;
+			        }
+			      }
+			      s_check_nodes cn_smoothed = f_check_nodes(h_matrix, hard_codeword_smoothed);
+			      const int sw_smoothed = f_check_node_weight(h_matrix, cn_smoothed);
+			      if (sw_smoothed == 0) {
+			        cn = cn_smoothed;
+			        syndrome_weight = 0;
+			        finished = 1;
+			        for (int jj = 0; jj < h_matrix.cols; jj++) {
+			          for (int kk = 0; kk < h_matrix.bits; kk++) {
+			            vn.c[jj].b[kk].flipped =
+			                ldpc_decoder_input.corrupted_codeword.c[jj].b[kk].bit_hard ^ hard_codeword_smoothed.c[jj].b[kk];
+			          }
+			        }
+			      }
+			    }
+			  }
+
+		  if (VERBOSITY > 0) {
+		    printf("### AFTER %4d ITERATIONS, CODEWORD HAS CHECK NODES:\n", iteration);
+	    f_print_check_nodes(cn, h_matrix.rows, h_matrix.bits);
+	  }
 
   ldpc_decoder_output.iterations = iteration;
   ldpc_decoder_output.clock_cycles = clock_cycles;

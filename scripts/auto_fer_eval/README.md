@@ -1,10 +1,10 @@
-# auto\_fer\_eval：自适应 SNR 点位搜索与作业调度（推荐）
+# auto\_fer\_eval：自适应点位搜索与作业调度（SNR/K，推荐）
 
-本目录提供一个 **不依赖第三方库** 的 Python 脚本 `auto_fer_eval/auto_fer_eval.py`，用于在 AWGN/TAWGN 信道下自动完成：
+本目录提供一个 **不依赖第三方库** 的 Python 脚本 `auto_fer_eval/auto_fer_eval.py`，用于在 AWGN/TAWGN/ERR\_INJ 信道下自动完成：
 
 - **pilot**：定位瀑布区起点（工程判据：$FER\approx0.9\sim1$）
 - **main scan**：按固定步长（默认 0.1 dB）向更好信道方向扫描，并发提交作业
-- **trigger + kill**：当任一点满足 $FER_{eff}\le 10^{-4}$ 时，立即 kill 所有更高 SNR 的 in-flight 作业（默认无 margin）
+- **trigger + kill**：当任一点满足 $FER_{eff}\le 10^{-4}$ 时，立即 kill 所有“更好信道方向”的 in-flight coarse 作业（默认无 margin）
 - **watchdog（可选）**：若某个 coarse 点在 RUN 态运行超时（例如 3 小时），自动 kill，并解析日志中最后一个完整 `[SIM]` 块；同时限制 coarse 扫描上界，避免重复提交更深 SNR 的 coarse 点位
 - **deep scan**：用 $10^{-2}\sim10^{-4}$ 区间点对 `RAW BER`–`FER` 做双对数拟合估计 stop，并按 0.1/0.05/0.025 dB **并行**下探直到目标深度（fine 阶段默认不启用 watchdog）
 - **finalize（fit-window）**：对参与拟合窗口内的点，若日志缺少最终 `[STATISTICS]` 段，则删除并重跑以生成完整统计块（默认仅约束 $snr\le snr\_trigger$）
@@ -21,13 +21,17 @@
 
 脚本假设可执行程序的命令行形如：
 
-`<exe> <sim_mode> <config.cnfg> <ch_model> <snr> [extra...]`
+`<exe> <sim_mode> <config.cnfg> <ch_model> <ch_para> [extra...]`
 
 例如（本仓库常见）：
 
 `./ssd_fc_flip_eq LDPC config/21x150_hre0_dis.cnfg AWGN 3.7 0 ./matrix`
 
 其中 `extra...` 由你在配置里通过 `cmd_extra_args` 提供（例如 `matrix_id` 与 `matrix_dir`）。
+
+`ch_para` 的含义由 `ch_model` 决定：
+- `AWGN/TAWGN`：`ch_para` 为 SNR（浮点数，单位 dB）
+- `ERR_INJ`：`ch_para` 为注错数量 $K$（整数）
 
 重要：本仓库里 `SSD_FC.cpp/SSD_FC_flip_eq.cpp/SSD_FC_hre2.cpp` 在 AWGN/TAWGN 等非 `CLEAN` 模式下解析参数为：
 
@@ -63,7 +67,9 @@
 `python3 auto_fer_eval/auto_fer_eval.py adaptive --config <your_case>.toml`
 
 说明：
-- `adaptive` 当前仅支持 `axis_type=snr`（因此只适用于 AWGN/TAWGN 类模型）。
+- `adaptive` 支持两类轴（默认可按 `ch_model` 自动推断）：
+  - `axis_type=snr`：适用于 `AWGN/TAWGN`（自变量为 SNR）
+  - `axis_type=k`：适用于 `ERR_INJ`（自变量为 $K$）
 - 若你在无 LSF 的环境下想先验证调度逻辑，可用 `executor=local`。
 
 ---
@@ -86,7 +92,7 @@ flowchart TD
   C --> D["复制 config -> config_main.cnfg
   patch max_sim = main_max_sim_num"]
   D --> E["Pilot（本地同步 run_point）
-  双向搜索 start_snr"]
+  双向搜索 start_x"]
   E --> F["Main scan（coarse，并行）
   executor=local 或 lsf
   submit/poll 作业
@@ -95,15 +101,15 @@ flowchart TD
   FER_eff <= trigger_fer
   且用于决策的数据足够可靠"]
   G -->| no | F
-  G -->| yes | H["Kill 更高 SNR 的 coarse 作业
-  snr > snr_trigger + kill_margin"]
+  G -->| yes | H["Kill 更好信道方向的 coarse 作业
+  x beyond trigger + kill_margin"]
   H --> CL["Cleanup 无效日志
   删除 fail_cw 不足/缺失的点
-  仅处理 snr > snr_trigger"]
+  仅处理 x beyond trigger"]
   CL --> BF["Backfill（并行）
   相邻点 FER 跨度过大则补点
   step = backfill_step"]
-  BF --> I["拟合 stop SNR
+  BF --> I["拟合 stop_x
   log10(FER_eff) vs log10(RAW_BER)"]
   I --> J["Deep scan（fine，并行）
   step = step_low
@@ -126,7 +132,7 @@ flowchart TD
   C --> D["Copy config -> config_main.cnfg
   patch max_sim = main_max_sim_num"]
   D --> E["Pilot (local sync run_point)
-  bidirectional search start_snr"]
+  bidirectional search start_x"]
   E --> F["Main scan (coarse, parallel)
   executor=local or lsf
   submit and poll jobs
@@ -135,15 +141,15 @@ flowchart TD
   FER_eff <= trigger_fer
   AND reliable for decision"]
   G -->| no | F
-  G -->| yes | H["Kill deeper SNR coarse jobs
-  snr > snr_trigger + kill_margin"]
+  G -->| yes | H["Kill deeper coarse jobs (better direction)
+  x beyond trigger + kill_margin"]
   H --> CL["Cleanup invalid logs
   delete logs with no fail_cw
-  for snr > snr_trigger"]
+  for x beyond trigger"]
   CL --> BF["Backfill gaps (parallel)
   where FER jumps > threshold decades
   step = backfill_step"]
-  BF --> I["Fit stop SNR from manifest
+  BF --> I["Fit stop_x from manifest
   log10(FER_eff) vs log10(RAW_BER)"]
   I --> J["Deep scan (fine, parallel)
   step = step_low
@@ -167,7 +173,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  S["start_snr"] --> XN["x_next = quantize(start_snr, main_step)"]
+  S["start_x"] --> XN["x_next = quantize(start_x, main_step)"]
 
   XN --> FILL["填充流水线
   直到达到并发上限
@@ -175,17 +181,17 @@ flowchart TD
   FILL --> POLL["轮询 in-flight 作业
   更新 jobs.json 状态"]
 
-  POLL --> TO["超时检查
+  POLL --> TO["超时检查（跳过第一个提交的 job）
   RUN-time > max_job_runtime_sec"]
   TO -->| yes | KILL["Kill 超时作业
-  并取消更高 SNR 的 coarse 作业"]
+  并取消更好信道方向的 coarse 作业"]
   KILL --> PARSE["解析最后一个完整 SIM 块
   等待 timeout_log_grace_sec"]
   PARSE --> REC["写入 manifest.json
   写入 jobs.json 状态"]
   REC --> CAP["限制 coarse 上界
-  x_stop_coarse = min(x_stop_coarse, snr_timeout)
-  不再继续提交更高 SNR 的 coarse 点位"]
+  x_stop_coarse = x_timeout
+  不再继续提交更好信道方向的 coarse 点位"]
   CAP --> FILL
 
   TO -->| no | DONE["作业完成检查"]
@@ -198,9 +204,9 @@ flowchart TD
   REC2 --> TRIG["触发判断
   FER_eff <= trigger_fer
   且用于触发的判据足够可靠"]
-  TRIG -->| yes | KILL2["Kill 更高 SNR 的 coarse 作业
-  snr > snr_trigger + kill_margin"] --> END["Main scan 结束
-  返回 snr_trigger"]
+  TRIG -->| yes | KILL2["Kill 更好信道方向的 coarse 作业
+  x beyond trigger + kill_margin"] --> END["Main scan 结束
+  返回 trigger"]
   TRIG -->| no | FILL
 ```
 
@@ -208,7 +214,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  S["start_snr"] --> XN["x_next = quantize(start_snr, main_step)"]
+  S["start_x"] --> XN["x_next = quantize(start_x, main_step)"]
 
   XN --> FILL["Fill pipeline
   submit x_next until capacity reached
@@ -216,16 +222,16 @@ flowchart TD
   FILL --> POLL["Poll in-flight jobs
   update jobs.json state"]
 
-  POLL --> TO["Timeout check
+  POLL --> TO["Timeout check (skip 1st submitted job)
   RUN-time > max_job_runtime_sec"]
   TO -->| yes | KILL["Kill timed-out job
-  and cancel higher SNR jobs"]
+  and cancel deeper (better-direction) coarse jobs"]
   KILL --> PARSE["Parse last complete SIM block
   within timeout_log_grace_sec"]
   PARSE --> REC["Record metrics to manifest.json
   record job state to jobs.json"]
-  REC --> CAP["Set x_stop_coarse = min(x_stop_coarse, snr_timeout)
-  Do not schedule even higher SNR coarse points"]
+  REC --> CAP["Set x_stop_coarse = x_timeout
+  Do not schedule deeper (better-direction) coarse points"]
   CAP --> FILL
 
   TO -->| no | DONE["Job done check"]
@@ -237,9 +243,9 @@ flowchart TD
   REC2 --> TRIG["Trigger check
   FER_eff <= trigger_fer
   AND reliable for trigger"]
-  TRIG -->| yes | KILL2["Kill deeper SNR coarse jobs
-  snr > snr_trigger + kill_margin"] --> END["Main scan done
-  return snr_trigger"]
+  TRIG -->| yes | KILL2["Kill deeper coarse jobs (better direction)
+  x beyond trigger + kill_margin"] --> END["Main scan done
+  return trigger"]
   TRIG -->| no | FILL
 ```
 
@@ -250,16 +256,16 @@ flowchart TD
 
 ### 2.1 pilot（同步执行，双向搜索起点）
 
-从 `snr_init` 出发做粗扫（步长 `pilot_step`），按以下规则双向移动：
+从 `snr_init` 出发做粗扫（步长 `pilot_step`；注意该参数名沿用历史，实为 axis seed：SNR 或 $K$），按以下规则双向移动：
 
-- 若当前点 $FER\le fer\_hi$（说明“太好”），向更差信道方向（降低 SNR）移动，直到找到一个 $FER>fer\_hi$ 的点形成 bracket；
-- 若当前点 $FER>fer\_hi$（说明“太差”），向更好信道方向（升高 SNR）移动，直到首次满足 $FER\le fer\_hi$；
+- 若当前点 $FER\le fer\_hi$（说明“太好”），向更差信道方向移动，直到找到一个 $FER>fer\_hi$ 的点形成 bracket；
+- 若当前点 $FER>fer\_hi$（说明“太差”），向更好信道方向移动，直到首次满足 $FER\le fer\_hi$；
 - 若首次满足 $FER\le fer\_hi$ 的点“过好”（$FER<fer\_pilot\_too\_low$），脚本会在 bracket 内用 `0.1/0.05/0.025` 逐级回填，尽量把边界拉回到 $FER\approx0.9$ 附近；
-- 最终返回 `start_snr = found_low_at - low_margin`（回退一点，确保起点更接近 $FER\approx1$）。
+- 最终返回 `start_x = found_low_at - direction*low_margin`（回退一点，确保起点更接近 $FER\approx1$）。
 
 ### 2.2 main scan（并发提交，固定步长）
 
-从 `start_snr` 出发，按 `main_step` 逐点向更高 SNR 扫描；并发上限为 `max_in_flight`。
+从 `start_x` 出发，按 `main_step` 逐点向“更好信道方向”扫描；并发上限为 `max_in_flight`。
 
 作业由执行器提交：
 - `executor="lsf"`：使用 `bsub/bjobs/bkill` 提交/轮询/取消
@@ -267,31 +273,29 @@ flowchart TD
 
 ### 2.3 触发与 kill（你关心的核心逻辑）
 
-当任一点完成并满足 $FER_{eff}\le trigger\_fer$（默认 $10^{-4}$）时，记为 `snr_trigger`，并立即 kill 所有满足：
+当任一点完成并满足 $FER_{eff}\le trigger\_fer$（默认 $10^{-4}$）时，记为 `trigger`，并立即 kill 所有处于“更好信道方向”且满足 `kill_margin` 条件的 in-flight coarse 作业（你要求“不保留”，因此建议 `kill_margin=0`）。
 
-$snr > snr\_trigger + kill\_margin$
+此外（coarse watchdog 行为）：为避免 warm-up 误杀，main scan 的第一个实际提交作业默认不参与超时判断；其余 coarse 点若在 RUN 态运行时间超过 `max_job_runtime_sec`，脚本会：
 
-的 in-flight 作业。你要求“不保留”，因此建议 `kill_margin=0`。
-
-此外（coarse watchdog 行为）：若某个 coarse 点在 RUN 态运行时间超过 `max_job_runtime_sec`，脚本会：
-
-- kill 该点，并取消所有更高 SNR 的 coarse in-flight 作业
+- kill 该点，并取消所有“更好信道方向”的 coarse in-flight 作业
 - 尽力解析日志里最后一个完整 `[SIM]` 块（等待 `timeout_log_grace_sec` 秒刷盘）并写入 `manifest.json`；若仍解析不到 `LDPC FER`，则仅告警并跳过该点（下次重启可能解析成功）
-- 将 coarse 扫描上界更新为 $x\\_stop\\_coarse=\\min(x\\_stop\\_coarse, snr\\_{timeout})$，从而 **不再提交更高 SNR 的 coarse 点位**
+- 将 coarse 扫描上界更新为 $x\\_stop\\_coarse=x\\_{timeout}$，从而 **不再提交更好信道方向的 coarse 点位**
 
 ### 2.4 backfill（并行回填）
 
 当 main scan 完成后，若相邻点 FER 跳变超过 `backfill_decade_threshold`（默认 2.0，即 100 倍），脚本会用 `backfill_step`（默认 `step_mid`）回填中间点。
 
-- 回填在 deep scan **之前**执行，以便回填点可以参与 fit 估计 stop SNR；
+- 回填在 deep scan **之前**执行，以便回填点可以参与 fit 估计 stop\_x；
 - 回填使用并行提交，受 `max_in_flight` 限制。
 
 ### 2.5 deep scan（并行下探）
 
 当 main scan 已触发 `snr_trigger`（或有已完成点）后：
 
-- 若启用 `fit_enable`，脚本会在已完成点里筛选 $FER_{eff}\in[fit\_fer\_lo,fit\_fer\_hi]$（默认 $10^{-5}\sim10^{-1}$）且具备 `RAW BER` 的点，对 $\log_{10}(FER_{eff})$–$\log_{10}(RAW\_BER)$ 做线性拟合，并据此估计达到 `fit_target_fer` 所需的 stop SNR；
-- 随后从 `snr_trigger`（或最低 FER 点）到 stop SNR 之间，按 `step_low`（默认 0.025）生成所有点位，**并行提交**（受 `max_in_flight` 限制）；
+- 若启用 `fit_enable`，脚本会在已完成点里筛选 $FER_{eff}\in[fit\_fer\_lo,fit\_fer\_hi]$（默认 $10^{-5}\sim10^{-1}$）且具备 `RAW BER` 的点，对 $\log_{10}(FER_{eff})$–$\log_{10}(RAW\_BER)$ 做线性拟合，并据此估计达到 `fit_target_fer` 所需的 stop\_x：
+  - `axis_type=snr`：先由拟合得到目标 `RAW_BER`，再按 `src/transceiver.cpp` 的 `snr->rber` 关系做逆变换反推 stop SNR（脚本会从已完成点的 `TheoRBER`（若缺失则回退 `RAW_BER`）反推出常数偏移 $snr\\_{code}-snr$，以匹配代码率项）
+  - `axis_type=k`：通过估计 $N\\approx\\mathrm{median}(K/RAW\\_BER)$ 反推 stop $K$
+- 随后从 `trigger`（或最低 FER 点）到 stop\_x 之间，按 `step_low` 生成所有点位，**并行提交**（受 `max_in_flight` 限制）；
 - 当任一点达到 $FER_{eff}\le fer\_lo$ 时，取消剩余 in-flight 作业并结束。
 
 ### 2.6 finalize（补全 fit-window 的最终统计块）
@@ -301,7 +305,7 @@ $snr > snr\_trigger + kill\_margin$
 为保证最终用于拟合/汇报的数据一致性，脚本会对满足以下条件的点做补全重跑：
 
 - $FER_{eff}\in[fit\_fer\_lo,fit\_fer\_hi]$（拟合窗口）
-- $snr \le snr\_trigger$（按你的约束，仅强制补全 trigger 之前的点）
+- 仅强制补全 trigger “之前/保留侧”的点（即不在 trigger 的更好信道方向上）
 - 日志缺少 `[STATISTICS] Total packets simulated` 与 `[STATISTICS] LDPC FER`
 
 动作：删除旧 log 并重跑该点，直到产出包含 `[STATISTICS]` 的完整 log（并行提交，受 `max_in_flight` 限制）。
@@ -322,10 +326,10 @@ $snr > snr\_trigger + kill\_margin$
 对每个 `case.name`，输出在：
 
 - `out_dir/<case.name>/adaptive/pilot/`
-  - `<log_prefix>_pilot_snrX.log`
+  - `<log_prefix>_pilot_snrX.log` 或 `<log_prefix>_pilot_kX.log`
   - `manifest.json`
 - `out_dir/<case.name>/adaptive/main/`
-  - `<log_prefix>_snrX.log`
+  - `<log_prefix>_snrX.log` 或 `<log_prefix>_kX.log`
   - `manifest.json`
   - `jobs.json`（任务状态数据库：记录 bsub/job_id、状态迁移、kill 原因、时间戳；stage=main/backfill/deep/finalize_fit）
 - `out_dir/<case.name>/adaptive/config_pilot.cnfg`
@@ -359,13 +363,15 @@ $snr > snr\_trigger + kill\_margin$
 - `sim_mode`：第 1 个参数（例如 `"LDPC"`）
 - `config`：原始 `.cnfg` 路径（脚本会生成 `config_pilot.cnfg/config_main.cnfg`）
 - `ch_model`：信道模型字符串（例如 `"AWGN"` 或 `"TAWGN"`）
-- `cmd_extra_args`：在 `snr` 后追加的参数数组（例如 `["0","./matrix"]`）
+- `cmd_extra_args`：在 `ch_para` 后追加的参数数组（例如 `["0","./matrix"]`）
 - `out_dir`：输出根目录
 - `log_prefix`：日志前缀（建议不同实验改前缀避免混淆）
 
 扫描范围与判据：
 
-- `snr_min` / `snr_max`：SNR 搜索范围（adaptive 当前只用这两个）
+- 扫描范围（按轴类型二选一）：
+  - `axis_type=snr`：`snr_min` / `snr_max`
+  - `axis_type=k`：`k_min` / `k_max`
 - `fer_hi`：瀑布区起点判据（推荐 0.9）
 - `fer_lo`：深挖停止判据（例如 $10^{-6}$；按预算也可设 $10^{-5}$）
 

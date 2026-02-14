@@ -36,27 +36,27 @@
 
 ## 1. 44-bit 字段定义与解码
 
-IBEX 当前将调度信息打包为 44 bit（其中低 41 bit 有效，高 3 bit 通常为 0；占位哨兵除外）。
+IBEX 当前将调度信息打包为 44 bit（其中低 42 bit 有效，高 2 bit 通常为 0；占位哨兵除外）。
 
 字段分布（见 `IBEX/src/ldpc_codec.cpp` 中 RDEC scheduler packing）：
 
 - `[6:0]` `col`（7 bit）：列号
 - `[15:7]` `shift`（9 bit）：本 circulant 的 shift（$0..Z-1$）
-- `[19:16]` `pre_cir_row`（4 bit）：同列前驱 circulant 的行号
-- `[28:20]` `shift_delta`（9 bit）：$(shift - pre\_shift)\bmod Z$
-- `[29]` `last_in_row`（1 bit）：行内结束标志（注意：当前实现是“提前 1 cycle”，详见第 5 节）
-- `[30]` `flag_64_extra_userdata`（1 bit）：是否位于 extra user-data payload 列
-- `[31]` `mask_flag`（1 bit）：是否需要 lane mask（MASK/INVMASK）
-- `[40:32]` `mask_shift`（9 bit）：同列最后一行 circulant 的 shift（以 9 bit 二补码表示 $[-256,255]$）
+- `[20:16]` `pre_cir_row`（5 bit）：同列前驱 circulant 的行号
+- `[29:21]` `shift_delta`（9 bit）：$(shift - pre\_shift)\bmod Z$
+- `[30]` `last_in_row`（1 bit）：行内结束标志（注意：当前实现是“提前 1 cycle”，详见第 5 节）
+- `[31]` `flag_64_extra_userdata`（1 bit）：是否位于 extra user-data payload 列
+- `[32]` `mask_flag`（1 bit）：是否需要 lane mask（MASK/INVMASK）
+- `[41:33]` `mask_shift`（9 bit）：同列最后一行 circulant 的 shift（以 9 bit 二补码表示 $[-256,255]$）
 
 建议的解码公式（`uint64_t word`）：
 
 - $col = word\ \&\ 0x7F$
 - $shift = (word >> 7)\ \&\ 0x1FF$
-- $pre\_row = (word >> 16)\ \&\ 0xF$
-- $shift\_delta = (word >> 20)\ \&\ 0x1FF$
-- $last = (word >> 29)\ \&\ 1$
-- $flag\_{64} = (word >> 30)\ \&\ 1$
+- $pre\_row = (word >> 16)\ \&\ 0x1F$
+- $shift\_delta = (word >> 21)\ \&\ 0x1FF$
+- $last = (word >> 30)\ \&\ 1$
+- $flag\_{64} = (word >> 31)\ \&\ 1$
 
 ---
 
@@ -272,7 +272,7 @@ flowchart TD
 这意味着：若该 row 有 `row_wt` 个真实条目，则 `last_in_row=1` 出现在倒数第二个真实条目上，而不是最后一个。
 
 如果你在解析时把它当成“最后一个条目”，就会出现边界错位的现象。  
-此外，若你没有过滤 `FFFFFFFFFFF` 占位哨兵，占位词的 bit[29] 也为 1，会进一步造成“一行出现两个 1”的错觉。
+此外，若你没有过滤 `FFFFFFFFFFF` 占位哨兵，占位词的 bit[30] 也为 1，会进一步造成“一行出现两个 1”的错觉。
 
 建议的自检顺序：
 
@@ -373,4 +373,62 @@ flowchart LR
   end
 
   X1 -. "P1插入点：原始序列第一次遇到 extra 的位置" .-> EB
+```
+
+---
+
+## 10. `ldpc_dec_layer2()` 是否“遵循 rdec_sched 的顺序”？
+
+你问的“`ldpc_dec_layer2` 有没有遵循什么调度顺序”，要把 **软件执行顺序** 与 **导出给 RTL 的 `rdec_sched` 顺序**区分开。
+
+结论（以当前 `src/ldpc_codec.cpp` 的实现为准）：
+
+- **`ldpc_dec_layer2()` 有确定的遍历顺序**：`itr`（迭代）→ `layer`（row）→ 该 row 内的每个非零 circulant。
+- **它不读取 `rdec_sched` 文件，也不按 `rdec_sched` 的“按 j 分组”重排来执行**；`rdec_sched` 的分组/插占位主要是为了硬件访存约束与固定节拍消费 extra-userdata 列。
+
+### 10.1 软件 `ldpc_dec_layer2()` 的“实际遍历顺序”
+
+在 `ldpc_dec_layer2(s_h_matrix)` 中，row 内 circulant 的遍历来自：
+
+- `for (e = mod2sparse_first_in_row(qc_bm, layer); ...; e = mod2sparse_next_in_row(e))`
+
+也就是说：**row 内顺序等于 `qc_bm` 里该 row 的链表顺序**。
+
+在当前工程的 IBEX/`Z=512` 路径里，`qc_bm` 是按 `(row i, col j)` 从小到大扫描插入的，因此在实践中你会看到 row 内遍历通常表现为 **`col` 升序**（可由 `HM_ROW_order_*.txt` 佐证）。
+
+> 注意：`rdec_sched` 的 row 内顺序并不是简单的 `col` 升序，它的主排序键是第 4 节的 $j_e$（由 `pre_row` 决定），因此两者不能混为一谈。
+
+### 10.2 软件与 `rdec_sched` 的关键差异点
+
+1) **是否按 `pre_row == (row+j)%bm_m` 分组**
+   - `rdec_sched`：会按 `j=1..bm_m-1` 分组输出（第 4 节与 4.2 小例子）。
+   - `ldpc_dec_layer2()`：不分组，直接按 `qc_bm` 的 row 链表顺序走。
+
+2) **是否会出现 `44'hFFFFFFFFFFF` 占位**
+   - `rdec_sched`：为 extra-userdata 缺失列插入占位（第 3 节、第 6 节）。
+   - `ldpc_dec_layer2()`：遍历的对象是 `qc_bm` 的真实非零项；占位并不存在于 `qc_bm`，因此软件解码不会“看到”占位条目。
+
+3) **同一 row 内处理一个 circulant 后是否立即生效**
+   - `ldpc_dec_layer2()`：每处理完一个 circulant 就立刻写回 `cn_q_mem[e->col][i]`（layered decoding 的典型特征）。
+   - `rdec_sched`：仅定义“硬件该按什么顺序喂 entry”；是否即时写回取决于 RTL 实现，但通常也会按 entry 粒度更新。
+
+### 10.3 推荐的正确心智模型
+
+- `rdec_sched`：**硬件执行序列/ROM 内容**（为满足访存约束、插占位以保证固定节拍）。
+- `ldpc_dec_layer2()`：**软件 reference 算法**（不考虑硬件冲突，按 `qc_bm` 的自然遍历顺序执行）。
+
+如果你的目标是“RTL 行为与软件逐 entry 严格等价”，那需要让软件也按 `rdec_sched` 驱动（当前代码未实现）；否则更常见的验收方式是：对齐 BER/FER、迭代次数分布等统计指标，而非逐条 entry 完全一致。
+
+```mermaid
+flowchart LR
+  subgraph SW["软件: ldpc_dec_layer2()"]
+    A1["itr loop"] --> A2["layer = 0..bm_m-1"]
+    A2 --> A3["for e in qc_bm.row[layer] (链表顺序)"]
+    A3 --> A4["update cn_q_mem[e.col] 立即生效"]
+  end
+
+  subgraph SCH["导出: rdec_sched"]
+    B1["固定 ROW i"] --> B2["按 j=1..bm_m-1 分组输出 (pre_row=(i+j)%bm_m)"]
+    B2 --> B3["row 末尾追加 extra 缺失列占位 FFFFFFFFFFF"]
+  end
 ```

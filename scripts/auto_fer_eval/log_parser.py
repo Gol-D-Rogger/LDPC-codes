@@ -55,7 +55,7 @@ def _parse_statistics(text: str) -> ParsedMetrics:
     # We parse the last matching "Decoder average iteration(s)" line (case-insensitive).
     retry_it = _last_float(
         text,
-        rf"(?i)^\s*\[STATISTICS\]\s+.*\bdecoder\b\s+average\s+iteration(?:s)?\s*:\s*{_NUM}\s*$",
+        rf"(?i)^\s*\[STATISTICS\]\s+.*\bdecoder\b\s+average\s+iteration(?:s)?\s*:?\s*{_NUM}\s*$",
     )
     total_packets = _last_int(text, r"^\s*\[STATISTICS\]\s+Total packets simulated:\s*([0-9]+)\s*$")
     return ParsedMetrics(
@@ -95,7 +95,7 @@ def _parse_sim_block(text: str) -> ParsedMetrics:
     ldpc_fer = _last_float(text, rf"^\s*\[SIM\]\s+LDPC\s+FER\s*:\s*{_NUM}\s*$")
     retry_it = _last_float(
         text,
-        rf"(?i)^\s*\[SIM\]\s+.*\bdecoder\b\s+average\s+iteration(?:s)?\s*:\s*{_NUM}\s*$",
+        rf"(?i)^\s*\[SIM\]\s+.*\bdecoder\b\s+average\s+iteration(?:s)?\s*:?\s*{_NUM}\s*$",
     )
     return ParsedMetrics(
         raw_ber=raw_ber,

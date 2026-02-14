@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import subprocess
 import time
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -59,10 +60,18 @@ class DryRunExecutor:
     Prints what would be submitted without actually running anything.
     """
 
-    def __init__(self, *, queue_slow: str = "", queue_fast: str = "", log_base_dir: str = "") -> None:
+    def __init__(
+        self, 
+        *, 
+        queue_slow: str = "", 
+        queue_fast: str = "", 
+        log_base_dir: str = "",
+        bsub_extra: Optional[list[str]] = None,
+        ) -> None:
         self.queue_slow = queue_slow
         self.queue_fast = queue_fast
         self.log_base_dir = log_base_dir
+        self.bsub_extra = list(bsub_extra or [])
         self._job_counter = 0
         self._submitted_jobs: list[DryRunJob] = []
 
@@ -88,10 +97,19 @@ class DryRunExecutor:
                     actual_log_path = Path(self.log_base_dir).joinpath(*rel_parts)
                     break
 
-        queue_str = queue or "(default)"
-        print(f'[dry-run] bsub -q "{queue_str}" -J "{job_name}" -o "{actual_log_path}"')
-        print(f"          cmd: {' '.join(cmd)}")
-        print(f"          cwd: {cwd}")
+        cwd_abs = str(Path(cwd).resolve())
+
+        bsub: list[str] = ["bsub", "-o", str(actual_log_path), "-cwd", cwd_abs]
+        use_queue = queue  # 注意：DryRunExecutor 只接受调用方传入的 queue（通常是 queue_slow/queue_fast）
+        if use_queue:
+            bsub.extend(["-q", use_queue])
+        if job_name:
+            bsub.extend(["-J", job_name])
+        bsub.extend(self.bsub_extra)
+        bsub.extend(cmd)
+
+        cmd_str = " ".join(shlex.quote(s) for s in bsub)
+        print(f"[dry-run] {cmd_str}")
 
         job = DryRunJob(cmd=cmd, cwd=cwd, log_path=actual_log_path, job_id=self._job_counter, queue=queue)
         self._submitted_jobs.append(job)
@@ -345,8 +363,12 @@ class LsfExecutor:
             stat = stat.upper()
             if stat == "DONE":
                 return JobState(state="DONE", done=True, ok=True)
-            if stat in {"EXIT", "ZOMBI", "UNKWN"}:
+            if stat in {"EXIT", "ZOMBI"}:
                 return JobState(state="EXIT", done=True, ok=False)
+            if stat == "UNKWN":
+                # UNKWN is often transient (e.g., exec host / sbatchd unreachable).
+                # Do NOT map it to EXIT. Prefer log-based truth if available.
+                return self._fallback_state_from_log(job)
             if stat in {"PEND", "PSUSP"}:
                 return JobState(state="PEND", done=False, ok=False)
             return JobState(state="RUN", done=False, ok=False)

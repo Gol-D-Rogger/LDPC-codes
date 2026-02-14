@@ -1,8 +1,11 @@
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <errno.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <algorithm>
-#include <cstdint>
+#include <sys/stat.h>
 #include <vector>
 
 #include "finite_lib.h"
@@ -11,6 +14,101 @@
 #include "mod2dense.h"
 #include "mod2sparse.h"
 #include "vec_op.h"
+
+static void dvc_bins_to_hard_bits(const char *bins,
+                                  char *hard_bits,
+                                  int n_bits,
+                                  const float *llr_tbl,
+                                  int bin_num) {
+  if (!bins || !hard_bits || n_bits <= 0)
+    return;
+  if (!llr_tbl || bin_num <= 0) {
+    for (int i = 0; i < n_bits; i++)
+      hard_bits[i] = (char)(bins[i] & 1);
+    return;
+  }
+
+  const int max_bin = (bin_num > 0) ? (bin_num - 1) : 0;
+  for (int i = 0; i < n_bits; i++) {
+    int bin = (int)(unsigned char)bins[i];
+    if (bin > max_bin)
+      bin = max_bin;
+    hard_bits[i] = (llr_tbl[bin] < 0.0f) ? 1 : 0;
+  }
+}
+
+static int dvc_qc_syndrome_weight(mod2sparse *qc_bm, const char *hard_bits, int bm_m, int cir_sz) {
+  if (!qc_bm || !hard_bits || bm_m <= 0 || cir_sz <= 0)
+    return 0;
+
+  int synd_wt = 0;
+  char *layer_synd = (char *)calloc(cir_sz, sizeof(*layer_synd));
+  char *vn_dec_hd = (char *)calloc(cir_sz, sizeof(*vn_dec_hd));
+  char *cn_dec_hd = (char *)calloc(cir_sz, sizeof(*cn_dec_hd));
+  if (!layer_synd || !vn_dec_hd || !cn_dec_hd) {
+    free(layer_synd);
+    free(vn_dec_hd);
+    free(cn_dec_hd);
+    return 0;
+  }
+
+  for (int layer = 0; layer < bm_m; layer++) {
+    vec_clr(layer_synd, cir_sz);
+    for (mod2entry *e = mod2sparse_first_in_row(qc_bm, layer); !mod2sparse_at_end(e); e = mod2sparse_next_in_row(e)) {
+      vec_copy((char *)hard_bits, vn_dec_hd, e->col * cir_sz, 0, cir_sz);
+      vec_shift(vn_dec_hd, cn_dec_hd, cir_sz, -1 * e->shift);
+      vec_mod2_add(cn_dec_hd, layer_synd, layer_synd, cir_sz);
+    }
+    synd_wt += vec_sum(layer_synd, cir_sz);
+  }
+
+  free(layer_synd);
+  free(vn_dec_hd);
+  free(cn_dec_hd);
+  return synd_wt;
+}
+
+static void dvc_mkdir_if_missing(const char *path) {
+  if (!path || !*path)
+    return;
+  struct stat st;
+  if (stat(path, &st) == 0) {
+    if (!S_ISDIR(st.st_mode))
+      printf("[LDPC WARN] path exists but is not a directory: %s\n", path);
+    return;
+  }
+  if (mkdir(path, 0777) != 0 && errno != EEXIST)
+    printf("[LDPC WARN] mkdir failed: %s (errno=%d)\n", path, errno);
+}
+
+static void dvc_ensure_output_c_code_dir() {
+  static int done = 0;
+  if (done)
+    return;
+  done = 1;
+  dvc_mkdir_if_missing("./output");
+  dvc_mkdir_if_missing("./output/c_code");
+}
+
+
+static int dvc_ibex_syndrome_weight(ldpc_packet *packet, const char *hard_bits) {
+  if (!packet || !hard_bits)
+    return 0;
+
+  s_hard_codeword hard_codeword;
+  memset(&hard_codeword, 0, sizeof(hard_codeword));
+
+  const int cols = packet->h_matrix.cols;
+  const int bits = packet->h_matrix.bits;
+  for (int j = 0; j < cols; j++) {
+    for (int k = 0; k < bits; k++) {
+      hard_codeword.c[j].b[k] = ((hard_bits[j * bits + k] & 1) != 0);
+    }
+  }
+
+  s_check_nodes cn = packet->f_check_nodes(packet->h_matrix, hard_codeword);
+  return packet->f_check_node_weight(packet->h_matrix, cn);
+}
 
 void ldpc_packet::ldpc_rd_phck(char *pchk_file) {
   mod2entry *e;
@@ -87,9 +185,7 @@ void ldpc_packet::ldpc_ibex_phck(s_h_matrix h_matrix) {
   printf("[LDPC] Base-matrix max row weight: %d, max col weight: %d\n", max_row_wt, max_col_wt);
 }
 
-
-void ldpc_packet::print_hm()
-{
+void ldpc_packet::print_hm() {
   FILE *fp, *fp1;
   FILE *fp_bm;
   mod2entry *e, *e_pre;
@@ -324,22 +420,92 @@ void ldpc_packet::print_hm()
 
       // base user-data columns
       for (int c = 0; c < base_payload_cols; c++) {
-        const bool nz = (h_matrix.extra_bits_of_parity > 0) ? (h_matrix.element[r][c] >= 0) : (h_matrix.occupied[r][c] == 1);
+        const bool nz =
+            (h_matrix.extra_bits_of_parity > 0) ? (h_matrix.element[r][c] >= 0) : (h_matrix.occupied[r][c] == 1);
         fputc(nz ? '1' : '0', fp_bm);
       }
       fputc('|', fp_bm);
 
       // extra user-data columns
       for (int c = base_payload_cols; c < payload_cols_total; c++) {
-        const bool nz = (h_matrix.extra_bits_of_parity > 0) ? (h_matrix.element[r][c] >= 0) : (h_matrix.occupied[r][c] == 1);
+        const bool nz =
+            (h_matrix.extra_bits_of_parity > 0) ? (h_matrix.element[r][c] >= 0) : (h_matrix.occupied[r][c] == 1);
         fputc(nz ? '1' : 'X', fp_bm);
       }
       fputc('|', fp_bm);
 
       // parity columns
       for (int c = payload_cols_total; c < bm_n; c++) {
-        const bool nz = (h_matrix.extra_bits_of_parity > 0) ? (h_matrix.element[r][c] >= 0) : (h_matrix.occupied[r][c] == 1);
+        const bool nz =
+            (h_matrix.extra_bits_of_parity > 0) ? (h_matrix.element[r][c] >= 0) : (h_matrix.occupied[r][c] == 1);
         fputc(nz ? '1' : '0', fp_bm);
+      }
+      fputc('\n', fp_bm);
+    }
+
+    // ---------------------------------------------------------------------
+    // Fade matrix (same column grouping/format as the base-matrix schematic).
+    // Non-fade: '.', Fade: '1'
+    // ---------------------------------------------------------------------
+    fprintf(fp_bm, "\n# Fade matrix (bm_m=%d, bm_n=%d, Z=%d)\n", bm_m, bm_n, cir_sz);
+    fprintf(fp_bm, "# Legend: 1=fade CPM, .=non-fade\n");
+    fprintf(fp_bm, "# Groups: base_userdata_cols|extra_userdata_cols|parity_cols\n\n");
+    for (int r = 0; r < bm_m; r++) {
+      fprintf(fp_bm, "ROW %2d: ", r);
+      for (int c = 0; c < base_payload_cols; c++)
+        fputc(h_matrix.fade[r][c] ? '1' : '.', fp_bm);
+      fputc('|', fp_bm);
+      for (int c = base_payload_cols; c < payload_cols_total; c++)
+        fputc(h_matrix.fade[r][c] ? '1' : '.', fp_bm);
+      fputc('|', fp_bm);
+      for (int c = payload_cols_total; c < bm_n; c++)
+        fputc(h_matrix.fade[r][c] ? '1' : '.', fp_bm);
+      fputc('\n', fp_bm);
+    }
+
+    // ---------------------------------------------------------------------
+    // Base matrix with fade marked as '*', keeping the existing grouping.
+    // - occupied (or element>=0): '1'
+    // - zero CPM: '0' (or 'X' in extra-userdata area to indicate placeholder/skip)
+    // - fade CPM: '*'
+    // ---------------------------------------------------------------------
+    fprintf(fp_bm, "\n# Base-matrix schematic (fade shown as '*')\n");
+    fprintf(fp_bm,
+            "# Legend: 1=non-zero CPM, 0=zero CPM, X=zero CPM in extra-userdata col (placeholder/skip), *=fade CPM\n");
+    fprintf(fp_bm, "# Groups: base_userdata_cols|extra_userdata_cols|parity_cols\n\n");
+    for (int r = 0; r < bm_m; r++) {
+      fprintf(fp_bm, "ROW %2d: ", r);
+
+      // base user-data columns
+      for (int c = 0; c < base_payload_cols; c++) {
+        const bool nz =
+            (h_matrix.extra_bits_of_parity > 0) ? (h_matrix.element[r][c] >= 0) : (h_matrix.occupied[r][c] == 1);
+        if (h_matrix.fade[r][c])
+          fputc('*', fp_bm);
+        else
+          fputc(nz ? '1' : '0', fp_bm);
+      }
+      fputc('|', fp_bm);
+
+      // extra user-data columns
+      for (int c = base_payload_cols; c < payload_cols_total; c++) {
+        const bool nz =
+            (h_matrix.extra_bits_of_parity > 0) ? (h_matrix.element[r][c] >= 0) : (h_matrix.occupied[r][c] == 1);
+        if (h_matrix.fade[r][c])
+          fputc('*', fp_bm);
+        else
+          fputc(nz ? '1' : 'X', fp_bm);
+      }
+      fputc('|', fp_bm);
+
+      // parity columns
+      for (int c = payload_cols_total; c < bm_n; c++) {
+        const bool nz =
+            (h_matrix.extra_bits_of_parity > 0) ? (h_matrix.element[r][c] >= 0) : (h_matrix.occupied[r][c] == 1);
+        if (h_matrix.fade[r][c])
+          fputc('*', fp_bm);
+        else
+          fputc(nz ? '1' : '0', fp_bm);
       }
       fputc('\n', fp_bm);
     }
@@ -356,9 +522,9 @@ void ldpc_packet::print_hm()
 
   int cir_cnt = 0;
   int sch_out_cnt = 0;
-  // Extra user-data columns (beyond the first 64 payload columns) are streamed out even if the base-matrix entry is zero.
-  // For a zero circulant, we output a 44-bit all-ones word as a placeholder marker.
-  // NOTE: This is only meaningful for Z=512 (64 bytes per payload column).
+  // Extra user-data columns (beyond the first 64 payload columns) are streamed out even if the base-matrix entry is
+  // zero. For a zero circulant, we output a 44-bit all-ones word as a placeholder marker. NOTE: This is only meaningful
+  // for Z=512 (64 bytes per payload column).
   const int base_userdata_cols = 64;
   const int payload_cols_total = bm_n - bm_m;
   const int extra_userdata_col_start = base_userdata_cols;
@@ -437,18 +603,18 @@ void ldpc_packet::print_hm()
           else
             last_in_row = 0;
 
-          // RDEC scheduler packing (32-bit)
+          // RDEC scheduler packing (44-bit; low 42b valid, written as 11 hex digits)
           // [6:0]   col (7)
           // [15:7]  shift (9)
-          // [19:16] pre_cir_row (4)
-          // [28:20] shift_delta (9)
-          // [29]    last_in_row (1)
-          // [30]    flag_64_extra_userdata (1): set when the circulant is in extra user-data column(s)
-          // [31]    mask_flag (1): this circulant requires lane mask (MASK or INVMASK)
-          // [40:32] mask_shift (9): signed shift of the last-row circulant in the same column (two's complement, [-256,255])
+          // [20:16] pre_cir_row (5)
+          // [29:21] shift_delta (9)
+          // [30]    last_in_row (1)
+          // [31]    flag_64_extra_userdata (1): set when the circulant is in extra user-data column(s)
+          // [32]    mask_flag (1): this circulant requires lane mask (MASK or INVMASK)
+          // [41:33] mask_shift (9): signed shift of the last-row circulant in the same column (two's complement, [-256,255])
 
           // Defensive overflow checks (printing only; scheduler still truncates by design)
-          if ((e->col >= (1 << 7)) || (e->shift >= (1 << 9)) || (e_pre->row >= (1 << 4)) || (tmp_val >= (1 << 9))) {
+          if ((e->col >= (1 << 7)) || (e->shift >= (1 << 9)) || (e_pre->row >= (1 << 5)) || (tmp_val >= (1 << 9))) {
             printf("[LDPC Warning] RDEC-scheduler field overflow: row=%d col=%d shift=%d pre_row=%d shift_delta=%d\n", i, e->col,
                    e->shift, e_pre->row, tmp_val);
           }
@@ -476,21 +642,21 @@ void ldpc_packet::print_hm()
             }
           }
 
-          // Pack a scheduler word with total 41 bits:
-          // - [31:0] legacy fields + flags
-          // - [40:32] signed mask_shift
-          // We output it as 11 hex digits (44 bits) with the top 3 bits always 0.
+          // Pack a scheduler word with total 42 bits:
+          // - [32:0] legacy fields + flags
+          // - [41:33] signed mask_shift
+          // We output it as 11 hex digits (44 bits) with the top 2 bits always 0.
           uint64_t sch64 = 0;
           sch64 |= (uint64_t(e->col) & 0x7Fu);
           sch64 |= (uint64_t(e->shift) & 0x1FFu) << 7;
-          sch64 |= (uint64_t(e_pre->row) & 0x0Fu) << 16;
-          sch64 |= (uint64_t(tmp_val) & 0x1FFu) << 20;
-          sch64 |= (uint64_t(last_in_row) & 0x1u) << 29;
-          sch64 |= (flag_64_extra_userdata & 0x1u) << 30;
-          sch64 |= (mask_flag & 0x1u) << 31;
-          sch64 |= (uint64_t(uint32_t(signed_mask_shift) & 0x1FFu)) << 32;
+          sch64 |= (uint64_t(e_pre->row) & 0x1Fu) << 16;
+          sch64 |= (uint64_t(tmp_val) & 0x1FFu) << 21;
+          sch64 |= (uint64_t(last_in_row) & 0x1u) << 30;
+          sch64 |= (flag_64_extra_userdata & 0x1u) << 31;
+          sch64 |= (mask_flag & 0x1u) << 32;
+          sch64 |= (uint64_t(uint32_t(signed_mask_shift) & 0x1FFu)) << 33;
 
-	          const unsigned long long mmem_word = (unsigned long long)(sch64 & ((1ull << 41) - 1));
+	          const unsigned long long mmem_word = (unsigned long long)(sch64 & ((1ull << 42) - 1));
 	          const int sch_idx = sch_out_cnt++;
 	          if (sch_idx >= (1 << 10)) {
 	            printf("[LDPC Warning] RDEC-scheduler address overflow: sch_idx=%d (needs >10 bits)\n", sch_idx);
@@ -528,15 +694,21 @@ void ldpc_packet::print_hm()
 #endif
 
   // ---------------------------------------------------------------------------
-  // Modified RDEC scheduler export (P1 + contiguous extra-userdata block).
+  // Modified RDEC scheduler export (contiguous extra-userdata block, safe insertion).
   //
   // Goal:
   // - Keep the original output order of all NON extra-userdata circulants.
   // - For extra-userdata payload columns `col ∈ [extra_userdata_col_start, extra_userdata_col_end)`:
   //   emit a contiguous block in `col` ascending order, filling missing columns with
-  //   the placeholder marker `44'hFFFFFFFFFFF`.
-  // - Insert that block at P1: the location where the first extra-userdata circulant
-  //   would have appeared in the original per-row schedule.
+  //   the placeholder marker `44'hFFFFFFFFFFF` (all ones).
+  //
+  // Insertion policy for the extra-userdata block (per row):
+  // - Do NOT place the block at the very beginning of the row.
+  // - Do NOT place the block after the circulant that asserts `last_in_row==1` (1-cycle early).
+  //
+  // Practical rule:
+  // - Insert the extra block right before the last 2 NON-extra circulants in the row schedule,
+  //   while ensuring at least 1 NON-extra circulant appears before the block.
   //
   // Notes:
   // - Placeholders are NOT counted as real circulants for HD-MEM/C-MEM checks (conservative).
@@ -564,15 +736,65 @@ void ldpc_packet::print_hm()
       }
     }
 
+    // NOTE: `fade` circulants are skipped by the RTL schedule consumer. Therefore, when computing `pre_row`,
+    // we must ignore `fade` entries and only consider non-fade circulants in the same column (with wrap-around).
+    auto prev_in_col_skip_fade = [&](mod2entry *cur) -> mod2entry * {
+      mod2entry *p = mod2sparse_prev_in_col(cur);
+      if (mod2sparse_at_end(p))
+        p = mod2sparse_last_in_col(qc_bm, cur->col);
+      if (mod2sparse_at_end(p))
+        return p;
+
+      mod2entry *first = p;
+      for (int guard = 0; guard < bm_m; guard++) {
+        if (!h_matrix.fade[p->row][p->col])
+          return p;
+        p = mod2sparse_prev_in_col(p);
+        if (mod2sparse_at_end(p))
+          p = mod2sparse_last_in_col(qc_bm, cur->col);
+        if (mod2sparse_at_end(p) || (p == first))
+          break;
+      }
+      return first; // fallback (should be rare)
+    };
+
+    // Build the non-extra schedule in the original order.
+    std::vector<mod2entry *> non_extra_entries;
+    non_extra_entries.reserve(static_cast<size_t>(row_wt));
+    for (int j = 1; j < bm_m; j++) {
+      for (e = mod2sparse_first_in_row(qc_bm, i); !mod2sparse_at_end(e); e = mod2sparse_next_in_row(e)) {
+        e_pre = prev_in_col_skip_fade(e);
+
+        if (e_pre->row == (i + j) % bm_m) {
+          const bool is_extra =
+              (extra_userdata_col_cnt > 0) && (e->col >= extra_userdata_col_start) && (e->col < extra_userdata_col_end);
+          if (!is_extra)
+            non_extra_entries.push_back(e);
+        }
+      }
+    }
+
+    // Decide insertion position for the extra-userdata block.
+    // Default: before the last 2 non-extra entries; but never at row start when possible.
+    int extra_insert_pos = 0;
+    if (extra_userdata_col_cnt > 0) {
+      const int non_extra_cnt = static_cast<int>(non_extra_entries.size());
+      if (non_extra_cnt >= 3) {
+        extra_insert_pos = non_extra_cnt - 2;
+      } else if (non_extra_cnt >= 1) {
+        extra_insert_pos = 1; // after the first entry (best-effort)
+      } else {
+        extra_insert_pos = 0; // degenerate (should not happen)
+      }
+    }
+
     bool extra_block_emitted = false;
 
 // Emit one REAL (non-placeholder) circulant entry to the row dump + scheduler ROM.
 // `tmp` counts real emitted circulants in this row.
 #define RDEC_EMIT_REAL_ENTRY(EE)                                                                                       \
   do {                                                                                                                 \
-    e_pre = mod2sparse_prev_in_col((EE));                                                                              \
-    if (mod2sparse_at_end(e_pre))                                                                                      \
-      e_pre = mod2sparse_last_in_col(qc_bm, (EE)->col);                                                                \
+    e_pre = prev_in_col_skip_fade((EE));                                                                               \
                                                                                                                        \
     if ((row_dis < 0) && (e_pre->row == cmem_hazard_pre_row))                                                          \
       row_dis = tmp;                                                                                                   \
@@ -598,7 +820,7 @@ void ldpc_packet::print_hm()
       last_in_row = 0;                                                                                                 \
                                                                                                                        \
     /* Defensive overflow checks (printing only; scheduler still truncates by design) */                               \
-    if (((EE)->col >= (1 << 7)) || ((EE)->shift >= (1 << 9)) || (e_pre->row >= (1 << 4)) || (tmp_val >= (1 << 9))) { \
+    if (((EE)->col >= (1 << 7)) || ((EE)->shift >= (1 << 9)) || (e_pre->row >= (1 << 5)) || (tmp_val >= (1 << 9))) {   \
       printf("[LDPC Warning] RDEC-scheduler field overflow: row=%d col=%d shift=%d pre_row=%d shift_delta=%d\n", i,    \
              (EE)->col, (EE)->shift, e_pre->row, tmp_val);                                                             \
     }                                                                                                                  \
@@ -606,8 +828,9 @@ void ldpc_packet::print_hm()
     /* Determine mask_flag (MASK/INVMASK) and per-column last-row shift for hardware. */                               \
     uint64_t mask_flag = 0;                                                                                            \
     int signed_mask_shift = 0;                                                                                         \
-    const uint64_t flag_64_extra_userdata =                                                                             \
-        ((extra_userdata_col_cnt > 0) && ((EE)->col >= extra_userdata_col_start) && ((EE)->col < extra_userdata_col_end)) \
+    const uint64_t flag_64_extra_userdata =                                                                            \
+        ((extra_userdata_col_cnt > 0) && ((EE)->col >= extra_userdata_col_start) &&                                    \
+         ((EE)->col < extra_userdata_col_end))                                                                         \
             ? 1u                                                                                                       \
             : 0u;                                                                                                      \
     if ((cir_sz == 512) && (h_matrix.bits == 512) && (h_matrix.extra_bits_of_parity > 0) && ((EE)->col >= 0) &&        \
@@ -621,22 +844,22 @@ void ldpc_packet::print_hm()
       const int last_row_shift = h_matrix.element[last_row][(EE)->col];                                                \
       if (last_row_shift >= 0) {                                                                                       \
         /* Convert 0..511 to signed [-256,255] for RTL convenience. */                                                 \
-        signed_mask_shift = (last_row_shift >= (cir_sz / 2)) ? (last_row_shift - cir_sz) : last_row_shift;            \
+        signed_mask_shift = (last_row_shift >= (cir_sz / 2)) ? (last_row_shift - cir_sz) : last_row_shift;             \
       }                                                                                                                \
     }                                                                                                                  \
                                                                                                                        \
-    /* Pack a scheduler word with total 41 bits (written as 44'hXXXXXXXXXXX). */                                       \
+    /* Pack a scheduler word with total 42 bits (written as 44'hXXXXXXXXXXX). */                                       \
     uint64_t sch64 = 0;                                                                                                \
     sch64 |= (uint64_t((EE)->col) & 0x7Fu);                                                                            \
     sch64 |= (uint64_t((EE)->shift) & 0x1FFu) << 7;                                                                    \
-    sch64 |= (uint64_t(e_pre->row) & 0x0Fu) << 16;                                                                     \
-    sch64 |= (uint64_t(tmp_val) & 0x1FFu) << 20;                                                                       \
-    sch64 |= (uint64_t(last_in_row) & 0x1u) << 29;                                                                     \
-    sch64 |= (flag_64_extra_userdata & 0x1u) << 30;                                                                    \
-    sch64 |= (mask_flag & 0x1u) << 31;                                                                                 \
-    sch64 |= (uint64_t(uint32_t(signed_mask_shift) & 0x1FFu)) << 32;                                                   \
+    sch64 |= (uint64_t(e_pre->row) & 0x1Fu) << 16;                                                                     \
+    sch64 |= (uint64_t(tmp_val) & 0x1FFu) << 21;                                                                       \
+    sch64 |= (uint64_t(last_in_row) & 0x1u) << 30;                                                                     \
+    sch64 |= (flag_64_extra_userdata & 0x1u) << 31;                                                                    \
+    sch64 |= (mask_flag & 0x1u) << 32;                                                                                 \
+    sch64 |= (uint64_t(uint32_t(signed_mask_shift) & 0x1FFu)) << 33;                                                   \
                                                                                                                        \
-    const unsigned long long mmem_word = (unsigned long long)(sch64 & ((1ull << 41) - 1));                             \
+    const unsigned long long mmem_word = (unsigned long long)(sch64 & ((1ull << 42) - 1));                             \
     const int sch_idx = sch_out_cnt++;                                                                                 \
     if (sch_idx >= (1 << 10)) {                                                                                        \
       printf("[LDPC Warning] RDEC-scheduler address overflow: sch_idx=%d (needs >10 bits)\n", sch_idx);                \
@@ -644,54 +867,8 @@ void ldpc_packet::print_hm()
     fprintf(fp1, "10'd%-6d:mmem_rdt=44'h%011llX;\n", sch_idx, mmem_word);                                              \
   } while (0)
 
-    // Main schedule generation in original order, with a one-time insertion of the extra block at P1.
-    for (int j = 1; j < bm_m; j++) {
-      for (e = mod2sparse_first_in_row(qc_bm, i); !mod2sparse_at_end(e); e = mod2sparse_next_in_row(e)) {
-        // search the previous circulant in the column
-        e_pre = mod2sparse_prev_in_col(e);
-        if (mod2sparse_at_end(e_pre))
-          e_pre = mod2sparse_last_in_col(qc_bm, e->col);
-
-        if (e_pre->row == (i + j) % bm_m) { // non overlapped
-          const bool is_extra =
-              (extra_userdata_col_cnt > 0) && (e->col >= extra_userdata_col_start) && (e->col < extra_userdata_col_end);
-
-          if (is_extra) {
-            if (!extra_block_emitted) {
-#ifdef _LDPC_RDEC_EXTRA_CONTIG_DBG
-              fprintf(stderr, "[LDPC DBG] RDEC extra-block emit: row=%d j=%d first_extra_col=%d\n", i, j, e->col);
-#endif
-              // Emit extra-userdata payload columns as a fixed-length contiguous block (col ascending).
-              for (int c = extra_userdata_col_start; c < extra_userdata_col_end; c++) {
-                mod2entry *e_extra = extra_entry_by_col[static_cast<size_t>(c - extra_userdata_col_start)];
-                if (e_extra) {
-                  RDEC_EMIT_REAL_ENTRY(e_extra);
-                } else {
-                  const int sch_idx = sch_out_cnt++;
-                  const unsigned long long mmem_word = 0xFFFFFFFFFFFULL; // 44-bit all ones
-                  if (sch_idx >= (1 << 10)) {
-                    printf("[LDPC Warning] RDEC-scheduler address overflow: sch_idx=%d (needs >10 bits)\n", sch_idx);
-                  }
-                  fprintf(fp1, "10'd%-6d:mmem_rdt=44'h%011llX;\n", sch_idx, mmem_word);
-                }
-              }
-
-              extra_block_emitted = true;
-            }
-
-            // Skip this extra entry in the original walk; it has already been emitted in the extra block.
-            continue;
-          }
-
-          // Non-extra entry: keep original order.
-          RDEC_EMIT_REAL_ENTRY(e);
-        }
-      }
-    }
-
-    // If this row contains no extra circulants at all, fall back to emitting the extra block at the row end
-    // (this matches the original behavior in this corner-case).
-    if (!extra_block_emitted && (extra_userdata_col_cnt > 0)) {
+    auto emit_extra_block = [&]() {
+      // Emit extra-userdata payload columns as a fixed-length contiguous block (col ascending).
       for (int c = extra_userdata_col_start; c < extra_userdata_col_end; c++) {
         mod2entry *e_extra = extra_entry_by_col[static_cast<size_t>(c - extra_userdata_col_start)];
         if (e_extra) {
@@ -705,6 +882,28 @@ void ldpc_packet::print_hm()
           fprintf(fp1, "10'd%-6d:mmem_rdt=44'h%011llX;\n", sch_idx, mmem_word);
         }
       }
+    };
+
+    // Emit in the original non-extra order, inserting the extra block at the safe position.
+    for (int idx = 0; idx <= static_cast<int>(non_extra_entries.size()); idx++) {
+      if (!extra_block_emitted && (extra_userdata_col_cnt > 0) && (idx == extra_insert_pos)) {
+#ifdef _LDPC_RDEC_EXTRA_CONTIG_DBG
+        fprintf(stderr, "[LDPC DBG] RDEC extra-block emit: row=%d insert_pos=%d non_extra_cnt=%zu\n", i,
+                extra_insert_pos, non_extra_entries.size());
+#endif
+        emit_extra_block();
+        extra_block_emitted = true;
+      }
+
+      if (idx < static_cast<int>(non_extra_entries.size())) {
+        RDEC_EMIT_REAL_ENTRY(non_extra_entries[static_cast<size_t>(idx)]);
+      }
+    }
+
+    // If the row has no non-extra entries (degenerate), emit the extra block at end as a fallback.
+    if (!extra_block_emitted && (extra_userdata_col_cnt > 0)) {
+      emit_extra_block();
+      extra_block_emitted = true;
     }
 
     if (row_dis < 0)
@@ -729,7 +928,6 @@ void ldpc_packet::print_hm()
   fclose(fp);
   fclose(fp1);
 }
-
 
 /*
 void ldpc_packet::print_hm()
@@ -786,7 +984,7 @@ void ldpc_packet::print_hm()
           enc_sch[tmp] = e->shift;
           enc_sch[tmp+col_wt] = e->row;
           tmp++;
-        } 
+        }
       } else {
         if (e->row>=tm_sz)
         {
@@ -801,7 +999,7 @@ void ldpc_packet::print_hm()
     for (int j=0; j<col_wt; j++)
       tmp = (tmp<<5)+enc_sch[j+col_wt];
 
-    if (tmp<pow(2, 4)) 
+    if (tmp<pow(2, 4))
       fprintf(fp, "0000000%1X", tmp);
     else if (tmp<pow(2, 8))
       fprintf(fp, "000000%2X", tmp);
@@ -850,7 +1048,7 @@ void ldpc_packet::print_hm()
         for (int l=0; l<32; l++)
           fi_tmp += enc_fi[i][j*cir_sz + k*32 + l]<<l;
 
-        if (fi_tmp<pow(2, 4)) 
+        if (fi_tmp<pow(2, 4))
           fprintf(fp1, "0000000%1X", fi_tmp);
         else if (fi_tmp<pow(2, 8))
           fprintf(fp1, "000000%2X", fi_tmp);
@@ -1087,41 +1285,41 @@ void ldpc_packet::ldpc_gen_gm() {
   mod2sparse_copyrows(qc_te, qc_e, qc_c_rows);
   printf("[LDPC] A/B/C/D/E matrices ready!\n");
 
-/*
-#ifdef _LDPC_DUMP
-  char MH[50] = "H_matrix.txt";
-  char MA[50] = "A_matrix.txt";
-  char MB[50] = "B_matrix.txt";
-  char MC[50] = "C_matrix.txt";
-  char MD[50] = "D_matrix.txt";
-  char ME[50] = "E_matrix.txt";
+  /*
+  #ifdef _LDPC_DUMP
+    char MH[50] = "H_matrix.txt";
+    char MA[50] = "A_matrix.txt";
+    char MB[50] = "B_matrix.txt";
+    char MC[50] = "C_matrix.txt";
+    char MD[50] = "D_matrix.txt";
+    char ME[50] = "E_matrix.txt";
 
-  printf("[LDPC] Dump H matrix to file %s\n", MH);
-  fp = fopen(MH, "w");
-  mod2sparse_print(fp, qc_hm);
-  fclose(fp);
-  printf("[LDPC] Dump A matrix to file %s\n", MA);
-  fp = fopen(MA, "w");
-  mod2sparse_print(fp, qc_a);
-  fclose(fp);
-  printf("[LDPC] Dump B matrix to file %s\n", MB);
-  fp = fopen(MB, "w");
-  mod2sparse_print(fp, qc_b);
-  fclose(fp);
-  printf("[LDPC] Dump C matrix to file %s\n", MC);
-  fp = fopen(MC, "w");
-  mod2sparse_print(fp, qc_c);
-  fclose(fp);
-  printf("[LDPC] Dump D matrix to file %s\n", MD);
-  fp = fopen(MD, "w");
-  mod2sparse_print(fp, qc_d);
-  fclose(fp);
-  printf("[LDPC] Dump E matrix to file %s\n", ME);
-  fp = fopen(ME, "w");
-  mod2sparse_print(fp, qc_e);
-  fclose(fp);
-#endif
-*/
+    printf("[LDPC] Dump H matrix to file %s\n", MH);
+    fp = fopen(MH, "w");
+    mod2sparse_print(fp, qc_hm);
+    fclose(fp);
+    printf("[LDPC] Dump A matrix to file %s\n", MA);
+    fp = fopen(MA, "w");
+    mod2sparse_print(fp, qc_a);
+    fclose(fp);
+    printf("[LDPC] Dump B matrix to file %s\n", MB);
+    fp = fopen(MB, "w");
+    mod2sparse_print(fp, qc_b);
+    fclose(fp);
+    printf("[LDPC] Dump C matrix to file %s\n", MC);
+    fp = fopen(MC, "w");
+    mod2sparse_print(fp, qc_c);
+    fclose(fp);
+    printf("[LDPC] Dump D matrix to file %s\n", MD);
+    fp = fopen(MD, "w");
+    mod2sparse_print(fp, qc_d);
+    fclose(fp);
+    printf("[LDPC] Dump E matrix to file %s\n", ME);
+    fp = fopen(ME, "w");
+    mod2sparse_print(fp, qc_e);
+    fclose(fp);
+  #endif
+  */
 
   // generate inverse F matrix (F=E*B+D)
   printf("[LDPC] Generating inverse F matrix from H matrix ...\n");
@@ -1426,8 +1624,7 @@ s_check_nodes ldpc_packet::f_check_nodes(s_h_matrix h_matrix, s_hard_codeword vn
           if (h_matrix.extra_bytes_of_parity == 0) {
             if (h_matrix.occupied[i][j])
               cn.r[i].b[m] = !cn.r[i].b[m];
-          }
-          else {
+          } else {
             if (h_matrix.occupied[i][j] && (i < h_matrix.rows - 1))
               cn.r[i].b[m] = !cn.r[i].b[m];
             if (h_matrix.occupied[i][j] && (i == h_matrix.rows - 1) && h_matrix.mask[j][k])
@@ -1472,9 +1669,9 @@ s_likelihood_levels ldpc_packet::f_likelihood_levels(int strobes, s_ldpc_decoder
 
   // VN 位宽自适应的翻转阈值与强弱档初始化
   if (VN_BITS <= 2) {
-    likelihood_levels.flip_thr = 2;      // 3
-    likelihood_levels.weak = 0; // 2
-    likelihood_levels.strong = 0;        // 1
+    likelihood_levels.flip_thr = 2; // 3
+    likelihood_levels.weak = 0;     // 2
+    likelihood_levels.strong = 0;   // 1
   } else if (VN_BITS == 3) {
     likelihood_levels.flip_thr = likelihood_levels.max - 3;
     likelihood_levels.weak = likelihood_levels.flip_thr - 4;
@@ -1560,7 +1757,7 @@ int ldpc_packet::f_update_vn_post(int likelihood, int weight, int min_likelihood
 
   int delta;
   if (VN_BITS <= 2)
-    delta = (weight>>1) + ((weight&1) && pushing ? 1 : 0);
+    delta = (weight >> 1) + ((weight & 1) && pushing ? 1 : 0);
   else
     delta = weight;
 
@@ -1585,7 +1782,8 @@ int ldpc_packet::f_update_vn_post(int likelihood, int weight, int min_likelihood
   return likelihood_new;
 }
 
-// int ldpc_packet::f_update_vn_post(int likelihood, int weight, int min_likelihood, int max_likelihood, bool post_process,
+// int ldpc_packet::f_update_vn_post(int likelihood, int weight, int min_likelihood, int max_likelihood, bool
+// post_process,
 //                                   bool post_process2, bool be_aggressive, int flip_threshold, bool look,
 //                                   bool scale2x) {
 //   const int scale = (scale2x && VN_BITS <= 2) ? 1 : 0;
@@ -1999,8 +2197,8 @@ void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt, char *pchk_f
         }
       }
     }
-    if (VERBOSITY > 0)
-      f_print_h_matrix(h_matrix);
+    // if (VERBOSITY > 0)
+    f_print_h_matrix(h_matrix);
 
     ldpc_ibex_phck(h_matrix);
   }
@@ -2390,14 +2588,22 @@ void ldpc_packet::ldpc_dec_config(int max_fdec_itr, int fdec_col_skip, int max_l
 } // ldpc_dec_config
 
 void ldpc_packet::ldpc_clean() {
-  if (qc_bm) mod2sparse_free(qc_bm);
-  if (qc_hm) mod2sparse_free(qc_hm);
-  if (qc_a) mod2sparse_free(qc_a);
-  if (qc_b) mod2sparse_free(qc_b);
-  if (qc_c) mod2sparse_free(qc_c);
-  if (qc_d) mod2sparse_free(qc_d);
-  if (qc_e) mod2sparse_free(qc_e);
-  if (qc_fi) mod2sparse_free(qc_fi);
+  if (qc_bm)
+    mod2sparse_free(qc_bm);
+  if (qc_hm)
+    mod2sparse_free(qc_hm);
+  if (qc_a)
+    mod2sparse_free(qc_a);
+  if (qc_b)
+    mod2sparse_free(qc_b);
+  if (qc_c)
+    mod2sparse_free(qc_c);
+  if (qc_d)
+    mod2sparse_free(qc_d);
+  if (qc_e)
+    mod2sparse_free(qc_e);
+  if (qc_fi)
+    mod2sparse_free(qc_fi);
 
   free(flp_thrshd0);
   flp_thrshd0 = NULL;
@@ -2513,8 +2719,8 @@ void ldpc_packet::ldpc_encoder() {
 }
 
 void ldpc_packet::ldpc_ibex_encoder() {
-// #include "ldpc_matrix.h"
-// #include "ldpc_matrix_inverse.h"
+  // #include "ldpc_matrix.h"
+  // #include "ldpc_matrix_inverse.h"
 
   int VERBOSITY = 0;
   int DEBUG_MODE = 0;
@@ -2682,9 +2888,28 @@ s_hard_codeword ldpc_packet::f_ldpc_encode(s_hard_codeword ldpc_encoder_input, s
 
 void ldpc_packet::ldpc_decoder(enum dec_model dec_mode) {
   // add 0 padding
-  vec_copy(det_blk, dec_di_blk, 0, 0, info_len);
-  for (int i = 0; i < pad_len; i++)
-    dec_di_blk[info_len + i] = max_llr_bin;
+  if (dec_mode != BF_IBEX && dec_mode != LAYER_G2) {
+    vec_copy(det_blk, dec_di_blk, 0, 0, info_len);
+    for (int i = 0; i < pad_len; i++)
+      dec_di_blk[info_len + i] = max_llr_bin;
+    vec_copy(det_blk, dec_di_blk, info_len, hm_k, hm_m);
+  }
+  if (dec_mode == LAYER_G2) {
+    vec_copy(det_blk, dec_di_blk, 0, 0, info_len);
+    for (int i = 0; i < pad_len; i++)
+      dec_di_blk[info_len + i] = max_llr_bin;
+    // `LAYER_G2` supports IBEX shortening mode where the first parity column is fractional
+    // (`extra_bits_of_parity > 0`). For a full-parity codeword (`extra_bits_of_parity == 0`),
+    // parity is contiguous `hm_m` bits and must start from the first parity column.
+    if (h_matrix.extra_bits_of_parity > 0) {
+      vec_copy(det_blk, dec_di_blk, info_len, hm_k, h_matrix.extra_bits_of_parity);
+      for (int i = 0; i < h_matrix.unused_bytes_of_parity * 8; i++)
+        dec_di_blk[hm_k + h_matrix.extra_bits_of_parity + i] = max_llr_bin;
+      vec_copy(det_blk, dec_di_blk, info_len + h_matrix.extra_bits_of_parity, hm_k + cir_sz, (bm_m - 1) * cir_sz);
+    } else {
+      vec_copy(det_blk, dec_di_blk, info_len, hm_k, hm_m);
+    }
+  }
 
   // NOTE: for IBEX (cir_sz==512), the transmitted block `det_blk` does not contain the padded tail bits in
   // the first parity column when `unused_bytes_of_parity > 0`. The decoder input `dec_di_blk` is always
@@ -2721,11 +2946,13 @@ void ldpc_packet::ldpc_decoder(enum dec_model dec_mode) {
     ldpc_dec_bf2(3, col_skip_itr);
   else if (dec_mode == LAYER)
     ldpc_dec_layer();
+  else if (dec_mode == LAYER_G2)
+    ldpc_dec_layer2(h_matrix);
   else if (dec_mode == BF_IBEX)
     ldpc_dec_bf_ibex(ldpc_decoder_input, ldpc_decoder_parameters, h_matrix);
 
   // remove padding
-  if (dec_mode != BF_IBEX) {
+  if (dec_mode != BF_IBEX && dec_mode != LAYER_G2) {
     vec_copy(dec_do_blk, dec_blk, 0, 0, info_len);
     vec_copy(dec_do_blk, dec_blk, hm_k, info_len, hm_m);
   } else {
@@ -3376,7 +3603,22 @@ void ldpc_packet::ldpc_dec_layer() {
   free(vn_dec_hd);
 } // ldpc_dec_layer
 
-void ldpc_packet::ldpc_dec_layer2() {
+void ldpc_packet::ldpc_dec_layer2(s_h_matrix h_matrix) {
+#ifdef _LDPC_DEBUG_DUMP
+  FILE *cfp, *sfp, *hdfp, *lfp, *lfp_fortb;
+  int stmp, vtmp;
+  dvc_ensure_output_c_code_dir();
+  char cmem_dump[50] = "./output/c_code/rdec_cmem_dump.txt";
+  char stot_dump[50] = "./output/c_code/rdec_stot_dump.txt";
+  char hdmem_dump[50] = "./output/c_code/rdec_hdmem_dump.txt";
+  char log_dump[50] = "./output/c_code/rdec_log_dump.txt";
+  char tblog_dump[50] = "./output/c_code/rdec_tblog_dump.txt";
+  cfp = fopen(cmem_dump, "w");
+  sfp = fopen(stot_dump, "w");
+  hdfp = fopen(hdmem_dump, "w");
+  lfp = fopen(log_dump, "w");
+  lfp_fortb = fopen(tblog_dump, "w");
+#endif
   mod2entry *e, *e_pre;
   char *dec_init;
   int shift_val1;
@@ -3444,6 +3686,21 @@ void ldpc_packet::ldpc_dec_layer2() {
   for (int i = 0; i < bm_n; i++)
     for (int j = 0; j < cir_sz; j++)
       cn_q_mem[i][j] = (float)llr_tbl[dec_di_blk[i * cir_sz + j]];
+  
+  {
+    char *hard_init = (char *)calloc(hm_n, sizeof(*hard_init));
+    if (hard_init) {
+      dvc_bins_to_hard_bits(dec_di_blk, hard_init, hm_n, llr_tbl, bin_num);
+      const int init_synd_qc = dvc_qc_syndrome_weight(qc_bm, hard_init, bm_m, cir_sz);
+      const int init_synd_ibex = dvc_ibex_syndrome_weight(this, hard_init);
+      //printf("Initial syndrome weight: QC=%d, IBEX=%d\n", init_synd_qc, init_synd_ibex);
+      init_synd_wt = std::max(init_synd_qc, init_synd_ibex);
+      init_synd_wt_min = std::min(init_synd_wt_min, init_synd_wt);
+      init_synd_wt_max = std::max(init_synd_wt_max, init_synd_wt);
+      free(hard_init);
+    }
+  }
+  
 
   // iterative decoding
   for (int itr = 0; (itr <= ldec_max_itr) && ((ldec_early_term_en == 0) || (cw_fail == 1)); itr++) {
@@ -3455,9 +3712,9 @@ void ldpc_packet::ldpc_dec_layer2() {
       // initilize HD mem
       hd_init = (vec_sum(dec_init, bm_n) != 0);
 
-#ifdef _LDPC_DEBUG_DUMP
-      printf("[LDPC DEBUG] Layer decoding @ iteration %d, layer %d ...\n", itr, layer);
-#endif
+      // #ifdef _LDPC_DEBUG_DUMP
+      //       printf("[LDPC DEBUG] Layer decoding @ iteration %d, layer %d ...\n", itr, layer);
+      // #endif
 
       // init current layer C-MSG
       // C-MSG of previous iteration
@@ -3501,15 +3758,14 @@ void ldpc_packet::ldpc_dec_layer2() {
 
           // APP in CN order of previous layer
           if (h_matrix.extra_bytes_of_parity == 0) {
-          cn_app_pre[i] = cn_r_new_pre[i] + cn_q_sel_pre[i];
+            cn_app_pre[i] = cn_r_new_pre[i] + cn_q_sel_pre[i];
           } else {
             if (h_matrix.occupied[e_pre->row][e_pre->col] && (e_pre->row < (h_matrix.rows - 1)))
               cn_app_pre[i] = cn_r_new_pre[i] + cn_q_sel_pre[i];
-            else if (h_matrix.occupied[e_pre->row][e_pre->col] && (e_pre->row == (h_matrix.rows - 1)) && 
+            else if (h_matrix.occupied[e_pre->row][e_pre->col] && (e_pre->row == (h_matrix.rows - 1)) &&
                      h_matrix.mask[e_pre->col][(i + e_pre->shift) % cir_sz])
               cn_app_pre[i] = cn_r_new_pre[i] + cn_q_sel_pre[i];
-            else if (h_matrix.fade[e_pre->row][e_pre->col] &&
-                     !h_matrix.mask[e_pre->col][(i + e_pre->shift) % cir_sz])
+            else if (h_matrix.fade[e_pre->row][e_pre->col] && !h_matrix.mask[e_pre->col][(i + e_pre->shift) % cir_sz])
               cn_app_pre[i] = cn_r_new_pre[i] + cn_q_sel_pre[i];
             else
               cn_app_pre[i] = cn_q_sel_pre[i];
@@ -3532,19 +3788,103 @@ void ldpc_packet::ldpc_dec_layer2() {
           shift_val1 = -1 * e_pre->shift + e->shift;
           shift_val2 = -1 * e_pre->shift;
         }
-
+#ifdef _LDPC_DEBUG
+        printf("[LDPC DEBUG] Left shift APP by %d (%d)\n", shift_val1, dec_init[e->col]);
+#endif
         for (int i = 0; i < cir_sz; i++) {
           cn_app_cur[i] = cn_app_pre[(i + shift_val1 + cir_sz) % cir_sz];
           vn_dec_hd[i] = cn_app_pre[(i + shift_val2 + cir_sz) % cir_sz] >= 0 ? 0 : 1;
         }
+#ifdef _LDPC_DEBUG_DUMP
+        fprintf(lfp, "ITR%2d/LAYER%2d/COL%2d: \n", itr, layer, e->col);
+        fprintf(lfp_fortb, "ITR%2d/LAYER%2d/COL%2d: \n", itr, layer, e->col);
+        for (int i = 0; i < cir_sz / 8; i++) {
+          fprintf(lfp, "Q PRE MSG:");
+
+          for (int j = 0; j < 8; j++) {
+            vtmp = int(cn_q_sel_pre[i * 8 + j] * pow(2, finite_f_num));
+
+            if (vtmp < 0) {
+              vtmp = -vtmp;
+              fprintf(lfp, " %3d-%2X", i * 8 + j, vtmp);
+            } else
+              fprintf(lfp, " %3d+%2X", i * 8 + j, vtmp);
+          }
+          fprintf(lfp, "\n");
+        }
+
+        for (int i = 0; i < cir_sz / 8; i++) {
+          fprintf(lfp, "R NEW MSG:");
+
+          for (int j = 0; j < 8; j++) {
+            vtmp = int(cn_r_new_pre[i * 8 + j] * pow(2, finite_f_num));
+
+            if (vtmp < 0) {
+              vtmp = -vtmp;
+              fprintf(lfp, " %3d-%2X", i * 8 + j, vtmp);
+            } else
+              fprintf(lfp, " %3d+%2X", i * 8 + j, vtmp);
+          }
+          fprintf(lfp, "\n");
+        }
+
+        for (int i = 0; i < cir_sz / 8; i++) {
+          fprintf(lfp, "APP-C MSG:");
+
+          for (int j = 0; j < 8; j++) {
+            vtmp = int(cn_app_pre[i * 8 + j] * pow(2, finite_f_num));
+
+            if (vtmp < 0) {
+              vtmp = -vtmp;
+              fprintf(lfp, " %3d-%2X", i * 8 + j, vtmp);
+            } else
+              fprintf(lfp, " %3d+%2X", i * 8 + j, vtmp);
+          }
+          fprintf(lfp, "\n");
+        }
+
+        for (int i = 0; i < cir_sz / 8; i++) {
+          fprintf(lfp, "APP-S MSG:");
+
+          for (int j = 0; j < 8; j++) {
+            vtmp = int(cn_app_cur[i * 8 + j] * pow(2, finite_f_num));
+
+            if (vtmp < 0) {
+              vtmp = -vtmp;
+              fprintf(lfp, " %3d-%2X", i * 8 + j, vtmp);
+            } else
+              fprintf(lfp, " %3d+%2X", i * 8 + j, vtmp);
+          }
+          fprintf(lfp, "\n");
+        }
+#endif
 
         // CW converge check logic per circulant
         // 1. check if HD updated
         if (hd_updated == 0)
           if (vec_cmp(dec_do_blk, vn_dec_hd, e->col * cir_sz, 0, cir_sz) == 1)
             hd_updated = 1;
-
+#ifdef _LDPC_DEBUG_DUMP
+        for (int i = 0; i < cir_sz; i++) {
+          if (dec_do_blk[e->col * cir_sz + i] != vn_dec_hd[i]) {
+            fprintf(lfp, "ITR%2d/LAYER%2d/COL%2d: flip bit %d (%d-->%d)\n", itr, layer, e->col, i,
+                    dec_do_blk[e->col * cir_sz + i], vn_dec_hd[i]);
+          }
+        }
+#endif
         vec_copy(vn_dec_hd, dec_do_blk, 0, e->col * cir_sz, cir_sz);
+
+#ifdef _LDPC_DEBUG_DUMP
+        fprintf(hdfp, "ITR%2d/LAYER%2d/COL%2d: ", itr, layer, e->col);
+        for (int i = cir_sz / 4 - 1; i >= 0; i--) {
+          stmp = 0;
+          for (int j = 3; j >= 0; j--) {
+            stmp = stmp * 2 + vn_dec_hd[i * 4 + j];
+          }
+          fprintf(hdfp, "%lx", stmp);
+        }
+        fprintf(hdfp, "\n");
+#endif
 
         // 2. accumulate syndrome
         vec_shift(vn_dec_hd, cn_dec_hd, cir_sz, -1 * e->shift);
@@ -3553,13 +3893,13 @@ void ldpc_packet::ldpc_dec_layer2() {
         } else {
           if (h_matrix.occupied[e_pre->row][e_pre->col] && (e_pre->row < (h_matrix.rows - 1))) {
             for (int i = 0; i < cir_sz; i++) {
-              if (!h_matrix.mask[e->col][(i+e->shift)%cir_sz])
+              if (!h_matrix.mask[e->col][(i + e->shift) % cir_sz])
                 cn_dec_hd[i] = 0;
             }
           }
           if (h_matrix.fade[e->row][e->col]) {
             for (int i = 0; i < cir_sz; i++) {
-              if (!h_matrix.mask[e->col][(i+e->shift)%cir_sz])
+              if (!h_matrix.mask[e->col][(i + e->shift) % cir_sz])
                 cn_dec_hd[i] = 0;
             }
           }
@@ -3577,13 +3917,12 @@ void ldpc_packet::ldpc_dec_layer2() {
           if (h_matrix.extra_bytes_of_parity == 0) {
             cn_q_updt_cur[i] = cn_app_cur[i] - cn_r_old_cur[i];
           } else {
-            if (h_matrix.occupied[e_pre->row][e_pre->col] && (e_pre->row == (h_matrix.rows - 1)) &&
-              (!h_matrix.mask[e->col][(i+e->shift)%cir_sz])) {
-                cn_r_old_cur[i] = 0;
+            if (h_matrix.occupied[e->row][e->col] && (e->row == (h_matrix.rows - 1)) &&
+                (!h_matrix.mask[e->col][(i + e->shift) % cir_sz])) {
+              cn_r_old_cur[i] = 0;
             }
-            if (h_matrix.fade[e_pre->row][e_pre->col] &&
-              (!h_matrix.mask[e->col][(i+e->shift)%cir_sz])) {
-                cn_r_old_cur[i] = 0;
+            if (h_matrix.fade[e->row][e->col] && (!h_matrix.mask[e->col][(i + e->shift) % cir_sz])) {
+              cn_r_old_cur[i] = 0;
             }
             cn_q_updt_cur[i] = cn_app_cur[i] - cn_r_old_cur[i];
           }
@@ -3595,20 +3934,20 @@ void ldpc_packet::ldpc_dec_layer2() {
           }
 
           // update C
-          if (h_matrix.extra_bytes_of_parity == 0) {
+          // mask
+          if (h_matrix.extra_bits_of_parity == 0) {
             sign_tmp = (cn_q_updt_cur[i] >= 0) ? 1 : -1;
             val_tmp = cn_q_updt_cur[i] * sign_tmp;
           } else {
-            if (h_matrix.occupied[e_pre->row][e_pre->col] && (e_pre->row == (h_matrix.rows - 1)) &&
-              (!h_matrix.mask[e->col][(i+e->shift)%cir_sz])) {
-                sign_tmp = 1;
-                val_tmp = 100000;
+            if (h_matrix.occupied[e->row][e->col] && (e->row == (h_matrix.rows - 1)) &&
+                (!h_matrix.mask[e->col][(i + e->shift) % cir_sz])) {
+              sign_tmp = 1;
+              val_tmp = 100000;
             }
-            if (h_matrix.fade[e_pre->row][e_pre->col] &&
-              (!h_matrix.mask[e->col][(i+e->shift)%cir_sz])) {
-                sign_tmp = 1;
-                val_tmp = 100000;
-            } else  {
+            if (h_matrix.fade[e->row][e->col] && (!h_matrix.mask[e->col][(i + e->shift) % cir_sz])) {
+              sign_tmp = 1;
+              val_tmp = 100000;
+            } else {
               sign_tmp = (cn_q_updt_cur[i] >= 0) ? 1 : -1;
               val_tmp = cn_q_updt_cur[i] * sign_tmp;
             }
@@ -3632,6 +3971,53 @@ void ldpc_packet::ldpc_dec_layer2() {
           cn_q_mem[e->col][i] = cn_q_updt_cur[i];
         }
 
+#ifdef _LDPC_DEBUG_DUMP
+        for (int i = 0; i < cir_sz / 8; i++) {
+          fprintf(lfp, "R OLD MSG:");
+
+          for (int j = 0; j < 8; j++) {
+            vtmp = int(cn_r_old_cur[i * 8 + j] * pow(2, finite_f_num));
+
+            if (vtmp < 0) {
+              vtmp = -vtmp;
+              fprintf(lfp, " %3d-%2X", i * 8 + j, vtmp);
+            } else
+              fprintf(lfp, " %3d+%2X", i * 8 + j, vtmp);
+          }
+          fprintf(lfp, "\n");
+        }
+
+        for (int i = 0; i < cir_sz / 8; i++) {
+          fprintf(lfp, "Q NEW MSG:");
+
+          for (int j = 0; j < 8; j++) {
+            vtmp = int(cn_q_updt_cur[i * 8 + j] * pow(2, finite_f_num));
+
+            if (vtmp < 0) {
+              vtmp = -vtmp;
+              fprintf(lfp, " %3d-%2X", i * 8 + j, vtmp);
+            } else
+              fprintf(lfp, " %3d+%2X", i * 8 + j, vtmp);
+          }
+          fprintf(lfp, "\n");
+        }
+
+        for (int i = 0; i < cir_sz / 8; i++) {
+          fprintf(lfp_fortb, "Q NEW MSG:");
+
+          for (int j = 0; j < 8; j++) {
+            vtmp = int(cn_q_updt_cur[i * 8 + j] * pow(2, finite_f_num));
+
+            if (vtmp < 0) {
+              vtmp = -vtmp;
+              fprintf(lfp_fortb, "SIGN:1/Q_NEW=%2x", vtmp);
+            } else
+              fprintf(lfp_fortb, "SIGN:0/Q_NEW=%2x", vtmp);
+          }
+          fprintf(lfp_fortb, "\n");
+        }
+#endif
+
         cir_cnt++;
       } // per circulant
 
@@ -3649,25 +4035,59 @@ void ldpc_packet::ldpc_dec_layer2() {
 
         cn_c_mem[layer][i].min1_pos = cn_c_updt_cur[i].min1_pos;
         cn_c_mem[layer][i].sign_tot = cn_c_updt_cur[i].sign_tot;
+#ifdef _LDPC_DEBUG_DUMP
+        fprintf(cfp, "ITR%d/L%d/C%d: min1 %x, min2 %x, min1 pos %d, sign_tot %d\n", itr, layer, i,
+                int(16 * cn_c_mem[layer][i].min1_val), int(16 * cn_c_mem[layer][i].min2_val),
+                cn_c_mem[layer][i].min1_pos, (1 - cn_c_mem[layer][i].sign_tot) / 2);
+#endif
       }
+#ifdef _LDPC_DEBUG_DUMP
+      for (int i = (cir_sz / 4 - 1); i >= 0; i--) {
+        stmp = 0;
+        for (int j = 3; j >= 0; j--) {
+          stmp = stmp * 2 + (1 - cn_c_mem[layer][i * 4 + j].sign_tot) / 2;
+        }
+        fprintf(sfp, "%lx", stmp);
+      }
+      fprintf(sfp, "\n");
+#endif
 
       // check converage checking
       layer_synd_wt = vec_sum(layer_synd, cir_sz);
       if (hd_init == 1) {
         hd_stable_cnt = 0;
         synd_pass_cnt = 0;
+#ifdef _LDPC_DEBUG
+        fprintf(lfp, "Iter %d, Layer %d: initializing HD memory\n", itr, layer);
+#endif
       } else if ((hd_updated == 0) && (layer_synd_wt == 0)) {
         hd_stable_cnt++;
         synd_pass_cnt++;
       } else {
         hd_stable_cnt = 0;
         synd_pass_cnt = 0;
-      }
+#ifdef _LDPC_DEBUG_DUMP
+        if (hd_updated == 1)
+          fprintf(lfp, "ITR%d/LAYER%d: HD memory is updated\n", itr, layer);
 
+        if (layer_synd_wt == 1)
+          fprintf(lfp, "ITR%d/LAYER%d: Syndrome check fail\n", itr, layer);
+#endif
+      }
+#ifdef _LDPC_DEBUG
+      printf("[LDPC DEBUG] HD stable and syndrome passed @ iteration %d, layer %d\n", hd_stable_cnt, synd_pass_cnt);
+#endif
+#ifdef _LDPC_DEBUG_DUMP
+      fprintf(lfp, "Iter %d, Layer %d: HD stable and syndrome passed for %d layer %d\n", itr, layer, hd_stable_cnt,
+              synd_pass_cnt);
+#endif
       if ((synd_pass_cnt >= bm_m) && (hd_stable_cnt >= bm_m - 1)) {
         cw_fail = 0;
         cnvg_itr = itr;
         cnvg_lyr = layer;
+#ifdef _LDPC_DEBUG
+        printf("[LDPC DEBUG] Layer decoding converged @ iteration %d, layer %d\n", itr, layer);
+#endif
       }
     }
   }
@@ -3692,15 +4112,21 @@ void ldpc_packet::ldpc_dec_layer2() {
   free(cn_q_sel_cur);
   free(cn_r_old_cur);
   free(cn_q_updt_cur);
-  for (int i = 0; i < bm_n * col_wt; i++)
+  for (int i = 0; i < total_cir; i++)
     free(cn_q_sign[i]);
   free(cn_q_sign);
   free(layer_synd);
   free(cn_dec_hd);
   free(vn_dec_hd);
+
+#ifdef _LDPC_DEBUG_DUMP
+  fclose(cfp);
+  fclose(sfp);
+  fclose(hdfp);
+  fclose(lfp);
+  fclose(lfp_fortb);
+#endif
 } // ldpc_dec_layer1
-
-
 
 void ldpc_packet::ldpc_dec_skip() {
   for (int i = 0; i < hm_n; i++)
@@ -3740,7 +4166,7 @@ int ldpc_packet::ldpc_synd(char *cw) {
 // }
 
 void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
-                              s_ldpc_decoder_parameters ldpc_decoder_parameters, s_h_matrix h_matrix) {
+                                   s_ldpc_decoder_parameters ldpc_decoder_parameters, s_h_matrix h_matrix) {
   int VERBOSITY = 0;
   int MAX_ERROR_COUNT = 4095;
   int i;
@@ -3839,14 +4265,32 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
     f_print_check_nodes(cn, h_matrix.rows, h_matrix.bits);
   }
 
-  for (i = 0; i < h_matrix.rows; i++)
-    for (k = 0; k < h_matrix.bits; k++)
-      cn_shifted.r[i].b[k] = 0;
-  syndrome_weight = f_check_node_weight(h_matrix, cn);
-  clock_cycles = (2 * h_matrix.cols) + 1;
-  if (syndrome_weight == 0)
-    finished = 1;
-  ldpc_decoder_output.syndrome_weight_before = syndrome_weight;
+	  for (i = 0; i < h_matrix.rows; i++)
+	    for (k = 0; k < h_matrix.bits; k++)
+	      cn_shifted.r[i].b[k] = 0;
+	  syndrome_weight = f_check_node_weight(h_matrix, cn);
+
+	  // Cross-check: syndrome weight computed from a flat (col-major) hard-bit array should match.
+	  // This validates the hard-bit packing/layout against the IBEX syndrome implementation.
+	  {
+	    std::vector<char> hard_bits_flat(static_cast<size_t>(h_matrix.cols) * static_cast<size_t>(h_matrix.bits));
+	    for (int cj = 0; cj < h_matrix.cols; cj++) {
+	      for (int ck = 0; ck < h_matrix.bits; ck++) {
+	        hard_bits_flat[static_cast<size_t>(cj) * static_cast<size_t>(h_matrix.bits) + static_cast<size_t>(ck)] =
+	            hard_codeword.c[cj].b[ck] ? 1 : 0;
+	      }
+	    }
+	    const int syndrome_weight_chk = dvc_ibex_syndrome_weight(this, hard_bits_flat.data());
+	    if (syndrome_weight_chk != syndrome_weight) {
+	      printf("[LDPC Error] IBEX syndrome_weight mismatch: from_cn=%d from_flat=%d (cols=%d bits=%d)\n", syndrome_weight,
+	             syndrome_weight_chk, h_matrix.cols, h_matrix.bits);
+	    }
+	  }
+
+	  clock_cycles = (2 * h_matrix.cols) + 1;
+	  if (syndrome_weight == 0)
+	    finished = 1;
+	  ldpc_decoder_output.syndrome_weight_before = syndrome_weight;
   syndrome_weight_delayed = syndrome_weight;
 
   int prev_sw = (iteration == 0) ? syndrome_weight_delayed : syndrome_weight_r[3];
@@ -4041,7 +4485,7 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
             prng_post_process = post_trigger &&
                                 (syndrome_weight_delayed < ldpc_decoder_parameters.syndrome_weight_thr_qc) &&
                                 ((h_matrix.bits == 512) ? prng_512.b[k] : prng_256.b[k]);
-            // radical disturbance                    
+            // radical disturbance
             prng_post_process2 = post_trigger2 &&
                                  (syndrome_weight_delayed < ldpc_decoder_parameters.syndrome_weight_thr_post) &&
                                  ((h_matrix.bits == 512) ? prng_512.b[k] : prng_256.b[k]);
@@ -4125,7 +4569,7 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
         }
       }
 
-      // 
+      //
       for (i = 0; i < h_matrix.rows; i++) {
         if (h_matrix.occupied[i][j] || h_matrix.fade[i][j])
           for (k = 0; k < h_matrix.bits; k++)

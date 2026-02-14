@@ -10,6 +10,8 @@
 #include "mod2sparse.h"
 #include "vec_op.h"
 
+static int g_2bit_mode = 0;
+
 void ldpc_packet::ldpc_rd_phck(char *pchk_file) {
   mod2entry *e;
   FILE *fp;
@@ -30,7 +32,7 @@ void ldpc_packet::ldpc_rd_phck(char *pchk_file) {
     for (int j = 0; j < bm_n; j++) {
       fscanf(fp, "%d", &col_shift);
 
-      // check submatrix T (identity matrix)
+     // check submatrix T (identity matrix)
       if ((i < tm_sz) && (j > (bm_n - tm_sz - 1))) {
         if (((i != (j + tm_sz - bm_n)) && (col_shift >= 0)) || ((i == (j + tm_sz - bm_n)) && (col_shift != 0))) {
           printf("[LDPC] Error: Submatrix T is not identity matrix!\n");
@@ -581,8 +583,9 @@ int ldpc_packet::f_update_vn_post(int likelihood, int weight, int min_likelihood
     
     likelihood_new = flipped ? (likelihood - delta) : (likelihood + delta - 1);
     
-    do_post_flipped = post_process && (likelihood_new == flip_threshold);
-    do_post_unflipped = post_process && (likelihood_new < flip_threshold);
+    bool post_gate = (g_2bit_mode >= 2) ? !be_aggressive : true;
+    do_post_flipped = post_process && post_gate && (likelihood_new == flip_threshold);
+    do_post_unflipped = post_process && post_gate && (likelihood_new < flip_threshold);
     if (do_post_unflipped)
       likelihood_new = flip_threshold - 1;
     else if (do_post_flipped)
@@ -2611,6 +2614,20 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
     }
   }
 
+  // === 2-bit mode switch and tunable aggr thresholds ===
+  const char *env_2bit_mode = getenv("IBEX_2BIT_MODE");
+  const int mode_2bit = env_2bit_mode ? atoi(env_2bit_mode) : 0;
+  g_2bit_mode = mode_2bit;
+
+  const char *env_aggr_iter_hi = getenv("IBEX_AGGR_ITER_HI");
+  const char *env_aggr_iter_lo = getenv("IBEX_AGGR_ITER_LO");
+  const char *env_aggr_synd_th = getenv("IBEX_AGGR_SYND_TH");
+  const char *env_aggr_strong_synd_th = getenv("IBEX_AGGR_STRONG_SW_TH");
+  const int aggr_iter_hi = env_aggr_iter_hi ? atoi(env_aggr_iter_hi) : 100;
+  const int aggr_iter_lo = env_aggr_iter_lo ? atoi(env_aggr_iter_lo) : 50;
+  const int aggr_synd_th = env_aggr_synd_th ? atoi(env_aggr_synd_th) : 150;
+  const int aggr_strong_synd_th = env_aggr_strong_synd_th ? atoi(env_aggr_strong_synd_th) : (1 << 30);
+
   while ((iteration < ldpc_decoder_input.iteration_limit) && (finished == 0) && (give_up == 0)) {
     for (j = 0; j < h_matrix.cols; j++) {
       clock_cycles++;
@@ -2731,20 +2748,47 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
             f_print_s_512_bits(prng_512);
           }
 
-          // Adjust weight if aggressive mode
-          bool aggr = (VN_BITS <= 2 && (iteration >= 100 || (iteration >= 50 && syndrome_weight < 150))) || ((ldpc_decoder_input.soft_bits > 0) &&
-                      (likelihood_levels.min < ldpc_decoder_parameters.likelihood_thr && !flipped_prev));
+          // Adjust weight if aggressive mode (mode-aware)
+          bool aggr;
+          if (mode_2bit == 0) {
+            // Mode 0 (T3): env-tunable thresholds, original soft-bits condition
+            aggr = (VN_BITS <= 2 && ((iteration >= aggr_iter_hi && syndrome_weight < aggr_strong_synd_th) ||
+                    (iteration >= aggr_iter_lo && syndrome_weight < aggr_synd_th))) ||
+                   ((ldpc_decoder_input.soft_bits > 0) &&
+                    (likelihood_levels.min < ldpc_decoder_parameters.likelihood_thr && !flipped_prev));
+          } else {
+            // Mode 1/2/3 (V25): dual-threshold + relaxed soft-bits condition
+            // soft_bits > 0 guard preserved; relaxation is only on !flipped_prev
+            aggr = (VN_BITS <= 2 && ((iteration >= aggr_iter_hi && syndrome_weight < aggr_strong_synd_th) ||
+                    (iteration >= aggr_iter_lo && syndrome_weight < aggr_synd_th))) ||
+                   ((ldpc_decoder_input.soft_bits > 0) &&
+                    (likelihood_levels.min < ldpc_decoder_parameters.likelihood_thr &&
+                     ((VN_BITS <= 2) || !flipped_prev)));
+          }
           int w = weight;
-          if (aggr && (weight == 0))
-            w = weight + 0;
-          if (aggr && (weight == 1))
-            w = weight + 0; // =1, verilog delta: 0
-          if (aggr && (weight == 2))
-            w = weight + 1; // =3, verilog delta: 2
-          if (aggr && (weight == 3))
-            w = weight + 2; // =5, verilog delta: 4
-          if (aggr && (weight == 4))
-            w = weight + 3; // =7, verilog delta: 7
+          if (mode_2bit == 0) {
+            // Mode 0: symmetric mapping (all aggr bits)
+            if (aggr && (weight == 0))
+              w = weight + 0;
+            if (aggr && (weight == 1))
+              w = weight + 0; // =1, verilog delta: 0
+            if (aggr && (weight == 2))
+              w = weight + 1; // =3, verilog delta: 2
+            if (aggr && (weight == 3))
+              w = weight + 2; // =5, verilog delta: 4
+            if (aggr && (weight == 4))
+              w = weight + 3; // =7, verilog delta: 7
+          } else {
+            // Mode 1/2/3: V25 attack-only (amplify only when !flipped_prev)
+            if (aggr && !flipped_prev) {
+              if (weight == 2)
+                w = weight + 1; // =3
+              else if (weight == 3)
+                w = weight + 2; // =5
+              else if (weight == 4)
+                w = weight + 3; // =7
+            }
+          }
           if ((VERBOSITY > 0) && look)
             printf("C++ LOOK   ITERATION: %4d BEFORE LIKELIHOOD UPDATE SW: %4d CURRENT BIT FLIP: %2d %3d  ORIGINAL: %x "
                    "CORRUPTED: %x FLIPPED: %x WEIGHT: %1d MIN: %3d LIKELIHOOD: %3d\n",

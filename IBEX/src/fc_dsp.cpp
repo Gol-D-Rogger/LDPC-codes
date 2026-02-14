@@ -447,6 +447,14 @@ void dsp_packet::ecc_decoder(enum fc_dec_mode fc_mode)
         mcrc_chk();
     }
 
+    if (fc_mode == FC_RDEC2)
+    {
+        rdec_used = 1;
+        dec_mode = LAYER_G2;
+        ldpc_decoder(dec_mode);
+        mcrc_chk();
+    }
+
     // mix decoding after fast decoding failed
     if ((fc_mode == FC_MIX) || (fc_mode == FC_MIX_G2))
     {

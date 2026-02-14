@@ -687,18 +687,18 @@ IBEX BF 的 `weight` 统计在 `extra_bytes_of_parity>0` 时会用 `occupied(las
 
 `10'dADDR     :mmem_rdt=44'hXXXXXXXXXXX;`
 
-其中 `XXXXXXXXXXX` 是 11 个 hex（44bit）。通常情况下仅低 41bit 有效（高 3bit 恒为 0）；但当导出“extra user-data 列”的 **0-circulant 占位**时，会直接输出 `44'hFFFFFFFFFFF`（44bit 全 1）作为占位标志。
+其中 `XXXXXXXXXXX` 是 11 个 hex（44bit）。通常情况下仅低 42bit 有效（高 2bit 恒为 0）；但当导出“extra user-data 列”的 **0-circulant 占位**时，会直接输出 `44'hFFFFFFFFFFF`（44bit 全 1）作为占位标志。
 
 - `sched64`：调度本体（低 32bit 复用旧字段，同时携带 mask 相关最小信息）
   - `[6:0] col`（7bit）
   - `[15:7] shift`（9bit）
-  - `[19:16] pre_cir_row`（4bit）：同一列前驱 circulant 的 row
-  - `[28:20] shift_delta`（9bit）：$(shift - pre\_shift)\bmod Z$
-  - `[29] last_in_row`（1bit）
-  - `[30] flag_64_extra_userdata`（1bit）：当该条目位于“extra user-data payload 列”时为 1；定义为 `col ∈ [64, (n-m))`（payload 列超过 64 时生效）。例如 11x76（payload 列数 $n-m=65$）只有 `col=64` 属于该范围。
-  - `[31] mask_flag`（1bit）：该 circulant 需要做 lane mask（MASK 或 INVMASK）
-  - `[40:32] mask_shift`（9bit）：同列最后一行 circulant 的 shift，用 9bit 二补码表示范围 $[-256,255]$
-  - `[63:41] reserved`
+  - `[20:16] pre_cir_row`（5bit）：同一列前驱 circulant 的 row
+  - `[29:21] shift_delta`（9bit）：$(shift - pre\_shift)\bmod Z$
+  - `[30] last_in_row`（1bit）
+  - `[31] flag_64_extra_userdata`（1bit）：当该条目位于“extra user-data payload 列”时为 1；定义为 `col ∈ [64, (n-m))`（payload 列超过 64 时生效）。例如 11x76（payload 列数 $n-m=65$）只有 `col=64` 属于该范围。
+  - `[32] mask_flag`（1bit）：该 circulant 需要做 lane mask（MASK 或 INVMASK）
+  - `[41:33] mask_shift`（9bit）：同列最后一行 circulant 的 shift，用 9bit 二补码表示范围 $[-256,255]$
+  - `[63:42] reserved`
 
 这样做的好处是：硬件可以直接把 mask 位图做成 ROM 初始化内容（或直接解析 `rdec_sched` 文本），无需在运行时再生成 `mask[col][k]`。
 

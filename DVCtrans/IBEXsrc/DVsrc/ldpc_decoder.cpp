@@ -27,15 +27,15 @@ void ldpc_decoder_inv (void* sv_inst,
                        svOpenArrayHandle sv_hardbit_data,
                        svOpenArrayHandle sv_softbit_data,
                        svOpenArrayHandle sv_softbit_data1,
-	                       const svOpenArrayHandle sv_decodedBits,
-	                       const svOpenArrayHandle sv_decoding_failure,
-	                       const svOpenArrayHandle sv_early_termination,
-	                       const svOpenArrayHandle sv_num_iter,
-	                       const svOpenArrayHandle sv_col_cnt,
-	                       const svOpenArrayHandle sv_num_errors_in_codeword,
-	                       const svOpenArrayHandle sv_num_errors_in_userdata,
-	                       const svOpenArrayHandle sv_syndrome_weight_before,
-	                       const svOpenArrayHandle sv_syndrome_weight_after,
+                       const svOpenArrayHandle sv_decodedBits,
+                       const svOpenArrayHandle sv_decoding_failure,
+                       const svOpenArrayHandle sv_early_termination,
+                       const svOpenArrayHandle sv_num_iter,
+                       const svOpenArrayHandle sv_col_cnt,
+                       const svOpenArrayHandle sv_num_errors_in_codeword,
+                       const svOpenArrayHandle sv_num_errors_in_userdata,
+                       const svOpenArrayHandle sv_syndrome_weight_before,
+                       const svOpenArrayHandle sv_syndrome_weight_after,
                        int user_data_bytes = 0,
                        int parity_bytes = 0,
                        int post_iter = 0,
@@ -287,20 +287,20 @@ void ldpc_decoder_inv (void* sv_inst,
     fflush(stderr);
     }
 
-	    unsigned int *c_decoding_failure = (unsigned int*)svGetArrElemPtr(sv_decoding_failure, 0);
-	    *c_decoding_failure = inst->ldpc_decoder_output.decoding_failure;
-	    unsigned int *c_early_termination = (unsigned int*)svGetArrElemPtr(sv_early_termination, 0);
-	    *c_early_termination = inst->ldpc_decoder_output.early_termination;
-	    unsigned int *c_num_errors_in_codeword = (unsigned int*)svGetArrElemPtr(sv_num_errors_in_codeword, 0);
-	    *c_num_errors_in_codeword = inst->ldpc_decoder_output.num_errors_in_codeword;
-	    unsigned int *c_num_errors_in_userdata = (unsigned int*)svGetArrElemPtr(sv_num_errors_in_userdata, 0);
-	    *c_num_errors_in_userdata = inst->ldpc_decoder_output.num_errors_in_userdata;
-	    unsigned int *c_num_iter = (unsigned int*)svGetArrElemPtr(sv_num_iter, 0);
-	    *c_num_iter = inst->ldpc_decoder_output.iterations;
-	    int *c_col_cnt = (int*)svGetArrElemPtr(sv_col_cnt, 0);
-	    *c_col_cnt = inst->ldpc_decoder_output.col_cnt;
-	    unsigned int *c_syndrome_weight_before = (unsigned int*)svGetArrElemPtr(sv_syndrome_weight_before, 0);
-	    *c_syndrome_weight_before = inst->ldpc_decoder_output.syndrome_weight_before;
-	    unsigned int *c_syndrome_weight_after = (unsigned int*)svGetArrElemPtr(sv_syndrome_weight_after, 0);
-	    *c_syndrome_weight_after = inst->ldpc_decoder_output.syndrome_weight_after;
+    unsigned int *c_decoding_failure = (unsigned int*)svGetArrElemPtr(sv_decoding_failure, 0);
+    *c_decoding_failure = inst->ldpc_decoder_output.decoding_failure;
+    unsigned int *c_early_termination = (unsigned int*)svGetArrElemPtr(sv_early_termination, 0);
+    *c_early_termination = inst->ldpc_decoder_output.early_termination;
+    unsigned int *c_num_errors_in_codeword = (unsigned int*)svGetArrElemPtr(sv_num_errors_in_codeword, 0);
+    *c_num_errors_in_codeword = inst->ldpc_decoder_output.num_errors_in_codeword;
+    unsigned int *c_num_errors_in_userdata = (unsigned int*)svGetArrElemPtr(sv_num_errors_in_userdata, 0);
+    *c_num_errors_in_userdata = inst->ldpc_decoder_output.num_errors_in_userdata;
+    unsigned int *c_num_iter = (unsigned int*)svGetArrElemPtr(sv_num_iter, 0);
+    *c_num_iter = inst->ldpc_decoder_output.iterations;
+    int *c_col_cnt = (int*)svGetArrElemPtr(sv_col_cnt, 0);
+    *c_col_cnt = inst->ldpc_decoder_output.col_cnt;
+    unsigned int *c_syndrome_weight_before = (unsigned int*)svGetArrElemPtr(sv_syndrome_weight_before, 0);
+    *c_syndrome_weight_before = inst->ldpc_decoder_output.syndrome_weight_before;
+    unsigned int *c_syndrome_weight_after = (unsigned int*)svGetArrElemPtr(sv_syndrome_weight_after, 0);
+    *c_syndrome_weight_after = inst->ldpc_decoder_output.syndrome_weight_after;
 }                    

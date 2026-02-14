@@ -120,6 +120,93 @@ static int dvc_report_bit_mismatches_msb(const char *tag,
     return err;
 }
 
+static int dvc_qc_syndrome_weight_bm(mod2sparse *qc_bm, const char *hard_bits, int bm_m, int cir_sz)
+{
+    if (!qc_bm || !hard_bits || bm_m <= 0 || cir_sz <= 0)
+        return 0;
+
+    int synd_wt = 0;
+    char *layer_synd = (char *)calloc(cir_sz, sizeof(*layer_synd));
+    char *vn_dec_hd = (char *)calloc(cir_sz, sizeof(*vn_dec_hd));
+    char *cn_dec_hd = (char *)calloc(cir_sz, sizeof(*cn_dec_hd));
+    if (!layer_synd || !vn_dec_hd || !cn_dec_hd) {
+        free(layer_synd);
+        free(vn_dec_hd);
+        free(cn_dec_hd);
+        return 0;
+    }
+
+    for (int layer = 0; layer < bm_m; layer++) {
+        vec_clr(layer_synd, cir_sz);
+        for (mod2entry *e = mod2sparse_first_in_row(qc_bm, layer); !mod2sparse_at_end(e); e = mod2sparse_next_in_row(e)) {
+            vec_copy((char *)hard_bits, vn_dec_hd, e->col * cir_sz, 0, cir_sz);
+            vec_shift(vn_dec_hd, cn_dec_hd, cir_sz, -1 * e->shift);
+            vec_mod2_add(cn_dec_hd, layer_synd, layer_synd, cir_sz);
+        }
+        synd_wt += vec_sum(layer_synd, cir_sz);
+    }
+
+    free(layer_synd);
+    free(vn_dec_hd);
+    free(cn_dec_hd);
+    return synd_wt;
+}
+
+static unsigned int dvc_sig_fnv1a_bits01(const char *bits, int start, int len)
+{
+    unsigned int h = 2166136261u;
+    for (int i = 0; i < len; i++) {
+        h ^= (unsigned int)(bits[start + i] & 1);
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static unsigned int dvc_sig_fnv1a_rx_bins01(const ldpc_packet *pckt, int start, int len)
+{
+    unsigned int h = 2166136261u;
+    if (!pckt || !pckt->det_blk) {
+        return h;
+    }
+
+    const int bin_num = pckt->bin_num;
+    const int max_bin = (bin_num > 0) ? (bin_num - 1) : 0;
+    for (int i = 0; i < len; i++) {
+        int bit = 0;
+        if (pckt->llr_tbl && (bin_num > 0)) {
+            int bin = (int)(unsigned char)pckt->det_blk[start + i];
+            if (bin > max_bin)
+                bin = max_bin;
+            bit = (pckt->llr_tbl[bin] < 0.0f) ? 1 : 0;
+        } else {
+            bit = (pckt->det_blk[start + i] & 1);
+        }
+        h ^= (unsigned int)(bit & 1);
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static void dvc_rotate_segment_left(char *buf, int start, int len, int sh)
+{
+    if (!buf || len <= 0)
+        return;
+    sh %= len;
+    if (sh < 0)
+        sh += len;
+    if (sh == 0)
+        return;
+
+    char *tmp = (char *)calloc(len, sizeof(*tmp));
+    if (!tmp)
+        return;
+    for (int i = 0; i < len; i++)
+        tmp[i] = buf[start + ((i + sh) % len)];
+    for (int i = 0; i < len; i++)
+        buf[start + i] = tmp[i];
+    free(tmp);
+}
+
 extern "C"
 void ldpc_config(int h_m,
                  int h_n,
@@ -388,6 +475,8 @@ extern "C" void ldpc_dec(svOpenArrayHandle det_data_sv,
     int *dec_data = (int *)svGetArrayPtr(dec_data_sv);
     int *det_data = (int *)svGetArrayPtr(det_data_sv);
     const int n_words = (sim_pckt->blk_len + 31) / 32;
+    int det_is_llr_bin = (sd_num >= 2);
+    int det_hard_ones = 0;
 
     // 1) Unpack/copy detector input into det_blk[0..blk_len-1]
     if (sd_num < 2) {
@@ -397,6 +486,7 @@ extern "C" void ldpc_dec(svOpenArrayHandle det_data_sv,
             if (j == 0)
                 tmp = (unsigned int)det_data[i / 32];
             sim_pckt->det_blk[i] = (char)((tmp >> (31 - j)) & 1u);
+            det_hard_ones += (sim_pckt->det_blk[i] & 1);
             j++;
             j = j % 32;
         }
@@ -438,6 +528,8 @@ extern "C" void ldpc_dec(svOpenArrayHandle det_data_sv,
         model = BF_IBEX;
     else if (dec_mode == (int)LAYER)
         model = LAYER;
+    else if (dec_mode == (int)LAYER_G2)
+        model = LAYER_G2;
     else if (dec_mode == (int)SKIP)
         model = SKIP;
     else
@@ -446,6 +538,98 @@ extern "C" void ldpc_dec(svOpenArrayHandle det_data_sv,
     if (debug >= 1) {
         printf("[DVC IBEX] ldpc_dec: dec_mode=%d -> model=%d sd_num=%d blk_len=%d n_words=%d bin_num=%d\n", dec_mode,
                (int)model, sd_num, sim_pckt->blk_len, n_words, sim_pckt->bin_num);
+        printf("[DVC IBEX] ldpc_dec sizes: info_len=%d pad_len=%d hm_k=%d hm_m=%d hm_n=%d parity_det=%d\n",
+               sim_pckt->info_len, sim_pckt->pad_len, sim_pckt->hm_k, sim_pckt->hm_m, sim_pckt->hm_n,
+               sim_pckt->blk_len - sim_pckt->info_len);
+    }
+
+    // For LAYER/LAYER_G2 decoding, dec_di_blk is used as an index into llr_tbl (see ldpc_dec_layer/ldpc_dec_layer2).
+    // If hard bits (0/1) are passed with sd_num<2, they must be mapped to "strong-0" / "strong-1" bins first.
+    if (model == LAYER || model == LAYER_G2) {
+        if (!sim_pckt->llr_tbl || sim_pckt->bin_num <= 0) {
+            printf("[DVC IBEX ERROR] LAYER requires llr_tbl/bin_num configured.\n");
+            return;
+        }
+        int bin_min = 0;
+        int bin_max = 0;
+        float llr_min = sim_pckt->llr_tbl[0];
+        float llr_max = sim_pckt->llr_tbl[0];
+        for (int b = 1; b < sim_pckt->bin_num; b++) {
+            const float v = sim_pckt->llr_tbl[b];
+            if (v < llr_min) {
+                llr_min = v;
+                bin_min = b;
+            }
+            if (v > llr_max) {
+                llr_max = v;
+                bin_max = b;
+            }
+        }
+
+        if ((sd_num < 2) && !det_is_llr_bin) {
+            // Map hard bits: 0 -> max-LLR bin (strong 0), 1 -> min-LLR bin (strong 1).
+            int ones = 0;
+            for (int i = 0; i < sim_pckt->blk_len; i++) {
+                const char bit = sim_pckt->det_blk[i] & 1;
+                ones += (bit != 0);
+                sim_pckt->det_blk[i] = (bit == 0) ? (char)bin_max : (char)bin_min;
+            }
+            det_is_llr_bin = 1;
+            if (debug >= 1) {
+                printf("[DVC IBEX] ldpc_dec LAYER hard->bin: ones_in=%d/%d bit0->bin%d(llr=%f) bit1->bin%d(llr=%f)\n",
+                       ones, sim_pckt->blk_len, bin_max, llr_max, bin_min, llr_min);
+                if (sim_pckt->max_llr_bin != bin_max) {
+                    printf("[DVC IBEX WARN] max_llr_bin mismatch: cfg=%d argmax=%d (LLR cfg=%f argmax=%f)\n",
+                           sim_pckt->max_llr_bin, bin_max, sim_pckt->llr_tbl[sim_pckt->max_llr_bin], llr_max);
+                }
+                printf("[DVC IBEX] ldpc_dec LAYER cfg: ldec_max_itr=%d early_term=%d alpha=%f finite(mode=%d q=%d r=%d f=%d)\n",
+                       sim_pckt->ldec_max_itr, sim_pckt->ldec_early_term_en, sim_pckt->alpha, sim_pckt->finite_mode,
+                       sim_pckt->finite_q_num, sim_pckt->finite_r_num, sim_pckt->finite_f_num);
+            }
+        }
+
+        if (debug >= 1) {
+            int neg = 0;
+            int bin0_cnt = 0;
+            int bin1_cnt = 0;
+            int bin_other_cnt = 0;
+            for (int i = 0; i < sim_pckt->blk_len; i++) {
+                const int bin = (int)(unsigned char)sim_pckt->det_blk[i];
+                if (bin == 0)
+                    bin0_cnt++;
+                else if (bin == 1)
+                    bin1_cnt++;
+                else
+                    bin_other_cnt++;
+                if ((bin >= 0) && (bin < sim_pckt->bin_num) && (sim_pckt->llr_tbl[bin] < 0.0f))
+                    neg++;
+            }
+            if (sim_pckt->bin_num == 2) {
+                printf("[DVC IBEX] ldpc_dec LAYER input LLR neg=%d/%d (bin_num=2 bins0=%d bins1=%d other=%d llr0=%f llr1=%f)\n",
+                       neg, sim_pckt->blk_len, bin0_cnt, bin1_cnt, bin_other_cnt,
+                       sim_pckt->llr_tbl[0], sim_pckt->llr_tbl[1]);
+            } else {
+                printf("[DVC IBEX] ldpc_dec LAYER input LLR neg=%d/%d (bin_num=%d max_llr_bin=%d llr[max]=%f llr[min]=%f)\n",
+                       neg, sim_pckt->blk_len, sim_pckt->bin_num, sim_pckt->max_llr_bin,
+                       sim_pckt->llr_tbl[sim_pckt->max_llr_bin], llr_min);
+            }
+
+            if (sim_pckt->tx_blk && sim_pckt->bin_num == 2) {
+                int tx_ones = 0;
+                int rx_ones = 0;
+                int rx_vs_tx = 0;
+                for (int i = 0; i < sim_pckt->blk_len; i++) {
+                    const int txb = sim_pckt->tx_blk[i] & 1;
+                    const int bin = (int)(unsigned char)sim_pckt->det_blk[i];
+                    const int rxb = (sim_pckt->llr_tbl[bin] < 0.0f) ? 1 : 0;
+                    tx_ones += txb;
+                    rx_ones += rxb;
+                    rx_vs_tx += (txb != rxb);
+                }
+                printf("[DVC IBEX] ldpc_dec LLR check: tx_ones=%d rx_ones=%d rx_vs_tx_mismatch=%d\n", tx_ones, rx_ones,
+                       rx_vs_tx);
+            }
+        }
     }
 
     // If a hard-decision decoder is selected while sd_num>=2, derive hard bits from LLR table sign.
@@ -467,6 +651,22 @@ extern "C" void ldpc_dec(svOpenArrayHandle det_data_sv,
             printf("[DVC IBEX ERROR] BF_IBEX requires sd_num>=2 (soft decision). sd_num=%d\n", sd_num);
             return;
         }
+        // NOTE: `ldpc_ibex_input()` derives hard bits from `rx_blk` sign, not from `det_blk`.
+        // When DV calls `ldpc_dec()` directly (bypassing `sd_err_inj/ch_err_inj`), `rx_blk` may be stale.
+        // Reconstruct a consistent `rx_blk` from detector bins and the configured LLR table so that:
+        //   bit_hard = (llr < 0) ? 1 : 0
+        if (sim_pckt->rx_blk && sim_pckt->llr_tbl && sim_pckt->bin_num > 0) {
+            const int max_bin = sim_pckt->bin_num - 1;
+            for (int i = 0; i < sim_pckt->blk_len; i++) {
+                int bin = (int)(unsigned char)sim_pckt->det_blk[i];
+                if (bin > max_bin)
+                    bin = max_bin;
+                sim_pckt->rx_blk[i] = sim_pckt->llr_tbl[bin];
+            }
+        } else if (debug >= 1) {
+            printf("[DVC IBEX WARN] BF_IBEX rx_blk/llr_tbl unavailable: rx_blk=%p llr_tbl=%p bin_num=%d\n",
+                   sim_pckt->rx_blk, sim_pckt->llr_tbl, sim_pckt->bin_num);
+        }
         if ((g_nand_strobes > 0) && (g_nand_strobes != sd_num)) {
             printf("[DVC IBEX WARN] nand_strobes mismatch: cfg=%d call_sd_num=%d (soft_bits uses cfg)\n", g_nand_strobes,
                    sd_num);
@@ -476,6 +676,33 @@ extern "C" void ldpc_dec(svOpenArrayHandle det_data_sv,
 
     // 3) Run decode (IBEX codec handles [Info|Pad|Parity] reconstruction internally)
     sim_pckt->ldpc_decoder(model);
+
+    if ((debug >= 1) && (model == LAYER || model == LAYER_G2)) {
+        int c0 = 0;
+        int c1 = 0;
+        int cother = 0;
+        int first_i = -1;
+        int first_v = 0;
+        for (int bi = 0; bi < sim_pckt->blk_len; bi++) {
+            const int v = (int)(unsigned char)sim_pckt->dec_blk[bi];
+            if (v == 0)
+                c0++;
+            else if (v == 1)
+                c1++;
+            else {
+                if (first_i < 0) {
+                    first_i = bi;
+                    first_v = v;
+                }
+                cother++;
+            }
+        }
+        printf("[DVC IBEX] ldpc_dec LAYER bits: in_ones=%d out_ones=%d (blk_len=%d)\n",
+               (sd_num < 2) ? det_hard_ones : -1, c1, sim_pckt->blk_len);
+        printf("[DVC IBEX] ldpc_dec LAYER dec_blk distribution: 0=%d 1=%d other=%d\n", c0, c1, cother);
+        if (cother > 0)
+            printf("[DVC IBEX WARN] ldpc_dec LAYER dec_blk has non-binary value at i=%d v=%d\n", first_i, first_v);
+    }
 
     // 4) Status outputs
     *dec_unc_sv = sim_pckt->cw_fail;
@@ -488,7 +715,110 @@ extern "C" void ldpc_dec(svOpenArrayHandle det_data_sv,
         printf("[DVC IBEX] ldpc_dec status: cw_fail=%d init_synd=%d fina_synd=%d cnvg_itr=%d cnvg_col=%d\n",
                sim_pckt->cw_fail, sim_pckt->init_synd_wt, sim_pckt->fina_synd_wt, sim_pckt->cnvg_itr, sim_pckt->cnvg_lyr);
     }
-    if ((sd_num < 2) && (debug >= 1)) {
+
+    if ((debug >= 1) && sim_pckt->tx_blk) {
+        int mis_total = 0;
+        int mis_info = 0;
+        int mis_parity = 0;
+        for (int bi = 0; bi < sim_pckt->blk_len; bi++) {
+            const int txb = sim_pckt->tx_blk[bi] & 1;
+            const int dcb = sim_pckt->dec_blk[bi] & 1;
+            if (txb != dcb) {
+                mis_total++;
+                if (bi < sim_pckt->info_len)
+                    mis_info++;
+                else
+                    mis_parity++;
+            }
+        }
+        printf("[DVC IBEX] ldpc_dec tx vs dec mismatch: total=%d info=%d parity=%d\n", mis_total, mis_info, mis_parity);
+
+        // Minimal parity "shift probe": check if decoded parity matches TX parity better after a small fixed shift.
+        if (debug >= 2) {
+            const int parity_start = sim_pckt->info_len;
+            const int parity_len = sim_pckt->blk_len - parity_start;
+            if (parity_len > 0) {
+                const int shifts[4] = {-512, -4, 4, 512};
+                int best_shift = 0;
+                int best_m = mis_parity;
+                int best_n = parity_len;
+                for (int si = 0; si < 4; si++) {
+                    const int sh = shifts[si];
+                    int m = 0;
+                    int n = 0;
+                    for (int i = 0; i < parity_len; i++) {
+                        const int j = i + sh;
+                        if ((j < 0) || (j >= parity_len))
+                            continue;
+                        const int a = sim_pckt->tx_blk[parity_start + j] & 1;
+                        const int b = sim_pckt->dec_blk[parity_start + i] & 1;
+                        n++;
+                        m += (a != b);
+                    }
+                    if ((n > 0) && ((long long)m * (long long)best_n < (long long)best_m * (long long)n)) {
+                        best_shift = sh;
+                        best_m = m;
+                        best_n = n;
+                    }
+                }
+                printf("[DVC IBEX] parity_shift_probe: base=%d/%d best_shift=%d best=%d/%d\n", mis_parity, parity_len,
+                       best_shift, best_m, best_n);
+            }
+        }
+
+        // (1) Parity column signatures (TX/RX/DEC) for quick shift detection.
+        if ((debug >= 2) && (model == LAYER_G2)) {
+            const int z = sim_pckt->cir_sz;
+            const int parity_start = sim_pckt->info_len;
+            const int parity_len = sim_pckt->blk_len - parity_start;
+            const int cols = (z > 0) ? (parity_len / z) : 0;
+            if ((cols > 0) && sim_pckt->dec_blk) {
+                printf("[DVC IBEX] parity_col_sig z=%d cols=%d tx=", z, cols);
+                for (int c = 0; c < cols; c++) {
+                    const int off = parity_start + c * z;
+                    const unsigned int s = dvc_sig_fnv1a_bits01(sim_pckt->tx_blk, off, z);
+                    printf("%s%08x", (c == 0) ? "" : ",", s);
+                }
+                printf(" rx=");
+                for (int c = 0; c < cols; c++) {
+                    const int off = parity_start + c * z;
+                    const unsigned int s = dvc_sig_fnv1a_rx_bins01(sim_pckt, off, z);
+                    printf("%s%08x", (c == 0) ? "" : ",", s);
+                }
+                printf(" dec=");
+                for (int c = 0; c < cols; c++) {
+                    const int off = parity_start + c * z;
+                    const unsigned int s = dvc_sig_fnv1a_bits01(sim_pckt->dec_blk, off, z);
+                    printf("%s%08x", (c == 0) ? "" : ",", s);
+                }
+                printf("\n");
+            }
+        }
+
+        // (2) Syndrome-weight after rotating parity by ±Z inside full QC view (dec_do_blk).
+        if ((debug >= 2) && (model == LAYER_G2) && sim_pckt->qc_bm && sim_pckt->dec_do_blk && (sim_pckt->cir_sz > 0) &&
+            (sim_pckt->hm_m > 0) && (sim_pckt->hm_n > 0) && (sim_pckt->hm_k >= 0) &&
+            ((sim_pckt->hm_k + sim_pckt->hm_m) <= sim_pckt->hm_n)) {
+            const int z = sim_pckt->cir_sz;
+            const int synd0 = dvc_qc_syndrome_weight_bm(sim_pckt->qc_bm, sim_pckt->dec_do_blk, sim_pckt->bm_m, z);
+            int synd_m1 = -1;
+            int synd_p1 = -1;
+            char *tmp = (char *)calloc(sim_pckt->hm_n, sizeof(*tmp));
+            if (tmp) {
+                memcpy(tmp, sim_pckt->dec_do_blk, sim_pckt->hm_n);
+                dvc_rotate_segment_left(tmp, sim_pckt->hm_k, sim_pckt->hm_m, z);
+                synd_m1 = dvc_qc_syndrome_weight_bm(sim_pckt->qc_bm, tmp, sim_pckt->bm_m, z);
+
+                memcpy(tmp, sim_pckt->dec_do_blk, sim_pckt->hm_n);
+                dvc_rotate_segment_left(tmp, sim_pckt->hm_k, sim_pckt->hm_m, sim_pckt->hm_m - z);
+                synd_p1 = dvc_qc_syndrome_weight_bm(sim_pckt->qc_bm, tmp, sim_pckt->bm_m, z);
+                free(tmp);
+            }
+            printf("[DVC IBEX] dec_synd_rot z=%d synd=%d rot(-1)=%d rot(+1)=%d\n", z, synd0, synd_m1, synd_p1);
+        }
+    }
+
+    if ((sd_num < 2) && !det_is_llr_bin && (debug >= 1)) {
         dvc_report_bit_mismatches_msb("[DVC IBEX] ldpc_dec det vs dec", sim_pckt->det_blk, sim_pckt->dec_blk,
                                       sim_pckt->blk_len, (debug >= 2) ? 4 : 0);
     }
@@ -602,6 +932,61 @@ void ch_err_inj(svOpenArrayHandle tx_data_sv, svOpenArrayHandle rx_data_sv, int 
     }
 
     dvc_check_words_against_bits_msb("ch_err_inj TX", tx_data, sim_pckt->tx_blk, sim_pckt->blk_len, debug);
+
+    // Sanity: the transmitted codeword should satisfy H (syndrome weight == 0).
+    // Use IBEX's own H representation to avoid relying on qc_hm (may be uninitialized on sc=512 path).
+    if ((debug >= 1) && (sim_pckt->hm_n > 0) && (sim_pckt->hm_m > 0) && (sim_pckt->hm_k > 0) &&
+        (sim_pckt->info_len >= 0) && (sim_pckt->pad_len >= 0) && (sim_pckt->blk_len > 0) && (sim_pckt->cir_sz == 512)) {
+        char *cw_full = (char *)calloc(sim_pckt->hm_n, sizeof(*cw_full));
+        if (!cw_full) {
+            printf("[DVC IBEX WARN] ch_err_inj tx_synd_wt_ibex skipped: alloc failed (hm_n=%d)\n", sim_pckt->hm_n);
+        } else {
+            // blk layout: [info_len][parity(bits_in_det)]
+            // hm  layout: [info_len][pad_len zeros][parity(hm_m full)]
+            for (int i = 0; i < sim_pckt->info_len && i < sim_pckt->blk_len; i++)
+                cw_full[i] = (char)(sim_pckt->tx_blk[i] & 1);
+
+            // Insert parity. For non-shortened case parity_bits_in_det == hm_m, this is a simple copy.
+            // For shortened parity tail in the first parity column, fill missing tail bits with 0.
+            const int parity_bits_in_det = sim_pckt->blk_len - sim_pckt->info_len;
+            if ((sim_pckt->h_matrix.extra_bits_of_parity > 0) && (parity_bits_in_det < sim_pckt->hm_m)) {
+                int first_parity_bits = sim_pckt->h_matrix.extra_bits_of_parity;
+                if (first_parity_bits > parity_bits_in_det)
+                    first_parity_bits = parity_bits_in_det;
+                for (int i = 0; i < first_parity_bits; i++)
+                    cw_full[sim_pckt->hm_k + i] = (char)(sim_pckt->tx_blk[sim_pckt->info_len + i] & 1);
+                for (int i = first_parity_bits; i < sim_pckt->cir_sz; i++)
+                    cw_full[sim_pckt->hm_k + i] = 0;
+                const int remaining = parity_bits_in_det - first_parity_bits;
+                for (int i = 0; i < remaining; i++)
+                    cw_full[sim_pckt->hm_k + sim_pckt->cir_sz + i] =
+                        (char)(sim_pckt->tx_blk[sim_pckt->info_len + first_parity_bits + i] & 1);
+            } else {
+                for (int i = 0; i < parity_bits_in_det; i++) {
+                    const int src = sim_pckt->info_len + i;
+                    const int dst = sim_pckt->hm_k + i;
+                    if ((src >= 0) && (src < sim_pckt->blk_len) && (dst >= 0) && (dst < sim_pckt->hm_n))
+                        cw_full[dst] = (char)(sim_pckt->tx_blk[src] & 1);
+                }
+            }
+
+            // Pad zeros (shortening) already zero-initialized in cw_full[info_len..hm_k-1].
+            s_hard_codeword vn;
+            memset(&vn, 0, sizeof(vn));
+            for (int j = 0; j < sim_pckt->h_matrix.cols; j++) {
+                for (int k = 0; k < sim_pckt->h_matrix.bits; k++) {
+                    vn.c[j].b[k] = (cw_full[j * sim_pckt->h_matrix.bits + k] & 1) ? true : false;
+                }
+            }
+            s_check_nodes cn = sim_pckt->f_check_nodes(sim_pckt->h_matrix, vn);
+            const int wt_ibex = sim_pckt->f_check_node_weight(sim_pckt->h_matrix, cn);
+            const int wt_qc =
+                (sim_pckt->qc_bm != NULL) ? dvc_qc_syndrome_weight_bm(sim_pckt->qc_bm, cw_full, sim_pckt->bm_m, sim_pckt->cir_sz) : -1;
+            printf("[DVC IBEX] ch_err_inj tx_synd_wt: ibex=%d qc_bm=%d (expect 0)\n", wt_ibex, wt_qc);
+        }
+        if (cw_full)
+            free(cw_full);
+    }
 
     // 2) Channel transmit
     sim_pckt->ch_transmit();

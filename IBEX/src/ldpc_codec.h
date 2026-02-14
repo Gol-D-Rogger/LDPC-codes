@@ -19,6 +19,7 @@ enum dec_model
     BF_G2 = 4,
     BF_IBEX = 5,
     LAYER = 8,
+    LAYER_G2 = 9,
 };
 
 struct cn_msg
@@ -327,7 +328,7 @@ struct ldpc_packet : ch_packet
 
     // LDPC layer decoder
     void ldpc_dec_layer();
-    void ldpc_dec_layer2();
+    void ldpc_dec_layer2(s_h_matrix);
     // Skip LDPC decoder
     void ldpc_dec_skip();
 
