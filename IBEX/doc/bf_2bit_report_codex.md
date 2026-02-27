@@ -1514,3 +1514,242 @@
 - 分析：
   - 在“固定 1000 包”口径下，V58 的两次 run 都未出现失败包，至少说明该组合没有明显副作用（未观察到 V52 那种灾难性发散）。
   - 由于 `IBEX_W2_STOCH=1` 且 AWGN 信道本身随机，`1000` 包样本方差仍然不小；要判断 V58 是否真正降低 error floor，仍需用 `/tmp/Ibex_hd_row11_eval1000.cnfg`（`max_err=10` 或更高）跑长窗对比，并建议重复多次取统计。
+
+- 追加评估（Row11@4.9，长窗；2026-02-15 15:14-15:29）：
+  - 配置：`/tmp/Ibex_hd_row11_eval1000.cnfg`（`max_sim_num=1000`, `max_err=10`）
+  - 命令：`IBEX_PPBF_ESC=1 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+  - 结果（达到 `FAIL CW=10` 停止）：`pkts=8380`, `LDPC FER=1.193317e-03`, `avg_iter=134.348926`
+  - 初步结论：本次长窗结果明显劣于 Row11 Top3（V51/V53/V46），因此 V58 暂不进入 Top3；如需排除随机波动，可再重复 1-2 次长窗，但当前证据更像“固定窗 0/1000 属于幸存者偏差”。
+
+### 方案 V59（纯 2bit，Row11@4.9，eval1000_0err，较差）：PPBF escape + mode-window + anneal（尝试抑制副作用）
+> 背景：V58 显示“固定窗 0/1000”并不意味着长窗更好。这里尝试把 PPBF-like 逃逸约束在 stall 触发的短窗口里，并加入简单退火（tail 初期开大、尾端收小），期望减少误翻副作用。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增全局窗口开关：`IBEX_MODE_WIN=1`（以及 `IBEX_MODE_WIN_LEN/IBEX_MODE_WIN_TRIG_ITERS`）。
+  - 新增 PPBF 退火开关：`IBEX_PPBF_ESC_ANNEAL=1`（以及 `IBEX_PPBF_ESC_ANNEAL_ITERS`）。
+- 评估（Row11@4.9，1000 包固定窗；2026-02-15 16:16）：
+  - 命令：`IBEX_MODE_WIN=1 IBEX_MODE_WIN_LEN=16 IBEX_MODE_WIN_TRIG_ITERS=8 IBEX_PPBF_ESC=1 IBEX_PPBF_ESC_ANNEAL=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000_0err.cnfg AWGN 4.9`
+  - 结果：`LDPC FER=2.000000e-03`（2/1000），`avg_iter=132.617`
+- 结论：该组合在固定窗就明显劣化，说明当前 p(E) 形状/窗口节奏仍偏激进（或窗口触发过早/过频），暂不继续走长窗。
+
+### 方案 V60（纯 2bit，Row11@4.9，长窗，较差）：rotate-k + column-global-escape + mode-window（UP-GDBF/backtracking 映射尝试）
+> 目标：利用“列级 escape + 回滚（backtracking）”在不引入 per‑VN 状态的前提下增强跳出 trapping-set 的能力；mode-window 仅在 stall 时对列级 escape 的接受率做小幅提升。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - mode-window 会在窗口内对列级 escape 的 `w==2` 接受率做轻微提升（约 $1/8 \\to 1/4$），并允许 `max_toggles` 轻微 +1（仍有 backtracking 保护）。
+- 评估（Row11@4.9，1000 包固定窗；2026-02-15 16:18）：
+  - 命令：`IBEX_COL_GLOBAL_ESC=1 IBEX_COL_GLOBAL_ESC_ITERS=8 IBEX_COL_GLOBAL_ESC_MAX_TOGGLES=2 IBEX_MODE_WIN=1 IBEX_MODE_WIN_LEN=16 IBEX_MODE_WIN_TRIG_ITERS=8 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000_0err.cnfg AWGN 4.9`
+  - 结果：`LDPC FER=1.000000e-03`（1/1000），`avg_iter=135.270`
+- 长窗（>=1000 包 + 10 错停止；2026-02-15 16:19-16:33）：
+  - 命令：`IBEX_COL_GLOBAL_ESC=1 IBEX_COL_GLOBAL_ESC_ITERS=8 IBEX_COL_GLOBAL_ESC_MAX_TOGGLES=2 IBEX_MODE_WIN=1 IBEX_MODE_WIN_LEN=16 IBEX_MODE_WIN_TRIG_ITERS=8 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+  - 结果：`pkts=8222`, `LDPC FER=1.216249e-03`, `avg_iter=133.941255`
+- 结论：该方案长窗明显劣于 Row11 Top3（V51/V53/V46），暂不进入 Top5 的靠前位置；列级 escape 的触发/接受策略仍需更谨慎的门控才能不伤正常包。
+
+### 方案 V61（纯 2bit，Row11@4.8，eval1000_0err，改进 ⭐）：phase1 使用更早的 aggr 门限（multi-phase 非对称）
+> 目标：利用多 phase 重启（`IBEX_RESTART_PHASES>=2`）提供“无 per‑VN 记忆的多样性”。保持 phase0 行为不变，只让 phase1（retry）使用更早的 aggr 门限，探索不同的收敛轨迹，优先优化 Row11@4.8（waterfall）。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增 env（默认不影响旧命令；未设置则继承 phase0）：
+    - `IBEX_PHASE1_AGGR_ITER_HI`
+    - `IBEX_PHASE1_AGGR_ITER_LO`
+    - `IBEX_PHASE1_AGGR_SYND_TH`
+    - `IBEX_PHASE1_AGGR_STRONG_SW_TH`
+  - 在每个 `phase` 初始化时，计算 `*_eff` 并用于 aggr gate 判定（仅 `phase>0` 时可能不同）。
+- 评估（Row11@4.8，固定 1000 包；2026-02-17）：
+  - 对照（V46，w2-boost only-when-pushing）：
+    - 命令：`IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.8`
+    - 结果：`LDPC FER=3.300000e-02`（33/1000），`avg_iter=254.711000`（log: `output/row11_v46_4p8_long10err_202602171350.log`）
+  - 对照（V51，rotate-k phase1 only）：
+    - 命令：`IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.8`
+    - 结果：`LDPC FER=4.200000e-02`（42/1000），`avg_iter=260.209000`（log: `output/row11_v51_4p8_long10err_202602171345.log`）
+  - V61（V51 基座 + phase1 aggr=180/90/240）：
+    - 命令：`IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000_0err.cnfg AWGN 4.8`
+    - 结果：`LDPC FER=2.700000e-02`（27/1000），`avg_iter=259.177000`（log: `output/row11_v61_4p8_eval1000_0err_202602171358.log`）
+- 扫参（Row11@4.8，固定窗；2026-02-17）：
+  - V62（phase1 aggr=160/80/240）：中途终止（`pkts=576` 时 `LDPC FER=2.951389e-02`；log: `output/row11_v62_4p8_eval1000_0err_202602171415.log`）
+  - V63（phase1 aggr=200/100/260）：中途终止（`pkts=700` 时 `LDPC FER=3.142857e-02`；log: `output/row11_v63_4p8_eval1000_0err_202602171416.log`）
+  - V64（V46 基座 + phase1 aggr=180/90/240）：中途终止（`pkts=340` 时 `LDPC FER=3.823529e-02`；log: `output/row11_v64_4p8_eval1000_0err_202602171429.log`）
+- Row11@4.9 回归（长窗到 `FAIL CW=10`；2026-02-17）：
+  - 命令：`IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+  - log：`output/row11_v61_4p9_long10err_202602171435.log`
+  - 结果（达到 `FAIL CW=10` 停止）：`pkts=11108`, `LDPC FER=9.002521e-04`, `avg_iter=133.749460`
+- Row11@4.7 waterfall 点（固定 300 包；2026-02-17）：
+  - 命令：`IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval300_0err.cnfg AWGN 4.7`
+  - log：`output/row11_v61_4p7_eval300_0err_202602171834.log`
+  - 结果：`pkts=300`, `LDPC FER=2.933333e-01`, `avg_iter=594.973333`
+- 分析：
+  - V61 的 4.9 长窗性能接近 V53（PPBF escape）量级，并明显优于 V46 baseline；虽然仍不及 V51（rotate-k）Top1，但说明“phase1 更早 aggr”并不会在 4.9 上造成明显回退，可作为 4.8 主战场方案的兜底回归。
+  - 在 4.7 下 `avg_iter` 明显增大（接近 600），意味着该点的仿真耗时会显著上升；后续若要补齐 4.7 的更多对照，建议统一使用 `eval300` 或更小窗先做趋势筛选。
+
+### 方案 V65（纯 2bit，Row11@4.8，P2 尝试）：w2 boost 的 syndrome-delta 分区门控（替代二值 pushing）
+> 目标：把“pushing 二值门控”升级为“按 syndrome delta 分区门控”，在 syndrome 明显恶化时禁止 w2 boost（避免火上浇油），仅在轻微停滞/恶化时允许（更细腻的 escape/稳定性折中）。不引入任何 per‑VN 跨迭代状态。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增 env（默认关闭，不影响旧命令）：
+    - `IBEX_W2_BOOST_SW_DELTA_GATE`
+    - `IBEX_W2_BOOST_SW_DELTA_HI`
+    - `IBEX_W2_BOOST_SW_DELTA_MIN_ITER`
+  - 仅在 `phase>0` 且 `iteration>=MIN_ITER` 时生效：计算列内 `sw_delta_col = syndrome_weight_delayed - prev_sw_col`，并要求 $0\\le sw\\_delta\\_col \\le HI$ 才允许本列的 w2 boost（包括随机 boost / stall escape / PPBF escape / phase1 not-pushing hatch）。
+- 评估（Row11@4.8，短窗快速筛选；2026-02-17）：
+  - V66（HI=8，跑满 300 包）：
+    - 命令：`IBEX_W2_BOOST_SW_DELTA_GATE=1 IBEX_W2_BOOST_SW_DELTA_HI=8 IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval300_0err.cnfg AWGN 4.8`
+    - 结果：`pkts=300`, `LDPC FER=3.333333e-02`, `avg_iter=268.580000`（log: `output/row11_v66_4p8_eval300_0err_202602171714.log`）
+  - V67（HI=2，中途终止）：
+    - 命令：`IBEX_W2_BOOST_SW_DELTA_GATE=1 IBEX_W2_BOOST_SW_DELTA_HI=2 IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval300_0err.cnfg AWGN 4.8`
+    - 结果：`pkts=138` 时 `LDPC FER=4.347826e-02`（log: `output/row11_v67_4p8_eval300_0err_202602171720.log`）
+- 结论：
+  - 目前在短窗筛选中未观察到明确收益；该门控较可能需要重新选择 delta 的定义/阈值标定，暂不作为 4.8 主线。
+
+### 方案 V71（纯 2bit，Row11@4.8，P1 延伸尝试）：retry phase 放开 post gate + phase1 not-pushing 的 w2 boost hatch
+> 目标：在不改变 phase0 行为的前提下，为 retry phase（`phase>0`）增加两种“小扰动多样性”来源：  
+> 1) 允许在 aggr 阶段也执行 post 随机扰动（仅 retry phase 生效）；  
+> 2) 在 not-pushing 时给极小概率的 `w=2 -> 3` boost（仅 retry phase 生效），以打破少数 trapping-set 的确定性循环。  
+> 约束：不引入任何 per‑VN 跨迭代状态，仅使用已有 PRNG gate。
+- 改动（env 开关，无代码改动）：
+  - `IBEX_RESTART_RELAX_POST_GATE=1`：仅在 `phase>0` 时，允许 `aggr` 阶段也启用 post 随机扰动（对齐“副作用隔离到 retry phase”的原则）。
+  - `IBEX_PHASE1_W2_NOT_PUSHING=1`：仅在 `phase>0` 且趋势 not-pushing 时，对“bad candidate”（弱/不可靠）以约 $1/4$ 概率允许 `w=2 -> 3` boost。
+- 评估（Row11@4.8，`eval300_0err`；2026-02-17）：
+  - V69（仅 `phase1_w2_not_pushing`）：
+    - 命令：`IBEX_PHASE1_W2_NOT_PUSHING=1 IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval300_0err.cnfg AWGN 4.8`
+    - 结果：`pkts=300`, `LDPC FER=3.666667e-02`, `avg_iter=253.056667`（log: `output/row11_v69_4p8_eval300_0err_202602171900.log`）
+  - V70（仅 `restart_relax_post_gate`）：
+    - 命令：`IBEX_RESTART_RELAX_POST_GATE=1 IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval300_0err.cnfg AWGN 4.8`
+    - 结果：`pkts=300`, `LDPC FER=3.000000e-02`, `avg_iter=267.483333`（log: `output/row11_v70_4p8_eval300_0err_202602171905.log`）
+  - V71（两者都开）：
+    - 命令：`IBEX_RESTART_RELAX_POST_GATE=1 IBEX_PHASE1_W2_NOT_PUSHING=1 IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval300_0err.cnfg AWGN 4.8`
+    - 结果：`pkts=300`, `LDPC FER=2.666667e-02`, `avg_iter=270.153333`（log: `output/row11_v71_4p8_eval300_0err_202602171911.log`）
+- 复核（Row11@4.8，`eval1000_0err`；2026-02-17）：
+  - V71：
+    - 命令：`IBEX_RESTART_RELAX_POST_GATE=1 IBEX_PHASE1_W2_NOT_PUSHING=1 IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000_0err.cnfg AWGN 4.8`
+    - 结果：`pkts=1000`, `LDPC FER=3.400000e-02`, `avg_iter=255.438000`（log: `output/row11_v71_4p8_eval1000_0err_202602171917.log`）
+- 结论：
+  - `eval300` 上 V71 看起来有一定优势，但在 `eval1000` 上未体现稳定收益；暂不推进到 4.9 长窗回归，保留该组合为“retry-phase 多样性扰动”的备选分支。
+
+### 方案 V73（纯 2bit，Row11@4.8，P1 延伸尝试）：phase1 的 w=2 boost 档位（`IBEX_PHASE1_W2_BOOST_TO`）
+> 目标：在不改变 phase0 的前提下，为 retry phase（`phase>0`）提供额外“推力档位”，尝试把默认的 `w=2 -> 3` boost 升级为更强的 `w=2 -> 4/5`（仅 retry phase 生效），以形成不同的收敛轨迹。  
+> 风险：2bit 量化下全步/过强推力容易饱和或发散，因此该档位只作为 phase1 多样性候选。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增 env：`IBEX_PHASE1_W2_BOOST_TO`（默认 `3`，clamp 到 `[3,7]`；未设置时行为与历史版本一致）。
+  - 仅影响 `phase>0` 的 `weight==2` boost：将原本的 `w=3` 替换为 `w=w2_boost_to_eff`（`phase==0` 仍为 `3`）。
+- 评估（Row11@4.8，`eval300_0err`；2026-02-17）：
+  - V72（`IBEX_PHASE1_W2_BOOST_TO=4`）：
+    - 命令：`IBEX_PHASE1_W2_BOOST_TO=4 IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval300_0err.cnfg AWGN 4.8`
+    - 结果：`pkts=300`, `LDPC FER=3.000000e-02`, `avg_iter=268.436667`（log: `output/row11_v72_4p8_eval300_0err_202602171941.log`）
+  - V73（`IBEX_PHASE1_W2_BOOST_TO=5`）：
+    - 命令：`IBEX_PHASE1_W2_BOOST_TO=5 IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=2 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval300_0err.cnfg AWGN 4.8`
+    - 结果：`pkts=300`, `LDPC FER=5.666667e-02`, `avg_iter=285.746667`（log: `output/row11_v73_4p8_eval300_0err_202602171947.log`）
+- 结论：
+  - `IBEX_PHASE1_W2_BOOST_TO=4` 未观察到明确收益；`=5` 明显劣化（疑似推力过强导致不稳定/误翻）。该方向暂不推进到 `eval1000` 与 4.9 长窗。
+
+### 方案 V74（纯 2bit，Row11@4.8，P1 延伸尝试）：提高多 phase 重启次数（`IBEX_RESTART_PHASES=3`）
+> 目标：在不新增 per‑VN 状态的前提下，用“更多 retry phase”提供更强的解码多样性（PRNG/调度不同），以提升 waterfall（4.8）收敛成功率；并观察对 4.9 error-floor 是否有副作用。
+- 改动（env 开关，无代码改动）：
+  - 基于 V61（phase1 更早 aggr + rotate-k retry-only + w2 stochastic + dynamic pushing），仅提高 `IBEX_RESTART_PHASES`：
+    - 对照：`IBEX_RESTART_PHASES=2`（历史默认主线）
+    - 候选：`IBEX_RESTART_PHASES=3/4`
+- 评估（Row11@4.8，`eval300_0err`；2026-02-17）：
+  - V74（`IBEX_RESTART_PHASES=3`）：
+    - 命令：`IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=3 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval300_0err.cnfg AWGN 4.8`
+    - 结果：`pkts=300`, `LDPC FER=1.333333e-02`, `avg_iter=246.540000`（log: `output/row11_v74_4p8_eval300_0err_202602171955.log`）
+  - V75（`IBEX_RESTART_PHASES=4`）：
+    - 命令：`IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=4 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval300_0err.cnfg AWGN 4.8`
+    - 结果：`pkts=300`, `LDPC FER=4.000000e-02`, `avg_iter=266.593333`（log: `output/row11_v75_4p8_eval300_0err_202602172000.log`）
+- 复核（Row11@4.8，`eval1000_0err`；2026-02-17）：
+  - V74（`IBEX_RESTART_PHASES=3`）：
+    - 命令：`IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=3 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000_0err.cnfg AWGN 4.8`
+    - 结果：`pkts=1000`, `LDPC FER=2.600000e-02`, `avg_iter=254.117000`（log: `output/row11_v74_4p8_eval1000_0err_202602172008.log`）
+- Row11@4.9 回归（长窗到 `FAIL CW=10`；2026-02-17）：
+  - 命令：`IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=3 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval1000.cnfg AWGN 4.9`
+  - log：`output/row11_v74_4p9_long10err_202602172027.log`
+  - 结果（达到 `FAIL CW=10` 停止）：`pkts=26723`, `LDPC FER=3.742095e-04`, `avg_iter=132.728436`
+- 分析：
+  - `IBEX_RESTART_PHASES=3` 在 4.8 的 `eval1000` 上优于 V61，且在 4.9 长窗也显著优于旧 Top1（V51：`LDPC FER=6.667111e-04`）；当前可视为 Row11@4.8 + Row11@4.9 的最优纯 2bit 配置。
+
+### 方案 V76（纯 2bit，Row11@4.8，phase2-only 轻扰动）：phase2 放开 post gate + not-pushing w2 hatch
+> 目标：进一步把“有风险的扰动”隔离到 `phase>=2`（第 3 次重启），尽量不影响 phase0/1 的正常收敛包；观察是否能救回少量顽固包。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增 env（默认关闭，不影响历史命令）：
+    - `IBEX_PHASE2_RELAX_POST_GATE`：仅在 `phase>=2` 时，允许 `aggr` 阶段也启用 post 随机扰动。
+    - `IBEX_PHASE2_W2_NOT_PUSHING`：仅在 `phase>=2` 且趋势 not-pushing 时，允许极小概率的 `w=2 -> 3` boost。
+- 评估（Row11@4.8，`eval300_0err`；2026-02-18）：
+  - 命令：`IBEX_PHASE2_RELAX_POST_GATE=1 IBEX_PHASE2_W2_NOT_PUSHING=1 IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=3 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval300_0err.cnfg AWGN 4.8`
+  - 结果：`pkts=300`, `LDPC FER=1.666667e-02`, `avg_iter=240.246667`（log: `output/row11_v76_4p8_eval300_0err_202602180120.log`）
+- 结论：短窗未观察到优于 V74（`LDPC FER=1.333333e-02`），暂不推进到 `eval1000`/4.9 长窗。
+
+### 方案 V77（纯 2bit，Row11@4.8，phase2-only 档位）：phase2 的 w=2 boost 档位（`IBEX_PHASE2_W2_BOOST_TO=4`）
+> 目标：只在 `phase>=2` 提供更强 `w=2` 推力档位，尝试形成与 phase1 不同的收敛轨迹。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增 env：`IBEX_PHASE2_W2_BOOST_TO`（未设置时 phase2 继承 phase1；设置后仅在 `phase>=2` 覆盖）。
+- 评估（Row11@4.8，`eval300_0err`；2026-02-18）：
+  - 命令：`IBEX_PHASE2_W2_BOOST_TO=4 IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=3 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval300_0err.cnfg AWGN 4.8`
+  - 结果：`pkts=300`, `LDPC FER=2.333333e-02`, `avg_iter=247.026667`（log: `output/row11_v77_4p8_eval300_0err_202602180125.log`）
+- 结论：短窗明显劣化，推力档位过强的风险仍成立，放弃该方向。
+
+### 方案 V78（纯 2bit，Row11@4.8，phase2-only 概率门控）：FM-PGDBF 风格“翻转概率抑制”
+> 目标：在 `phase>=2` + tail 阶段，对 `weight<=3` 的翻转事件施加概率门控（默认约 $3/4$ 放行），打破确定性时间循环。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增 env（默认关闭）：
+    - `IBEX_PHASE2_FLIP_RAND_GATE`
+    - `IBEX_PHASE2_FLIP_RAND_GATE_MAX_W`（默认 3）
+    - `IBEX_PHASE2_FLIP_RAND_GATE_GATES`（默认 2，对应约 $1-(1/2)^2=3/4$ 放行）
+  - 实现：仅在 `phase>=2` + `iteration>=post_iteration` + `hamming_weight_lt_circ_thr` 下生效；若被门控，则把 likelihood clamp 回阈值边界以取消本次翻转。
+- 评估（Row11@4.8，`eval300_0err`；2026-02-18）：
+  - 命令：`IBEX_PHASE2_FLIP_RAND_GATE=1 IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=3 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval300_0err.cnfg AWGN 4.8`
+  - 结果：`pkts=300`, `LDPC FER=3.333333e-02`, `avg_iter=240.480000`（log: `output/row11_v78_4p8_eval300_0err_202602180131.log`）
+- 结论：短窗明显劣化，说明“直接抑制翻转”在当前框架下更像在拖慢收敛而非破环，放弃。
+
+### 方案 V79/V80（纯 2bit，Row11@4.8，phase2-only 非对称）：phase2 独立 aggr 门限
+> 目标：让 phase1 与 phase2 走不同的 aggr gate（不改 phase0），提供更强的多样性。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增 env（默认继承 phase1，不影响历史命令）：
+    - `IBEX_PHASE2_AGGR_ITER_HI/LO/SYND_TH/STRONG_SW_TH`
+- 评估（Row11@4.8，`eval300_0err`；2026-02-18）：
+  - V79（phase2 退回 phase0 门限 240/120/280）：
+    - 命令：`IBEX_PHASE2_AGGR_ITER_HI=240 IBEX_PHASE2_AGGR_ITER_LO=120 IBEX_PHASE2_AGGR_SYND_TH=280 IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=3 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval300_0err.cnfg AWGN 4.8`
+    - 结果：`pkts=300`, `LDPC FER=1.666667e-02`, `avg_iter=249.660000`（log: `output/row11_v79_4p8_eval300_0err_202602180136.log`）
+  - V80（phase2 更早 aggr=160/80/240）：
+    - 命令：`IBEX_PHASE2_AGGR_ITER_HI=160 IBEX_PHASE2_AGGR_ITER_LO=80 IBEX_PHASE2_AGGR_SYND_TH=240 IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=3 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval300_0err.cnfg AWGN 4.8`
+    - 结果：`pkts=300`, `LDPC FER=2.333333e-02`, `avg_iter=246.540000`（log: `output/row11_v80_4p8_eval300_0err_202602180142.log`）
+- 结论：短窗未见收益；phase2 门限走更早/更晚都未形成有效互补，暂不继续扩展扫参。
+
+### 方案 V81（纯 2bit，Row11@4.8，phase2-only 热列定向 escape）：col-global-escape + hot-column targeting
+> 目标：把列级 escape 限制到 `phase>=2`，并把“每迭代随机选列”改为“选热列”，减少无谓扰动。
+- 改动（`src/ldpc_codec_test2.cpp`）：
+  - 新增 env：
+    - `IBEX_COL_GLOBAL_ESC_MIN_PHASE`（默认 1；设为 2 可做到 phase2-only）
+    - `IBEX_COL_ESC_TARGET_HOT`（热列选择）
+    - `IBEX_COL_ESC_TARGET_HOT_MIN_PHASE`（默认 2）
+    - `IBEX_COL_ESC_TARGET_HOT_MIN_ITER`（默认 `post_iteration`）
+  - 实现要点：
+    - 每次 iteration 统计每列的 `col_weight_sum = \\sum_k weight(j,k)`，用最大者作为下一轮热列；
+    - 若 `IBEX_COL_ESC_TARGET_HOT` 生效，则用热列替代随机 `col_esc_target_col`；
+    - 同时将 `stall_count_w2` 的更新条件扩展为包含 `col_global_esc/mode_win/ngdbf_noise`（避免“开了但不生效”）。
+- 评估（Row11@4.8，`eval300_0err`；2026-02-18）：
+  - 命令：`IBEX_COL_GLOBAL_ESC=1 IBEX_COL_GLOBAL_ESC_MIN_PHASE=2 IBEX_COL_ESC_TARGET_HOT=1 IBEX_COL_ESC_TARGET_HOT_MIN_PHASE=2 IBEX_COL_ESC_TARGET_HOT_MIN_ITER=50 IBEX_COL_GLOBAL_ESC_ITERS=8 IBEX_COL_GLOBAL_ESC_MAX_TOGGLES=1 IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=3 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval300_0err.cnfg AWGN 4.8`
+  - 结果：`pkts=300`, `LDPC FER=3.000000e-02`, `avg_iter=255.016667`（log: `output/row11_v81_4p8_eval300_0err_202602180159.log`）
+- 结论：短窗未见正收益；列级 escape 即使隔离到 phase2 仍可能带来额外误翻风险，暂不继续。
+
+### 方案 V82/V83/V84（纯 2bit，Row11@4.8，多 phase PRNG 去相关扫参）：`IBEX_RESTART_PRNG_SKIP`
+> 目标：在保持 `IBEX_RESTART_PHASES=3`（V74）不变的前提下，调整不同 phase 的 PRNG skip 步数，提供更强的 restart 多样性（不改算法、不加 per‑VN 状态）。
+- 改动（env 开关，无代码改动）：
+  - `IBEX_RESTART_PRNG_SKIP`：`skip_steps = phase * IBEX_RESTART_PRNG_SKIP`（在 `post_iteration` 初始化 LFSR 后跳步）。
+- 评估（Row11@4.8，`eval300_0err`；2026-02-18）：
+  - 对照（V74，默认 `IBEX_RESTART_PRNG_SKIP=73`，见上文）：`LDPC FER=1.333333e-02`（4/300）。
+  - V82（`IBEX_RESTART_PRNG_SKIP=37`）：
+    - 命令：`IBEX_RESTART_PRNG_SKIP=37 IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=3 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval300_0err.cnfg AWGN 4.8`
+    - 结果：`pkts=300`, `LDPC FER=3.666667e-02`, `avg_iter=264.463333`（log: `output/row11_v82_4p8_eval300_0err_202602181051.log`）
+  - V83（`IBEX_RESTART_PRNG_SKIP=131`）：
+    - 命令：`IBEX_RESTART_PRNG_SKIP=131 IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=3 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval300_0err.cnfg AWGN 4.8`
+    - 结果：`pkts=300`, `LDPC FER=2.333333e-02`, `avg_iter=240.256667`（log: `output/row11_v83_4p8_eval300_0err_202602181058.log`）
+  - V84（`IBEX_RESTART_PRNG_SKIP=257`）：
+    - 命令：`IBEX_RESTART_PRNG_SKIP=257 IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=3 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval300_0err.cnfg AWGN 4.8`
+    - 结果：`pkts=300`, `LDPC FER=2.000000e-02`, `avg_iter=246.986667`（log: `output/row11_v84_4p8_eval300_0err_202602181103.log`）
+- 结论：
+  - 短窗下未观察到优于默认 `IBEX_RESTART_PRNG_SKIP=73` 的组合；该方向暂不继续扩展扫参。
+
+### 方案 V85（纯 2bit，Row11@4.8，syndrome-delta 门控）：`IBEX_W2_BOOST_SW_DELTA_GATE`
+> 目标：对 retry phase 的 `w=2` boost 加入更细腻的全局门控：当 syndrome-weight 明显恶化时禁止 boost（避免火上浇油），改善趋势中也禁止 boost（不打扰收敛）。
+- 改动（env 开关，无代码改动；功能已在 `src/ldpc_codec_test2.cpp` 中实现）：
+  - `IBEX_W2_BOOST_SW_DELTA_GATE=1`
+  - `IBEX_W2_BOOST_SW_DELTA_HI=8`（默认 8）
+  - `IBEX_W2_BOOST_SW_DELTA_MIN_ITER=50`（默认 `post_iteration`）
+- 评估（Row11@4.8，`eval300_0err`；2026-02-18）：
+  - 命令：`IBEX_W2_BOOST_SW_DELTA_GATE=1 IBEX_W2_BOOST_SW_DELTA_HI=8 IBEX_W2_BOOST_SW_DELTA_MIN_ITER=50 IBEX_PHASE1_AGGR_ITER_HI=180 IBEX_PHASE1_AGGR_ITER_LO=90 IBEX_PHASE1_AGGR_SYND_TH=240 IBEX_ROTATE_K=1 IBEX_ROTATE_K_PHASE1_ONLY=1 IBEX_W2_BOOST_ONLY_WHEN_PUSHING=1 IBEX_2BIT_MODE=2 IBEX_AGGR_ITER_HI=240 IBEX_AGGR_ITER_LO=120 IBEX_AGGR_SYND_TH=280 IBEX_PUSH_DYNAMIC=1 IBEX_W2_STOCH=1 IBEX_RESTART_PHASES=3 ./ssd_fc_test2 LDPC /tmp/Ibex_hd_row11_eval300_0err.cnfg AWGN 4.8`
+  - 结果：`pkts=300`, `LDPC FER=3.666667e-02`, `avg_iter=261.240000`（log: `output/row11_v85_4p8_eval300_0err_202602181112.log`）
+- 结论：短窗显著劣化；说明该门控在当前“pushing + w2 stochastic”的节奏下更像是在削弱有效推力，暂不继续扩展阈值扫参。

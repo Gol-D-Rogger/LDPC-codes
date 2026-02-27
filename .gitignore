@@ -6,12 +6,15 @@ build_dq/
 gen4_ldpc_sim/.cache
 ssd_fc*
 GenLDPC/ldpc_gen
+GenLDPC_T4/ldpc_gen
+mpicode/LLH_MPI/ldpc_sim
 
 # Output directories
 GenLDPC/output/
 gen4_ldpc_sim/output/
 output/
 runs/
+mpicode/MS_MPI/src/matrice
 
 doc_untracked/
 IBEX/config/AllMatrixTest

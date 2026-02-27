@@ -260,8 +260,8 @@ void ldpc_config(int h_m,
 
     sim_pckt = &ldpc_pckt;
 
-    const float m_ch_para = (float)ch_para / 100.0f;
-    const float m_alpha = (float)alpha / 100.0f;
+    const float m_ch_para = (float)ch_para / 1000.0f;
+    const float m_alpha = (float)alpha / 1000.0f;
     const float m_llr0 = (float)llr0 / 16.0f;
     const float m_llr1 = (float)llr1 / 16.0f;
 
