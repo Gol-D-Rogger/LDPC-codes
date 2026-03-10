@@ -1,0 +1,23 @@
+76                              // meta data size (B)
+512                             // LBA size(B)
+8                               // LBA # per DSP CW
+4176                            // userdata size (B)
+608                             // parity size (B)
+10                               // row number of base matrix
+77                              // column number of base matrix
+512                             // circulant number
+10000                           // maximum simulation number
+10                              // maximum error number
+32                              // Retry decoder maximum iteration number
+0.625                           // Retry decoder alpha
+1                               // Quantization Mode
+8                               // APP/Q bit width
+6                               // R bit width (Min need 1-bit less)
+3                               // Fraction bits
+7                               // LLR bit width
+3                               // LLR fraction bits
+7                               // Number of NAND soft data bits
+0 0.15 -0.15 0.3 -0.3 0.5 -0.5  // VERF values
+1.875 -1.875                    // Hard decoding LLR for retry decoder
+104C11DB7                       // CRC 32 polynomial values
+104C11DB7                       // 32-bit LSFR for randomizer

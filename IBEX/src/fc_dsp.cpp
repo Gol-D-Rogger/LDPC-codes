@@ -5,7 +5,6 @@
 
 #include "vec_op.h"
 #include "finite_lib.h"
-#include "ldpc_codec.h"
 #include "fc_dsp.h"
 
 // randomizer cofiguration

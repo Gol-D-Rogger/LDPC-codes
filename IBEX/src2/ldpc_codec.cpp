@@ -15,57 +15,6 @@
 #include "mod2sparse.h"
 #include "vec_op.h"
 
-namespace {
-// A small, deterministic PRNG that matches the historical BSD/glibc `random()` algorithm
-// (TYPE_3: DEG=31, SEP=3) seeded by `srandom(seed)`.
-//
-// Rationale:
-// - `rand()/srand()` are implementation-defined across platforms (macOS vs Linux/glibc differ),
-//   which makes the generated IBEX `occupied/fade` matrix platform-dependent.
-// - The IBEX matrix generation originally used `srand(1); rand() % 67;`, which matches glibc's
-//   `rand()` sequence on Linux. We emulate that sequence here so macOS and Linux align.
-struct dvc_glibc_rand31 {
-  static constexpr int kDeg = 31;
-  static constexpr int kSep = 3;
-
-  uint32_t state[kDeg]{};
-  int fptr = 0;
-  int rptr = 0;
-
-  void seed(uint32_t seed_val) {
-    if (seed_val == 0)
-      seed_val = 1;
-
-    state[0] = seed_val & 0x7FFFFFFFu;
-    for (int i = 1; i < kDeg; i++) {
-      const uint64_t prod = 16807ULL * state[i - 1];
-      state[i] = static_cast<uint32_t>(prod % 2147483647ULL);
-    }
-
-    fptr = kSep;
-    rptr = 0;
-
-    // Warm up: BSD/glibc do 10*DEG calls after seeding.
-    for (int i = 0; i < 10 * kDeg; i++)
-      (void)next_u31();
-  }
-
-  uint32_t next_u31() {
-    const uint32_t v = state[fptr] + state[rptr];
-    state[fptr] = v;
-    const uint32_t out = (v >> 1) & 0x7FFFFFFFu;
-
-    fptr++;
-    rptr++;
-    if (fptr >= kDeg)
-      fptr = 0;
-    if (rptr >= kDeg)
-      rptr = 0;
-    return out;
-  }
-};
-} // namespace
-
 static void dvc_bins_to_hard_bits(const char *bins,
                                   char *hard_bits,
                                   int n_bits,
@@ -773,7 +722,7 @@ void ldpc_packet::print_hm() {
 	          if (sch_idx >= (1 << 10)) {
 	            printf("[LDPC Warning] RDEC-scheduler address overflow: sch_idx=%d (needs >10 bits)\n", sch_idx);
 	          }
-	          fprintf(fp1, "9'd%-6d:mmem_rdt=42'h%011llX;\n", sch_idx, mmem_word);
+	          fprintf(fp1, "10'd%-6d:mmem_rdt=44'h%011llX;\n", sch_idx, mmem_word);
 	        }
 	      }
 
@@ -796,7 +745,7 @@ void ldpc_packet::print_hm() {
 	          if (sch_idx >= (1 << 10)) {
 	            printf("[LDPC Warning] RDEC-scheduler address overflow: sch_idx=%d (needs >10 bits)\n", sch_idx);
 	          }
-	          fprintf(fp1, "9'd%-6d:mmem_rdt=42'h%011llX;\n", sch_idx, mmem_word);
+	          fprintf(fp1, "10'd%-6d:mmem_rdt=44'h%011llX;\n", sch_idx, mmem_word);
 	        }
 	      }
 		    }
@@ -1464,15 +1413,7 @@ void ldpc_packet::f_print_h_matrix(s_h_matrix h_matrix) {
   int i;
   int j;
   for (i = 0; i < h_matrix.rows; i++) {
-    //printf("%02d  ", h_matrix.row_weight[i]);
-    int row_nz_cnt = 0;
-    for (j = 0; j < h_matrix.cols; j++) {
-      if (h_matrix.occupied[i][j] || h_matrix.fade[i][j])
-        row_nz_cnt++;
-    }
-    const int wrap_num_deltas = (row_nz_cnt > 0) ? (row_nz_cnt - 1) : 0;
-    printf("WB=%03d FE=%03d WA=%03d ND=%02d RW=%02d  ", h_matrix.last_element[i], h_matrix.first_element[i],
-           h_matrix.wraparound[i], wrap_num_deltas, h_matrix.row_weight[i]);
+    printf("%02d  ", h_matrix.row_weight[i]);
     for (j = 0; j < h_matrix.cols; j++) {
       if (h_matrix.bits > 256) {
         if (h_matrix.occupied[i][j])
@@ -1773,7 +1714,6 @@ s_likelihood_levels ldpc_packet::f_likelihood_levels(int strobes, s_ldpc_decoder
   likelihood_levels.max = (1 << VN_BITS) - 1;
   likelihood_levels.min = 0;
 
-  // VN 位宽自适应的翻转阈值与强弱档初始化
   if (VN_BITS <= 2) {
     likelihood_levels.flip_thr = 2; // 3
     likelihood_levels.weak = 0;     // 2
@@ -1811,6 +1751,11 @@ s_likelihood_levels ldpc_packet::f_likelihood_levels(int strobes, s_ldpc_decoder
       coef_index = 6;
     else if (rows == 13)
       coef_index = 7;
+    else if (rows == 14 || rows == 15)
+      coef_index = 8;
+    else if (rows == 16 || rows == 17)
+      coef_index = 9;
+    
     coef[0] = ldpc_decoder_parameters.likelihood_init_coef_all[coef_index][0];
     coef[1] = ldpc_decoder_parameters.likelihood_init_coef_all[coef_index][1];
     coef[2] = ldpc_decoder_parameters.likelihood_init_coef_all[coef_index][2];
@@ -1923,7 +1868,7 @@ int ldpc_packet::f_update_vn_post(int likelihood, int weight, int min_likelihood
 // }
 
 // LDPC code configuration
-void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt, char *pchk_file) {
+void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt, char *pchk_file, char *occupied_file, char *fade_file) {
   // QC matrix sizes
   bm_m = m;
   bm_n = n;
@@ -1959,7 +1904,10 @@ void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt, char *pchk_f
     int j;
     int k;
     int bit;
-    int h_matrix_index[13];
+    int col_shift;
+    int mask_flag;
+    int h_matrix_index[17];
+    FILE *fp_h, *fp_occupied, *fp_fade;
 
     h_matrix.rows = m;
     h_matrix.cols = n;
@@ -1967,7 +1915,7 @@ void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt, char *pchk_f
     h_matrix.bytes_of_userdata = info_len / 8;
     h_matrix.bytes_of_parity = (blk_len - info_len) / 8;
     h_matrix.min_rows = 5;
-    h_matrix.max_rows = 13;
+    h_matrix.max_rows = 17;
 
     h_matrix.unused_bytes_of_parity =
         (h_matrix.rows * (h_matrix.bits >> 3)) - h_matrix.bytes_of_parity; // padding bytes
@@ -1992,229 +1940,92 @@ void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt, char *pchk_f
              h_matrix.bits, h_matrix.rows, h_matrix.cols, h_matrix.bytes_of_userdata, h_matrix.bytes_of_parity,
              h_matrix.extra_bytes_of_userdata, h_matrix.extra_bytes_of_parity);
 
-    int mx[13][80];
-    int my[13][80];
-    int rw[13][80] = {};
-    int rw_max[13 + 1];
-    int rw_min[13 + 1];
-    float rw_avg[13 + 1];
-    int num_reduced;
-    bool ldpc_matrix_occupied[13][13][80];
-    int ldpc_matrix_fade[13][13][80];
-    for (k = 0; k < 13; k++) {
-      for (i = 0; i < 13; i++) {
-        for (j = 0; j < 80; j++) {
-          ldpc_matrix_occupied[k][i][j] = 0;
-          ldpc_matrix_fade[k][i][j] = 0;
-        }
+    // --- Read full matrix (m × n_full), then trim to (m × n) ---
+    const int BASE_PAYLOAD_COLS = 67;
+    int n_full = BASE_PAYLOAD_COLS + m;
+    if (n > n_full) {
+      printf("[LDPC Error] target n=%d > n_full=%d, cannot trim\n", n, n_full);
+      exit(1);
+    }
+    if (n_full != n)
+      printf("[LDPC] Matrix trimming: read %dx%d, trim to %dx%d (K %d->%d)\n",
+             m, n_full, m, n, n_full - m, n - m);
+
+    // Allocate full-size buffers for file reading
+    int** full_shift;
+    int** full_fade;
+    full_shift = (int**)calloc(m, sizeof(*full_shift));
+    for (i = 0; i < m; i++)
+      full_shift[i] = (int*)calloc(n_full, sizeof(*full_shift[i]));
+    full_fade = (int**)calloc(m, sizeof(*full_fade));
+    for (i = 0; i < m; i++)
+      full_fade[i] = (int*)calloc(n_full, sizeof(*full_fade[i]));
+
+    fp_h = fopen(pchk_file, "r");
+    fp_occupied = fopen(occupied_file, "r");
+    fp_fade = fopen(fade_file, "r");
+
+    if (!fp_h || !fp_fade) {
+      printf("[LDPC Error] Cannot open matrix files\n");
+      exit(1);
+    }
+
+    // Read full m × n_full matrix from files
+    for (int i = 0; i < m; i++) {
+      for (int j = 0; j < n_full; j++) {
+        fscanf(fp_h, "%d", &col_shift);
+        fscanf(fp_fade, "%d", &mask_flag);
+        full_shift[i][j] = col_shift;
+        full_fade[i][j] = mask_flag;
       }
     }
 
-    for (i = 5 - 1; i < 13; i++) {
-      rw_avg[i] = (float)(4 * (67 + i + 1)) / (float)(i + 1);
-      rw_min[i] = int(rw_avg[i]);
-      rw_max[i] = int(rw_avg[i] + 0.999999);
-      if (VERBOSITY > 0)
-        printf("### FOR MATRIX %2d, ROW_WEIGHT_AVG: %8.4f = %2d %d/%d   MIN: %2d MAX: %2d\n", i, rw_avg[i],
-               int(rw_avg[i]), int(rw_avg[i] * (i + 1)) % (i + 1), (i + 1), rw_min[i], rw_max[i]);
+    fclose(fp_h);
+    if (fp_occupied) fclose(fp_occupied);
+    fclose(fp_fade);
+
+    for (i = 0; i < h_matrix.rows; i++) {
+      h_matrix.last_element[i] = 0;
+      h_matrix.first_element[i] = 0;
+      h_matrix.wraparound[i] = 0;
+      h_matrix.wrap_base[i] = 0;
+      h_matrix.wrap_num_deltas[i] = 0;
     }
 
-		    dvc_glibc_rand31 matrix_rng;
-		    matrix_rng.seed(1);
+    // Column mapping: trim n_full → n
+    // payload cols j=[0, n-m): take from full col j
+    // parity  cols j=[n-m, n): take from full col (n_full - n + j)
+    for (int i = 0; i < m; i++) {
+      for (int j = 0; j < n; j++) {
+        int src_col = (j < n - m) ? j : (n_full - n + j);
+        col_shift = full_shift[i][src_col];
+        mask_flag = full_fade[i][src_col];
+        h_matrix.element[i][j] = -1;
 
-    bool use_location;
-    for (i = 0; i < 5; i++) {
-      for (j = 75; j < 80; j++) {
-        k = 80 - 1 - j;
-        use_location = (k % 5) != i;
-        if ((i == (5 - 1)) && (j == (80 - 1)))
-          use_location = 0; // Make matrix invertible
-        if (use_location) {
-          ldpc_matrix_occupied[5 - 1][i][j] = 1;
-          rw[5 - 1][i]++;
-        }
-      }
-    } // Generate 5 x 5 sub-matrix, same in all matrix
-
-    for (i = 0; i < 5; i++) {
-      for (j = 0; j < 67; j++) {
-        k = 80 - 1 - j;
-        if (j == 0)
-          use_location = (i != 0);
-        else if (j == 1)
-          use_location = (i != 1);
-        else if (j == 2)
-          use_location = (i != 2);
-        else if (j == 3)
-          use_location = (i != 3);
-        else if (j == 4)
-          use_location = (i != 4);
-        else if (j == 5)
-          use_location = (i != 1);
-        else if (j == 6)
-          use_location = (i != 3);
-        else if (j == 7)
-          use_location = (i != 4);
-        else if (j == 8)
-          use_location = (i != 2);
-        else if (j == 9)
-          use_location = (i != 0);
-        else if (j == 10)
-          use_location = (i != 4);
-        else if (j == 11)
-          use_location = (i != 3);
-        else if (j == 12)
-          use_location = (i != 1);
-        else if (j == 13)
-          use_location = (i != 0);
-        else if (j == 14)
-          use_location = (i != 2);
-        else if (j == 15)
-          use_location = (i != 3);
-        else if (j == 16)
-          use_location = (i != 1);
-        else if (j == 17)
-          use_location = (i != 2);
-        else if (j == 18)
-          use_location = (i != 0);
-        else if (j == 19)
-          use_location = (i != 4);
-        else if (j == 20)
-          use_location = (i != 0);
-        else if (j == 21)
-          use_location = (i != 0);
-        else if (j == 22)
-          use_location = (i != 4);
-        else if (j == 23)
-          use_location = (i != 4);
-        else if (j == 24)
-          use_location = (i != 2);
-        else if (j == 25)
-          use_location = (i != 2);
-        else if (j == 26)
-          use_location = (i != 3);
-        else if (j == 27)
-          use_location = (i != 3);
-        else if (j == 28)
-          use_location = (i != 1);
-        else if (j == 29)
-          use_location = (i != 1);
-        else if (j == 30)
-          use_location = (i != 3);
-        else if (j == 31)
-          use_location = (i != 0);
-        else if (j == 32)
-          use_location = (i != 3);
-        else if (j == 33)
-          use_location = (i != 1);
-        else if (j == 34)
-          use_location = (i != 4);
-        else if (j == 35)
-          use_location = (i != 0);
-        else if (j == 36)
-          use_location = (i != 4);
-        else if (j == 37)
-          use_location = (i != 2);
-        else if (j == 38)
-          use_location = (i != 2);
-        else if (j == 39)
-          use_location = (i != 1);
-        else if (j == 40)
-          use_location = (i != 1);
-        else if (j == 41)
-          use_location = (i != 4);
-        else if (j == 42)
-          use_location = (i != 3);
-        else if (j == 43)
-          use_location = (i != 2);
-        else if (j == 44)
-          use_location = (i != 0);
-        else if (j == 45)
-          use_location = (i != 2);
-        else if (j == 46)
-          use_location = (i != 4);
-        else if (j == 47)
-          use_location = (i != 0);
-        else if (j == 48)
-          use_location = (i != 1);
-        else if (j == 49)
-          use_location = (i != 3);
-        else if (j <= 59)
-          use_location = ((k + 4) % 5) != i;
-        else if (j <= 69)
-          use_location = ((k + 2) % 5) != i;
-        if (use_location) {
-          ldpc_matrix_occupied[5 - 1][i][j] = 1;
-          rw[5 - 1][i]++;
-        }
-      }
-    }
-
-    if (VERBOSITY > 0) {
-      for (i = 0; i < 13; i++) {
-        k = 5 - 1;
-        printf("### MATRIX: %2d ROW: %2d WEIGHT: %2d OCCUPIED: ", k, i, rw[k][i]);
-        for (j = 0; j < 80; j++)
-          printf("%1x ", ldpc_matrix_occupied[k][i][j]);
-        printf("\n");
-      }
-      printf("\n");
-    }
-
-    for (i = 0; i < 13; i++)
-      if (rw[5 - 1][i] > rw_max[5 - 1])
-        rw_max[5 - 1] = rw[5 - 1][i];
-
-    for (k = 5; k < 13; k++) {
-      for (i = 0; i < 13; i++) {
-        rw[k][i] = 0;
-        for (j = 0; j < 80; j++) {
-          ldpc_matrix_occupied[k][i][j] = ldpc_matrix_occupied[k - 1][i][j];
-          rw[k][i] += ldpc_matrix_occupied[k][i][j];
-        }
-      }
-
-      for (i = 0; i < 5; i++) {
-        ldpc_matrix_occupied[k][k - i][80 - k - 1] = 1;
-        rw[k][k - i]++;
-      }
-	      while (rw[k][k] < rw_min[k]) {
-	        i = static_cast<int>(matrix_rng.next_u31() % 67u);
-	        if (ldpc_matrix_occupied[k][k][i] == 0) {
-	          ldpc_matrix_occupied[k][k][i] = 1;
-	          rw[k][k]++;
-	        }
-      }
-
-      for (j = 0; j < 80; j++) {
-        if (ldpc_matrix_occupied[k][k][j]) {
-          int rw_max_in_col = 0;
-          for (i = 0; i < k; i++)
-            if (ldpc_matrix_occupied[k][i][j] && (rw[k][i] > rw_max_in_col))
-              rw_max_in_col = rw[k][i];
-
-          bool found_it = 0;
-          for (i = 0; i < k; i++) {
-            if (ldpc_matrix_occupied[k][i][j] && (rw[k][i] == rw_max_in_col) && !found_it) {
-              found_it = 1;
-              rw[k][i]--;
-              ldpc_matrix_occupied[k][i][j] = 0;
-              ldpc_matrix_fade[k][i][j] = 1;
-            }
+        if (mask_flag == 0) {
+          h_matrix.fade[i][j] = 0;
+          if (col_shift >= 0) {
+            h_matrix.occupied[i][j] = 1;
+            h_matrix.last_element[i] = col_shift;
+          } else {
+            h_matrix.occupied[i][j] = 0;
           }
+        } else {
+          h_matrix.occupied[i][j] = 0;
+          h_matrix.fade[i][j] = 1;
         }
+        if ((col_shift >= 0) && (h_matrix.occupied[i][j] || h_matrix.fade[i][j]))
+          h_matrix.last_element[i] = col_shift;
       }
-
-      if (VERBOSITY > 0) {
-        for (i = 0; i < 13; i++) {
-          printf("### MATRIX: %2d ROW: %2d WEIGHT: %2d OCCUPIED: ", k, i, rw[k][i]);
-          for (j = 0; j < 80; j++)
-            printf("%1x ", ldpc_matrix_occupied[k][i][j]);
-          printf("\n");
-        }
-      }
-      printf("\n");
     }
+
+    for (i = 0; i < m; i++) {
+      free(full_shift[i]);
+      free(full_fade[i]);
+    }
+    free(full_shift);
+    free(full_fade);
+
 
     h_matrix.delta[0] = 0;
     h_matrix.delta[1] = 13;
@@ -2229,38 +2040,15 @@ void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt, char *pchk_f
     h_matrix.delta[10] = 103;
     h_matrix.delta[11] = 111;
     h_matrix.delta[12] = 119;
-
-    h_matrix_index[0] = 0 + (3 * h_matrix.delta[0]);
-    h_matrix_index[1] = 0 + (4 * h_matrix.delta[1]);
-    h_matrix_index[2] = 0 + (4 * h_matrix.delta[2]);
-    h_matrix_index[3] = 0 + (4 * h_matrix.delta[3]);
-    h_matrix_index[4] = 0 + (3 * h_matrix.delta[4]);
-    h_matrix_index[5] = 0;
-    h_matrix_index[6] = 0;
-    h_matrix_index[7] = 0;
-    h_matrix_index[8] = 0;
-    h_matrix_index[9] = 0;
-    h_matrix_index[10] = 0;
-    h_matrix_index[11] = 0;
-    h_matrix_index[12] = 0;
-
-    for (i = 0; i < h_matrix.rows; i++)
-      h_matrix.last_element[i] = h_matrix_index[i];
+    h_matrix.delta[13] = 127;
+    h_matrix.delta[14] = 131;
+    h_matrix.delta[15] = 137;
+    h_matrix.delta[16] = 149;
 
     for (i = 0; i < h_matrix.rows; i++) {
-      for (j = 0; j < h_matrix.cols; j++) {
-        if (j < (h_matrix.cols - h_matrix.rows)) {
-          h_matrix.occupied[i][j] = ldpc_matrix_occupied[h_matrix.rows - 1][i][j];
-          h_matrix.fade[i][j] = ldpc_matrix_fade[h_matrix.rows - 1][i][j];
-        } else {
-          h_matrix.occupied[i][j] = ldpc_matrix_occupied[h_matrix.rows - 1][i][80 - h_matrix.cols + j];
-          h_matrix.fade[i][j] = ldpc_matrix_fade[h_matrix.rows - 1][i][80 - h_matrix.cols + j];
-        }
-      }
-    }
-
-    for (i = 0; i < h_matrix.rows; i++)
       h_matrix.row_weight[i] = 0;
+      h_matrix_index[i] = h_matrix.last_element[i];
+    }
 
     for (j = 0; j < h_matrix.cols; j++)
       h_matrix.col_weight[j] = 0;
@@ -2289,7 +2077,7 @@ void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt, char *pchk_f
       h_matrix.wraparound[i] = (h_matrix.bits + h_matrix.first_element[i] - h_matrix.last_element[i]) % h_matrix.bits;
     }
 
-    for (j = 0; j < 80; j++)
+    for (j = 0; j < 84; j++)
       for (k = 0; k < h_matrix.bits; k++)
         h_matrix.mask[j][k] = 0;
 
@@ -2298,43 +2086,14 @@ void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt, char *pchk_f
         if (h_matrix.occupied[h_matrix.rows - 1][j]) {
           for (k = 0; k < h_matrix.bits; k++) {
             bit = (k + h_matrix.bits - h_matrix.element[h_matrix.rows - 1][j]) % h_matrix.bits;
-            if ((bit < h_matrix.extra_bits_of_parity) || (h_matrix.extra_bits_of_parity == 0))
+            if (bit < h_matrix.extra_bits_of_parity)
               h_matrix.mask[j][k] = 1;
           }
         }
       }
     }
-    
-    // RTL data
-    int init_base;
-    int shift_base;
-    int flag;
-    for (int i = 0; i < h_matrix.rows; i++)
-    {
-      init_base = (h_matrix.first_element[i] - h_matrix.delta[i] + h_matrix.bits) % h_matrix.bits;
-      flag = 0;
-      for (int j = 0; j < h_matrix.bits; j++)
-      {
-        shift_base = init_base + j;
-        for (int k = 0; k < 50; k++)
-        {
-          if ((h_matrix.last_element[i] + shift_base + k*h_matrix.delta[i]+j) % h_matrix.bits == shift_base)
-          {
-            flag = 1;
-            h_matrix.wrap_num_deltas[i] = k;
-            h_matrix.wrap_base[i] = shift_base;
-            printf("[RTL] Row %d, Initial Base %d, Shift Base %d, Shift dist %d, Delta Num %d \n",
-              i, init_base, shift_base, j ,k);
-              break;
-          }
-        }
-        if (flag == 1) break;
-      }
-    }
-
-
-    // if (VERBOSITY > 0)
-    f_print_h_matrix(h_matrix);
+    if (VERBOSITY > 0)
+      f_print_h_matrix(h_matrix);
 
     ldpc_ibex_phck(h_matrix);
   }
@@ -2452,6 +2211,14 @@ void ldpc_packet::ldpc_ibex_parameters(int post_process_en = 1, int syndrome_wei
   ldpc_decoder_parameters.likelihood_init_coef_all[7][1] = 4;
   ldpc_decoder_parameters.likelihood_init_coef_all[7][2] = 3;
   ldpc_decoder_parameters.likelihood_init_coef_all[7][3] = 2;
+  ldpc_decoder_parameters.likelihood_init_coef_all[8][0] = 0;
+  ldpc_decoder_parameters.likelihood_init_coef_all[8][1] = 3;
+  ldpc_decoder_parameters.likelihood_init_coef_all[8][2] = 3;
+  ldpc_decoder_parameters.likelihood_init_coef_all[8][3] = 2;
+  ldpc_decoder_parameters.likelihood_init_coef_all[9][0] = 0;
+  ldpc_decoder_parameters.likelihood_init_coef_all[9][1] = 3;
+  ldpc_decoder_parameters.likelihood_init_coef_all[9][2] = 2;
+  ldpc_decoder_parameters.likelihood_init_coef_all[9][3] = 2;
 
   ldpc_decoder_parameters.likelihood_init_fraction[1] = 8;
   ldpc_decoder_parameters.likelihood_init_fraction[2] = 4;
@@ -2473,6 +2240,9 @@ void ldpc_packet::ldpc_ibex_parameters(int post_process_en = 1, int syndrome_wei
   ldpc_decoder_parameters.early_terminate_thr[0][4] = 1200;
   ldpc_decoder_parameters.early_terminate_thr[0][5] = 1350;
   ldpc_decoder_parameters.early_terminate_thr[0][6] = 1500;
+  ldpc_decoder_parameters.early_terminate_thr[0][7] = 1650;
+  ldpc_decoder_parameters.early_terminate_thr[0][8] = 1800;
+
   ldpc_decoder_parameters.early_terminate_thr[1][0] = 1200;
   ldpc_decoder_parameters.early_terminate_thr[1][1] = 1500;
   ldpc_decoder_parameters.early_terminate_thr[1][2] = 1800;
@@ -2480,6 +2250,8 @@ void ldpc_packet::ldpc_ibex_parameters(int post_process_en = 1, int syndrome_wei
   ldpc_decoder_parameters.early_terminate_thr[1][4] = 2400;
   ldpc_decoder_parameters.early_terminate_thr[1][5] = 2700;
   ldpc_decoder_parameters.early_terminate_thr[1][6] = 3000;
+  ldpc_decoder_parameters.early_terminate_thr[1][7] = 3300;
+  ldpc_decoder_parameters.early_terminate_thr[1][8] = 3600;
 
   int soft_bit_control_0 = 0;
   unsigned int *c_soft_data_table = new unsigned int[8]; // 32 bit size / 4 bits each field = 8
@@ -2931,11 +2703,11 @@ s_hard_codeword ldpc_packet::f_ldpc_encode(s_hard_codeword ldpc_encoder_input, s
   s_hard_codeword codeword_payload;
 
   bool payload[67][512];
-  bool parity[13][512];
-  bool check_node[13][512];
-  bool ldpc_matrix_occupied[13][80];
-  bool ldpc_matrix_fade[13][80];
-  unsigned int ldpc_matrix[13][80];
+  bool parity[17][512];
+  bool check_node[17][512];
+  bool ldpc_matrix_occupied[17][84];
+  bool ldpc_matrix_fade[17][84];
+  unsigned int ldpc_matrix[17][84];
   int ldpc_encoder_failure;
   int bit_rotated;
   int syndrome_weight;
@@ -2949,7 +2721,7 @@ s_hard_codeword ldpc_packet::f_ldpc_encode(s_hard_codeword ldpc_encoder_input, s
   int extra_payload_cols = num_payload_cols - 64;
   int unused_parity_bytes = (h_matrix.rows * num_bytes) - h_matrix.bytes_of_parity;
   int unused_parity_bits = unused_parity_bytes * 8;
-  int matrix_element[13];
+  int matrix_element[17];
 
   int bit_location;
   int byte_data;

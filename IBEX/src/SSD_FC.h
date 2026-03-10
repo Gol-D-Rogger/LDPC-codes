@@ -9,6 +9,8 @@ int sim_step = 100;        // 默认值：每 100 个包更新一次
 
 char *config_file;
 char pchk_file[500];
+char occupied_file[500];
+char fade_file[500];
 char matrix_dir[500];
 int h_m;
 int h_n;

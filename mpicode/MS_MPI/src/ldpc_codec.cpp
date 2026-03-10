@@ -621,30 +621,62 @@ void ldpc_packet::ldpc_config(int m, int n, int sc) {
     int use_customized_matrix = 1; // 0 not change 1: M3's matrix
     bool print_customize_matrix = true;
     bool customize_config1 = (h_matrix.rows == 8) && (h_matrix.cols == 73);
-    bool customize_config2 = (h_matrix.rows == 11) && (h_matrix.cols == 76);
+    bool customize_config2 = (h_matrix.rows == 10) && (h_matrix.cols == 77);
     if ((customize_config1 || customize_config2) && (use_customized_matrix == 1)) {
       FILE *fp_occu, *fp_fade, *fp_elem;
+      int file_n; // actual number of columns in the matrix file
       if (customize_config1)
       {
-        printf("read customized matrix for 8x73\n");
-        fp_occu = fopen("./src/matrice/8x73/occupied_matrix/LDPC_8x73ex512_w4_dense5_occupied_1_0.txt", "r");
-        fp_fade = fopen("./src/matrice/8x73/fade_matrix/LDPC_8x73ex512_w4_dense5_fade_1_0.txt", "r");
-        fp_elem = fopen("./src/matrice/8x73/matrix/LDPC_8x73ex512_w4_dense5_QC_H_1_0.txt", "r");
+        // printf("read customized matrix for 8x73\n");
+        // fp_occu = fopen("./src/matrice/8x73/occupied_matrix/LDPC_8x73ex512_w4_dense5_occupied_1_0.txt", "r");
+        // fp_fade = fopen("./src/matrice/8x73/fade_matrix/LDPC_8x73ex512_w4_dense5_fade_1_0.txt", "r");
+        // fp_elem = fopen("./src/matrice/8x73/matrix/LDPC_8x73ex512_w4_dense5_QC_H_1_0.txt", "r");
+        file_n = 75;
+        printf("read customized matrix for 8x%d, trim to 8x%d\n", file_n, h_matrix.cols);
+        fp_occu = fopen("./src/matrice/8x75/occupied_matrix/LDPC_8x75ex512_w4_dense5_occupied_1.txt", "r");
+        fp_fade = fopen("./src/matrice/8x75/fade_matrix/LDPC_8x75ex512_w4_dense5_fade_1.txt", "r");
+        fp_elem = fopen("./src/matrice/8x75/matrix/LDPC_8x75ex512_w4_dense5_QC_H_1.txt", "r");
       }
       else
       {
-        printf("read customized matrix for 11x76\n");
-        fp_occu = fopen("./src/matrice/11x76/occupied_matrix/LDPC_11x76ex512_w4_dense5_occupied_1_0.txt", "r");
-        fp_fade = fopen("./src/matrice/11x76/fade_matrix/LDPC_11x76ex512_w4_dense5_fade_1_0.txt", "r");
-        fp_elem = fopen("./src/matrice/11x76/matrix/LDPC_11x76ex512_w4_dense5_QC_H_1_0.txt", "r");
+        file_n = 77;
+        printf("read customized matrix for 10x%d\n", file_n);
+        fp_occu = fopen("./src/matrice/10x77/occupied_matrix/LDPC_10x77ex512_w4_dense5_occupied_1.txt", "r");
+        fp_fade = fopen("./src/matrice/10x77/fade_matrix/LDPC_10x77ex512_w4_dense5_fade_1.txt", "r");
+        fp_elem = fopen("./src/matrice/10x77/matrix/LDPC_10x77ex512_w4_dense5_QC_H_1.txt", "r");
       }
-      for (int i = 0; i<h_matrix.rows; i++)
-      {
-        for (int j = 0; j < h_matrix.cols; j++)
-        {
-          fscanf(fp_occu, "%d", &h_matrix.occupied[i][j]);
-          fscanf(fp_fade, "%d", &h_matrix.fade[i][j]);
-          fscanf(fp_elem, "%d", &h_matrix.element[i][j]);
+      if (file_n == h_matrix.cols) {
+        // No trimming needed — direct read (original behavior)
+        for (int i = 0; i < h_matrix.rows; i++)
+          for (int j = 0; j < h_matrix.cols; j++) {
+            fscanf(fp_occu, "%d", &h_matrix.occupied[i][j]);
+            fscanf(fp_fade, "%d", &h_matrix.fade[i][j]);
+            fscanf(fp_elem, "%d", &h_matrix.element[i][j]);
+          }
+      } else {
+        // Trim: keep target_k payload cols from left, all M parity cols from right,
+        // skip (file_n - h_matrix.cols) payload cols in between.
+        // File layout:  [file_k payload] [M parity]   (file_k = file_n - M)
+        // Target layout: [target_k payload] [M parity] (target_k = h_matrix.cols - M)
+        int target_k = h_matrix.cols - h_matrix.rows;
+        int col_offset = file_n - h_matrix.cols;
+        int tmp_occu, tmp_fade, tmp_elem;
+        for (int i = 0; i < h_matrix.rows; i++) {
+          for (int j = 0; j < file_n; j++) {
+            fscanf(fp_occu, "%d", &tmp_occu);
+            fscanf(fp_fade, "%d", &tmp_fade);
+            fscanf(fp_elem, "%d", &tmp_elem);
+            int dst = -1;
+            if (j < target_k)
+              dst = j;                    // payload: direct map
+            else if (j >= file_n - h_matrix.rows)
+              dst = j - col_offset;       // parity: shift left by trimmed count
+            if (dst >= 0) {
+              h_matrix.occupied[i][dst] = tmp_occu;
+              h_matrix.fade[i][dst] = tmp_fade;
+              h_matrix.element[i][dst] = tmp_elem;
+            }
+          }
         }
       }
       fclose(fp_occu); fclose(fp_fade); fclose(fp_elem);

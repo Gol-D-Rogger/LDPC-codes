@@ -3,7 +3,11 @@
 // 2. Data Randomization
 // 3. Media CRC
 
+#ifdef IBEX_LDPC_HEADER
+#include IBEX_LDPC_HEADER
+#else
 #include "ldpc_codec.h"
+#endif
 
 #ifndef _FC_DSP_H
 #define _FC_DSP_H
