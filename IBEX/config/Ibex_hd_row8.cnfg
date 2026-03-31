@@ -1,8 +1,8 @@
 12                              // meta data size (B)
 512                             // LBA size(B)
 8                               // LBA # per DSP CW
-4112                            // userdata size (B)
-512                             // parity size (B)
+4260                            // userdata size (B)
+460                             // parity size (B)
 8                               // row number of base matrix
 73                              // column number of base matrix
 512                             // circulant number
@@ -10,7 +10,7 @@
 4                               // column weight of base matrix
 5000                           // maximum simulation number
 10                              // maximum error number
-FC_IBEX                         // LDPC decoder(FC_SKIP/FC_FDEC/FC_RDEC/FC_MIX/FC_FDEC2/FC_IBEX)
+FC_RDEC2                         // LDPC decoder(FC_SKIP/FC_FDEC/FC_RDEC/FC_MIX/FC_FDEC2/FC_IBEX)
 24                              // Fast decoder maximum iteration number 24
 0                               // Iteration to turn on FDEC column skip feature (0:always OFF)
 32                              // Retry decoder maximum iteration number

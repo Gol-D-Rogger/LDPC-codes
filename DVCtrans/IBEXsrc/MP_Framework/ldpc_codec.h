@@ -11,6 +11,14 @@
 #include "mod2sparse.h"
 #include "transceiver.h"
 
+enum
+{
+    LDPC_MAX_ROWS = 17,
+    LDPC_MAX_COLS = 84,
+    LDPC_MAX_PAYLOAD_COLS = 67,
+    LDPC_MAX_CIRC_BITS = 512,
+};
+
 enum dec_model
 {
     SKIP = 0,
@@ -18,6 +26,7 @@ enum dec_model
     BF_P3 = 3,
     BF_G2 = 4,
     BF_IBEX = 5,
+    BF_IBEX_RTL_CN = 6,
     LAYER = 8,
     LAYER_G2 = 9,
 };
@@ -46,19 +55,19 @@ struct s_h_matrix
     int extra_bits_of_userdata;
     int min_rows;
     int max_rows;
-    int delta[13];
-    int element[13][80];
-    int first_element[13];
-    int last_element[13];
-    int wraparound[13];
-    int wrap_base[13];
-    int wrap_num_deltas[13];
-    int row_weight[13];
-    int col_weight[80];
-    bool occupied[13][80];
-    bool fade[13][80];
-    bool mask[80][512];
-    bool parity_column[80];
+    int delta[LDPC_MAX_ROWS];
+    int element[LDPC_MAX_ROWS][LDPC_MAX_COLS];
+    int first_element[LDPC_MAX_ROWS];
+    int last_element[LDPC_MAX_ROWS];
+    int wraparound[LDPC_MAX_ROWS];
+    int wrap_base[LDPC_MAX_ROWS];
+    int wrap_num_deltas[LDPC_MAX_ROWS];
+    int row_weight[LDPC_MAX_ROWS];
+    int col_weight[LDPC_MAX_COLS];
+    bool occupied[LDPC_MAX_ROWS][LDPC_MAX_COLS];
+    bool fade[LDPC_MAX_ROWS][LDPC_MAX_COLS];
+    bool mask[LDPC_MAX_COLS][LDPC_MAX_CIRC_BITS];
+    bool parity_column[LDPC_MAX_COLS];
     int bits_in_last_column;
 };
 
@@ -69,7 +78,7 @@ struct s_hard_codeword_column
 
 struct s_hard_codeword
 {
-    s_hard_codeword_column c[80];
+    s_hard_codeword_column c[LDPC_MAX_COLS];
     unsigned int errors_at_level_and_weight[4][5];
     unsigned int correct_at_level_and_weight[4][5];
     double probability_of_error_at_level_and_weight[4][5];
@@ -93,7 +102,7 @@ struct s_codeword_column
 
 struct s_codeword
 {
-    s_codeword_column c[80];
+    s_codeword_column c[LDPC_MAX_COLS];
 };
 
 struct s_ldpc_decoder_parameters
@@ -158,7 +167,7 @@ struct s_variable_node_column
 
 struct s_variable_nodes
 {
-    s_variable_node_column c[80];
+    s_variable_node_column c[LDPC_MAX_COLS];
 };
 
 struct s_check_node_row
@@ -168,7 +177,7 @@ struct s_check_node_row
 
 struct s_check_nodes
 {
-    s_check_node_row r[13];
+    s_check_node_row r[LDPC_MAX_ROWS];
 };
 
 struct s_256_bits
@@ -346,6 +355,7 @@ struct ldpc_packet : ch_packet
 
     // LDPC IBEX BF decoder
     void ldpc_dec_bf_ibex(s_ldpc_decoder_input, s_ldpc_decoder_parameters, s_h_matrix);
+    void ldpc_dec_bf_ibex_rtl_cn(s_ldpc_decoder_input, s_ldpc_decoder_parameters, s_h_matrix);
     // void ldpc_dec_bf_ibex_2bit(s_ldpc_decoder_input, s_ldpc_decoder_parameters, s_h_matrix);
 
     // LDPC layer decoder

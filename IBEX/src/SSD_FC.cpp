@@ -857,7 +857,7 @@ void read_config_file()
             printf("Column skip feature OFF\n");
         else
             printf("Column skip @ iterations %d\n", fdec_col_skip_itr);
-        printf(" Retry decoder: max_iter = %d\n", ldec_max_itr);
+        printf("Retry decoder: max_iter = %d\n", ldec_max_itr);
         printf("alpha = %f\n", alpha);
     }
     else

@@ -48,10 +48,27 @@
 
 ### 2.3.1 支持范围：仅 `h_sc==512`
 
-MP_Framework 仅保留 IBEX 的 “内部生成/裁剪” 配置路径，因此：
+MP_Framework 当前仅支持 `h_sc==512`，但矩阵来源已经切换为**外部矩阵文件加载**：
 
-- `h_sc==512`：支持（IBEX internal generation）
-- `h_sc!=512`：不支持（已移除外部矩阵文件读入路径）
+- `h_sc==512`：支持（从 `IBEX/ibex_matrix_flat_13rate` 或 `DVC_IBEX_MATRIX_ROOT` 指向的目录读取）
+- `h_sc!=512`：不支持（直接报错返回）
+
+外部矩阵加载规则如下：
+
+- 优先读取与当前 `(bm_m, bm_n)` 完全同名的矩阵文件；
+- 若目录中只有 full-width 版本（payload 固定 67 列），则按 **payload 取左侧、parity 取最右侧 `bm_m` 列** 的规则裁剪；
+- 读取文件包括 `matrix`、`occupied_matrix`、`fade_matrix` 三类；
+- 运行目录不固定时，建议显式设置环境变量 `DVC_IBEX_MATRIX_ROOT`。
+
+当前实现对裁剪后的 `shift` 采用 **“先裁形状，再重生 shift”** 的口径，而不是直接沿用 full-width 文件中的 `shift`：
+
+- 先从外部文件读取 full-width 的 `occupied_matrix` / `fade_matrix` / `matrix`；
+- 裁剪时，真正决定目标矩阵形状的是裁剪后的 `occupied/fade` 分布；
+- `matrix` 文件只用于给每一行提供 **最右侧 surviving 非零 CPM 的相位参考**；
+- 之后在目标矩阵上按固定 `delta[row]` 从右往左重新生成 `h_matrix.element`；
+- 因此，裁剪后同一行新的相邻非零 CPM（`occupied` 或 `fade`）仍保持单步 `delta[row]` 关系。
+
+这点与“直接把 full-width 的 shift 抄到窄矩阵”不同。后者虽然简单，但在裁掉 payload 尾部列后，新的相邻非零 CPM 之间可能变成 `2*delta`、`3*delta` 等，不再符合 `IBEX/src` 的矩阵语义。
 
 ### 2.4 Soft decision 数据形态（`sd_num>=2`）
 
@@ -230,11 +247,13 @@ MP_Framework 仅保留 IBEX 的 “内部生成/裁剪” 配置路径，因此�
 3) **DV 定点 → 浮点换算**：将 `ch_para/alpha/llr0/llr1` 从 DV 定点转为 C 侧 `float`（缩放见 §4.2/4.3）。  
 4) **长度域计算（Gen4 口径）**：根据 `h_m/h_n/h_sc/pad_bit/info_num` 计算 `g_info_len/g_blk_len/g_hm_k/g_hm_m/g_hm_n/g_pad_len`。  
 5) **保存 BF_IBEX 运行期参数**：将 `post_iter/max_iter/nand_strobes` 保存到静态全局（供 `ldpc_dec` 的 `BF_IBEX` 路径使用）。  
-6) **cir_sz 支持范围检查**：MP_Framework 仅支持 `h_sc==512`，若 `h_sc!=512` 则直接报错返回（已移除外部矩阵文件读入路径）。  
+6) **cir_sz 支持范围检查**：MP_Framework 仅支持 `h_sc==512`，若 `h_sc!=512` 则直接报错返回；`h_sc==512` 时从外部矩阵文件读取，并在需要时执行 payload-left/parity-right 裁剪。  
+   - 裁剪后不会直接复用 full-width `shift`；  
+   - 当前实现会依据裁剪后的 `occupied/fade` 形状、固定 `delta[row]` 和右侧 surviving 相位参考，重新生成目标矩阵的 `shift`，以保持一行内相邻非零 CPM 的 `delta` 连续性。  
 7) **关键尺寸打印与一致性告警**：打印本地计算的 bit/byte 长度，并与 `dv_user_data_bytes/dv_parity_bytes` 做一致性检查（不一致只 WARN，不改变内部逻辑）。  
 8) **vref 读取与 rd_num 夹紧**：当 `sd_num>=2` 从 `v_ref_sv` 读出 vref（单位转换），否则使用 `vref[0]=0`。  
 9) **信道配置**：将 `ch_mode` 映射到 `enum ch_model` 并调用 `sim_pckt->ch_config(g_info_len, g_blk_len, ...)`。  
-10) **LDPC 配置与缓存分配**：依次调用 `sim_pckt->ldpc_config(...)`（IBEX internal generation）、`ldpc_pckt_alloc()`。  
+10) **LDPC 配置与缓存分配**：依次调用 `sim_pckt->ldpc_config(...)`（外部矩阵读取 + payload/parity 裁剪 + 裁后 shift 重建）、`ldpc_pckt_alloc()`。  
 11) **LLR/soft-bin 结构初始化**：`ch_llr_alloc(MANUAL, rd_num, vref)` 使 `bin_num=rd_num+1`，随后 `ch_llr_gen(m_llr0, m_llr1, finite_q_num-1, 4)` 生成 `llr_tbl/bin_split/bin_id`。  
 12) **译码器配置**：`ldpc_dec_config(..., sdlite_llr_*)` 透传 layer/BF 的迭代与 SDLite 覆盖寄存器。  
 13) **IBEX BF 参数下发**：调用 `ldpc_ibex_parameters(...)`，将 `ldpc_decoder_inv` 风格寄存器解包到 `ldpc_decoder_parameters`。  

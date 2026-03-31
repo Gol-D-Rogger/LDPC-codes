@@ -7,8 +7,9 @@
 - **trigger + kill**：当任一点满足 $FER_{eff}\le 10^{-4}$ 时，立即 kill 所有“更好信道方向”的 in-flight coarse 作业（默认无 margin）
 - **watchdog（可选）**：若某个 coarse 点在 RUN 态运行超时（例如 3 小时），自动 kill，并解析日志中最后一个完整 `[SIM]` 块；同时限制 coarse 扫描上界，避免重复提交更深 SNR 的 coarse 点位
 - **deep scan**：用 $10^{-2}\sim10^{-4}$ 区间点对 `RAW BER`–`FER` 做双对数拟合估计 stop，并按 0.1/0.05/0.025 dB **并行**下探直到目标深度（fine 阶段默认不启用 watchdog）
-- **finalize（fit-window）**：对参与拟合窗口内的点，若日志缺少最终 `[STATISTICS]` 段，则删除并重跑以生成完整统计块（默认仅约束 $snr\le snr\_trigger$）
-- **progress xlsx（deep阶段）**：进入 deep scan 后，每隔 `export_xlsx_sec` 秒导出/刷新一次 `*.xlsx` 进度表（允许半截 log；缺失字段留空；增加 `IsComplete` 标志）
+- **completion pass（全点补全）**：对被 kill 或提前结束后留下的半截 log，若未达到 cnfg 中的 `maximum error number`（通常 10）或缺少最终 `[STATISTICS]` 段，则自动删除并重跑，保证最终保留的点位日志完整
+- **finalize（fit-window）**：对参与拟合窗口内的点优先补齐完整统计块，降低后续拟合/汇报对半截 log 的依赖
+- **progress xlsx（deep/finalize/completion阶段）**：进入 deep scan 或后续 `finalize/completion` 补跑阶段后，每隔 `export_xlsx_sec` 秒导出/刷新一次 `*.xlsx` 进度表；阶段开始和新 job 提交后还会立即刷新一版，避免长轮询间隔下看不到 in-flight 进度（允许半截 log；缺失字段留空；增加 `IsComplete` 标志）；LSF 下会优先读取 job 实际日志路径，并在需要时通过 `bpeek` 补抓运行中 stdout
 - **时间戳**：所有脚本状态输出行末尾追加绝对时间 `[YYYY-mm-dd HH:MM:SS]`，便于对齐 LSF 作业时序与排障
 
 本 README **只描述推荐的 `adaptive` 工作流**。脚本仍保留 `run/pilot` 的旧接口，但不再在此展开。
@@ -253,6 +254,7 @@ flowchart TD
 - `capacity` 来自 `startup_ok_required`：在成功解析到足够多点位之前只允许 1 个 in-flight；之后使用 `max_in_flight` 并发提交。
 - “reliable” 使用 `min_fail_cw_for_decision=K`：当日志里能解析到 `FAIL CW` 且小于 K，该点仍会写入 `manifest.json`，但不用于 `fit` 等需要稳定统计的决策；对 `trigger` 还额外允许使用保守上界 $3/N$（即 `FER_eff`）来触发停止。
   - Main scan 不做 `step_low` 回填；超时只负责 **kill + 解析 + 限制 coarse 扫描上界**（避免重复提交更深 SNR 的 coarse 点位）。
+  - 但被保留下来的 partial coarse 点不会作为最终结果结束；脚本会在后续 completion pass 中补跑到 cnfg 里的 `maximum error number`。
 
 ### 2.1 pilot（同步执行，双向搜索起点）
 
@@ -298,17 +300,17 @@ flowchart TD
 - 随后从 `trigger`（或最低 FER 点）到 stop\_x 之间，按 `step_low` 生成所有点位，**并行提交**（受 `max_in_flight` 限制）；
 - 当任一点达到 $FER_{eff}\le fer\_lo$ 时，取消剩余 in-flight 作业并结束。
 
-### 2.6 finalize（补全 fit-window 的最终统计块）
+### 2.6 finalize / completion（补全最终统计块）
 
 由于 main scan/watchdog/kill 允许使用日志中最后一个完整 `[SIM]` 块做临时决策，可能会产生“可解析但不含 `[STATISTICS]`”的 **半截 log**。
 
-为保证最终用于拟合/汇报的数据一致性，脚本会对满足以下条件的点做补全重跑：
+为保证最终用于拟合/汇报的数据一致性，脚本会做两层补全：
 
-- $FER_{eff}\in[fit\_fer\_lo,fit\_fer\_hi]$（拟合窗口）
-- 仅强制补全 trigger “之前/保留侧”的点（即不在 trigger 的更好信道方向上）
-- 日志缺少 `[STATISTICS] Total packets simulated` 与 `[STATISTICS] LDPC FER`
+- 第一层：在 main scan 之后，优先对已提交过的 coarse 点做 completion pass。若日志缺少 `[STATISTICS]`，或 `FAIL CW < maximum error number`，则删除旧 log 并重跑该点。
+- 第二层：在 deep/finalize 结束后，再对当前 case 下所有已保留点做一次 completion pass，确保最终留下的日志都达到 cnfg 中设定的 `maximum error number`。
+- fit-window finalize 仍然保留，用于优先保证拟合窗口点位的完整性。
 
-动作：删除旧 log 并重跑该点，直到产出包含 `[STATISTICS]` 的完整 log（并行提交，受 `max_in_flight` 限制）。
+动作：删除旧 log 并重跑该点，直到产出包含 `[STATISTICS]` 的完整 log，且 `FAIL CW` 达到 cnfg 中的 `maximum error number`（并行提交，受 `max_in_flight` 限制）。
 
 ---
 
@@ -337,8 +339,9 @@ flowchart TD
 - `out_dir/<case.name>/adaptive/<log_prefix>_progress.xlsx`（deep scan 阶段周期性刷新）
 
 配置副本说明：
-- `config_pilot.cnfg` / `config_main.cnfg` 都由脚本从你给的 `config` 复制生成，**只修改**一行 `maximum simulation number`；
-- 其它停止条件（例如 `maximum error number = 10`）必须在你提供的原始 `config` 里自行配置好。
+- `config_pilot.cnfg` / `config_main.cnfg` 都由脚本从你给的 `config` 复制生成；
+- `config_pilot.cnfg` 会改写 `maximum simulation number` 与 `maximum error number = 0`；
+- `config_main.cnfg` 会改写 `maximum simulation number`，并强制写入 `maximum error number = 10`（供 main/backfill/deep/completion pass 共用）。
 
 ---
 
@@ -417,7 +420,7 @@ deep scan 的步长策略（adaptive 会用到）：
 - `timeout_log_grace_sec`：日志刷盘等待时间（秒；默认 10）。用于两类场景：1) coarse watchdog 超时 kill 后重试解析；2) LSF 下 bjobs 已显示 DONE 但 `-o` 日志尚未完全落盘时的重试解析（LSF 下会强制至少等待 30 秒）。
 - `backfill_step`：回填步长（可选；不填则用 `step_mid`，默认 0.05）。当相邻点 FER 跳变超过 `backfill_decade_threshold` 时，用此步长回填中间点。设为 0 禁用回填。
 - `backfill_decade_threshold`：触发回填的 FER 跳变阈值（默认 2.0，即 100 倍）。
-- `export_xlsx_sec`：deep scan 阶段周期导出 xlsx 的时间间隔（秒；默认 3600；设为 0 禁用）。xlsx 文件名为 `out_dir/<case.name>/adaptive/<log_prefix>_progress.xlsx`，字段包含：`SNR,RAW_BER,LDPC_FER,FAIL_CW,PACKETS,AvgIter,IsComplete,JobState,Stage,LogPath`。其中 `IsComplete=1` 的判据为日志中出现 `[STATISTICS] LDPC FER`。
+- `export_xlsx_sec`：deep scan 阶段周期导出 xlsx 的时间间隔（秒；默认 3600；设为 0 禁用）。xlsx 文件名为 `out_dir/<case.name>/adaptive/<log_prefix>_progress.xlsx`，字段包含：`SNR,RAW_BER,LDPC_FER,FAIL_CW,PACKETS,AvgIter,IsComplete,JobState,Stage,LogPath`。其中 `IsComplete=1` 的判据为日志中出现 `[STATISTICS] LDPC FER` 且 `FAIL CW` 达到 cnfg 中的 `maximum error number`。若点位仍在运行，导出会优先读取当前日志内容；LSF 下若共享盘日志暂未及时刷新，会额外尝试 `bpeek` 获取最新 stdout 统计。
 
 ### 5.3 `[lsf]`：只在 `executor="lsf"` 时生效
 

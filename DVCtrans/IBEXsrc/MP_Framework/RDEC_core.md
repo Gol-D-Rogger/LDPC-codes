@@ -48,7 +48,7 @@ RDEC（layered min-sum）在 QC-LDPC 下主要的维度与符号如下：
 
 在 `_LDPC_DEBUG_DUMP` 打开时，`ldpc_dec_layer2()` 会创建以下文件：
 
-- `rdec_cmem_dump.txt`：每个 `layer` 的 C-memory（check node memory）细粒度信息（min1/min2/min1_pos/sign_tot）。
+- `rdec_cmem_dump.txt`：每次调度到一个 `(itr, layer, col)` entry 后，输出该 circulant 喂给 C updater 的本地输入，也就是 `sign_tmp / val_tmp`。
 - `rdec_stot_dump.txt`：每个 `layer` 的 `sign_tot` 位图（从 C-memory 派生，压成 128 个 hex 字符）。
 - `rdec_hdmem_dump.txt`：每次调度到一个 `(itr, layer, col)` entry 时，对应 `col` 的 512bit 硬判决向量（HD）。
 - `rdec_log_dump.txt`：每次调度到一个 `(itr, layer, col)` entry 时，输出该点位的 Q/R/APP 等软信息（以及可能的 bit 翻转日志）。
@@ -56,39 +56,38 @@ RDEC（layered min-sum）在 QC-LDPC 下主要的维度与符号如下：
 
 > 注：如果你的本地版本在 `rdec_log_dump.txt` 中额外插入了以 `[DVC]` 开头的对齐/探针日志，可忽略这些行；不影响本文对 “Q PRE / R NEW / APP-*” 的解析。
 
-## 3. `rdec_cmem_dump.txt`（C-memory dump）
+## 3. `rdec_cmem_dump.txt`（本地 C-update 输入 dump）
 
 ### 3.1 文件内容是什么
 
-该文件记录每个 `layer` 的 `cn_c_mem[layer][i]`（$i\in[0,Z-1]$）：
+该文件记录每次处理完一个 `(itr, layer, col)` entry 时，当前 circulant 喂给 C updater 的本地输入（$i\in[0,Z-1]$）：
 
-- `min1_val`：该 check node 位置上，所有相邻 VN 对应的 $|Q|$ 最小值（min-sum 的最小幅度）。
-- `min2_val`：次小值。
-- `min1_pos`：产生 `min1_val` 的 VN 列号（base-matrix 的 `col`）。
-- `sign_tot`：所有相邻 VN 符号的乘积（内部为 $\pm 1$）。
+- `sign_tmp`：`sign(Q_new)`，映射成 0/1 打印（正号为 0，负号为 1）。
+- `val_tmp`：`abs(Q_new)`；若 shortening/mask 逻辑判定该 bit 无效，则会被置成哨兵值 `100000`。
 
-它属于“校验节点侧的记忆”，后续计算 `R NEW` 时会使用这些量。
+它不是累计后的 `cn_c_mem[layer]`，而是更新 `cn_c_updt_cur` 前的本地输入流。
 
 ### 3.2 输出触发时刻
 
-在完成一个 `layer` 的所有 circulant（该 layer 中所有 `col` entry）更新之后，才会把该 `layer` 的 C-memory 打印出来。
+在 per-circulant（per entry）循环内，每处理完一个当前 `col` 的 Q/R/C 更新后，立刻输出一次该 circulant 的 `sign_tmp / val_tmp`。
 
 ### 3.3 输出格式（逐行）
 
-每行对应一个 circulant 内位置 `i`：
+每行对应一个 circulant 内位置 `i`；连续的 $Z$ 行组成一个 block，对应“某个 circulant 的本地 C-update 输入”。不同 circulant block 之间插入一个空行分隔。
 
 ```
-ITR<itr>/L<layer>/C<i>: min1 <hex>, min2 <hex>, min1 pos <col>, sign_tot <0|1>
+ITR<itr>/L<layer>/C<i>: sign_tmp <0|1>, val_tmp <hex>
 ```
 
 字段说明：
 
 - `ITR<itr>`：迭代号（0-based）。
 - `L<layer>`：layer（base-matrix 行号）。
-- `C<i>`：circulant 内索引 $i$（0..$Z-1$），这里的 `C` 不是 column。
-- `min1/min2`：以 `int(min*_val * 2^{finite_f_num})` 打印的十六进制近似值。
-- `min1 pos`：`min1_pos`，取值范围 0..`bm_n-1`。
-- `sign_tot`：把内部 $\pm 1$ 映射为 0/1：正号（+1）打印为 0，负号（-1）打印为 1。
+- `C<i>`：circulant 内索引 $i$（0..$Z-1$），这里的 `C` 不是 base-matrix column。
+- `sign_tmp`：把内部 $\pm 1$ 映射为 0/1：正号（+1）打印为 0，负号（-1）打印为 1。
+- `val_tmp`：以 `int(val_tmp * 2^{finite_f_num})` 打印的十六进制近似值；对被 mask/fade 移除的 bit，会看到较大的哨兵值。
+
+> 由于现在是 per-circulant 快照，文件体积会显著增大，约为“原先 per-layer 版本乘以每层实际 circulant 数”。
 
 ## 4. `rdec_stot_dump.txt`（sign_tot bit-map）
 
@@ -98,7 +97,7 @@ ITR<itr>/L<layer>/C<i>: min1 <hex>, min2 <hex>, min1 pos <col>, sign_tot <0|1>
 
 ### 4.2 输出触发时刻
 
-同 `rdec_cmem_dump.txt`：每个 `layer` 更新结束后输出一行。
+每个 `layer` 更新结束后输出一行；与 `rdec_cmem_dump.txt` 的 per-circulant 频率不同。
 
 ### 4.3 输出格式（逐行）
 
@@ -445,7 +444,7 @@ shortening 时，对无效 bit 位置会采用：
 
 因此：
 
-- `rdec_cmem_dump.txt` 记录的是更新后的 `cn_c_mem[layer][*]`；
+- `rdec_cmem_dump.txt` 记录的是每个 `(itr,layer,col)` 处理完成后的本地 C-update 输入，也就是 `sign_tmp / val_tmp`；
 - `rdec_stot_dump.txt` 是其 `sign_tot` 的 512bit 压缩表示。
 
 #### 7.4.8 早停判据（`hd_init/hd_updated/layer_synd` 的组合）

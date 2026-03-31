@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import subprocess
 import sys
 import time
@@ -110,7 +111,7 @@ class AdaptiveConfig:
     max_in_flight: int = 20
     poll_sec: float = 30.0
     kill_margin: float = 0.0
-    # Progress export (xlsx): during deep scan, export every N seconds (0 disables).
+    # Progress export (xlsx): during deep/finalize/completion stages, export every N seconds (0 disables).
     export_xlsx_sec: float = 3600.0
 
     # Circuit breaker / fail-fast:
@@ -632,6 +633,38 @@ def patch_config_max_sim_num(src: Path, dst: Path, max_sim_num: int, max_error_n
     dst.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def read_config_max_error_num(path: Path) -> Optional[int]:
+    """
+    Read "maximum error number" from a simulator config.
+
+    Mirrors patch_config_max_sim_num() lookup: prefer the marker comment,
+    otherwise fall back to line 10 (1-based).
+    """
+    try:
+        txt = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+
+    lines = txt.splitlines()
+    idx_err = None
+    for i, line in enumerate(lines):
+        if "maximum error number" in line:
+            idx_err = i
+            break
+    if idx_err is None:
+        idx_err = 9 if len(lines) > 9 else None
+    if idx_err is None:
+        return None
+
+    m = re.match(r"^\s*([0-9]+)\b", lines[idx_err])
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
+
+
 def _pilot_only(
     c: CaseConfig,
     dry_run: bool,
@@ -807,6 +840,13 @@ def _run_adaptive_case(
     patch_config_max_sim_num(base_cfg, pilot_cfg, adaptive.pilot_max_sim_num, max_error_num=0)
     # Main/Backfill/Deep: run until 10 failures (max_error_num=10)
     patch_config_max_sim_num(base_cfg, main_cfg, adaptive.main_max_sim_num, max_error_num=10)
+    required_fail_cw = read_config_max_error_num(main_cfg)
+    if required_fail_cw is None:
+        required_fail_cw = 0
+        _status(
+            f"[auto_fer_eval][adaptive] WARN: cannot parse maximum error number from {main_cfg.name}; "
+            "completion pass will require [STATISTICS] only"
+        )
 
     pilot_case = replace(
         base,
@@ -876,14 +916,34 @@ def _run_adaptive_case(
             queue=lsf.queue_slow,  # main scan uses slow queue
         )
 
+        if not dry_run:
+            completed_main = adaptive_finalize_incomplete_logs(
+                main_case,
+                manifest,
+                executor=executor,
+                poll_sec=adaptive.poll_sec,
+                fail_fast=adaptive.fail_fast,
+                timeout_log_grace_sec=adaptive.timeout_log_grace_sec,
+                required_fail_cw=required_fail_cw,
+                max_in_flight=adaptive.max_in_flight,
+                queue=lsf.queue_slow,  # complete coarse points in the slow queue
+                stages={"main"},
+                export_xlsx_sec=adaptive.export_xlsx_sec,
+            )
+            if completed_main > 0:
+                _status(
+                    f"[auto_fer_eval][adaptive] completion(main): {completed_main} point(s) re-run to meet "
+                    f"max_err_num={required_fail_cw if required_fail_cw > 0 else 'STATISTICS'}"
+                )
+
         # ---- Stage 2.5: cleanup invalid logs from killed jobs
-        # Points beyond snr_trigger with no fail_cw or fail_cw < threshold are invalid.
-        # Delete their logs and remove from manifest so deep scan can re-run them.
+        # Only remove truly unparseable points beyond trigger. Parseable partial logs
+        # are kept so they can be re-submitted to full max_err_num later.
         _cleanup_invalid_logs_after_main_scan(
             main_case,
             manifest,
             snr_trigger=snr_trigger,
-            min_fail_cw=adaptive.min_fail_cw_for_decision,
+            min_fail_cw=required_fail_cw,
         )
 
         # ---- Stage 3: backfill gaps where FER jumps > threshold
@@ -970,9 +1030,29 @@ def _run_adaptive_case(
                 timeout_log_grace_sec=adaptive.timeout_log_grace_sec,
                 max_in_flight=adaptive.max_in_flight,
                 queue=lsf.queue_slow,  # finalize uses slow queue (same as main/backfill)
+                export_xlsx_sec=adaptive.export_xlsx_sec,
             )
             if finalized > 0:
                 _status(f"[auto_fer_eval][adaptive] finalize done: {finalized} point(s) re-run to completion")
+
+        if not dry_run:
+            completed_all = adaptive_finalize_incomplete_logs(
+                main_case,
+                manifest,
+                executor=executor,
+                poll_sec=adaptive.poll_sec,
+                fail_fast=adaptive.fail_fast,
+                timeout_log_grace_sec=adaptive.timeout_log_grace_sec,
+                required_fail_cw=required_fail_cw,
+                max_in_flight=adaptive.max_in_flight,
+                queue=lsf.queue_fast or lsf.queue_slow,
+                export_xlsx_sec=adaptive.export_xlsx_sec,
+            )
+            if completed_all > 0:
+                _status(
+                    f"[auto_fer_eval][adaptive] completion(all): {completed_all} point(s) re-run to meet "
+                    f"max_err_num={required_fail_cw if required_fail_cw > 0 else 'STATISTICS'}"
+                )
     finally:
         save_manifest(main_manifest_path, manifest)
 
@@ -1102,6 +1182,60 @@ def _log_path_for(c: CaseConfig, axis_value: float) -> Path:
     return (log_dir / f"{c.log_prefix}_{axis_str}.log").resolve()
 
 
+def _effective_job_log_path(job: Any, fallback_log_path: Path) -> Path:
+    actual = getattr(job, "log_path", None)
+    if actual is None:
+        return Path(fallback_log_path).resolve()
+    try:
+        return Path(actual).resolve()
+    except Exception:
+        return Path(fallback_log_path).resolve()
+
+
+def _progress_xlsx_path_for_case(c: CaseConfig) -> Path:
+    # Place xlsx next to "adaptive/" so one case shares one progress workbook
+    # across deep/finalize/completion stages.
+    return (Path(c.out_dir) / c.name).resolve().parent / f"{c.log_prefix}_progress.xlsx"
+
+
+def _maybe_export_live_progress_xlsx(
+    c: CaseConfig,
+    manifest: dict[str, Any],
+    *,
+    executor: Any,
+    job_db: JobDB,
+    xlsx_path: Optional[Path],
+    job_db_path: Path,
+    planned_snrs: list[float],
+    pending_snrs: list[float],
+    in_flight: dict[float, dict[str, Any]],
+    export_sec: float,
+    next_export_at: Optional[float],
+    force: bool = False,
+) -> Optional[float]:
+    if xlsx_path is None:
+        return next_export_at
+
+    now = time.time()
+    if not force:
+        if next_export_at is None or now < next_export_at:
+            return next_export_at
+
+    _refresh_in_flight_live_metrics(executor=executor, job_db=job_db, in_flight=in_flight)
+    export_progress_xlsx(
+        c,
+        manifest,
+        xlsx_path=xlsx_path,
+        job_db_path=job_db_path,
+        planned_snrs=list(planned_snrs),
+        pending_snrs=list(pending_snrs),
+        in_flight_snrs=list(in_flight.keys()),
+    )
+    if export_sec > 0:
+        return now + export_sec
+    return next_export_at
+
+
 def _parse_done_log(c: CaseConfig, axis_value: float, log_path: Path, cmd: list[str]) -> Optional[RunRecord]:
     if not log_path.exists():
         return None
@@ -1121,6 +1255,77 @@ def _parse_done_log(c: CaseConfig, axis_value: float, log_path: Path, cmd: list[
         total_packets=m.total_packets,
         retry_dec_avg_iter=m.retry_dec_avg_iter,
     )
+
+
+def _normalized_fail_cw(
+    fail_cw: Optional[Any],
+    ldpc_fer: Optional[Any],
+    total_packets: Optional[Any],
+) -> Optional[int]:
+    if fail_cw is not None:
+        try:
+            return int(fail_cw)
+        except (TypeError, ValueError):
+            return None
+    if ldpc_fer is None or total_packets is None:
+        return None
+    try:
+        fer_f = float(ldpc_fer)
+        tp_i = int(total_packets)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(fer_f) or tp_i <= 0:
+        return None
+    est = int(round(fer_f * float(tp_i)))
+    return max(est, 0)
+
+
+def _record_meets_required_fail_cw(
+    *,
+    fail_cw: Optional[Any],
+    ldpc_fer: Optional[Any],
+    total_packets: Optional[Any],
+    required_fail_cw: int,
+) -> bool:
+    if required_fail_cw <= 0:
+        return True
+    got = _normalized_fail_cw(fail_cw, ldpc_fer, total_packets)
+    if got is None:
+        return False
+    return got >= int(required_fail_cw)
+
+
+def _run_record_is_complete(log_path: Path, rec: Optional[RunRecord], *, required_fail_cw: int) -> bool:
+    if rec is None:
+        return False
+    if not _log_has_complete_statistics(log_path):
+        return False
+    return _record_meets_required_fail_cw(
+        fail_cw=rec.fail_cw,
+        ldpc_fer=rec.ldpc_fer,
+        total_packets=rec.total_packets,
+        required_fail_cw=required_fail_cw,
+    )
+
+
+def _axis_value_from_log_name(c: CaseConfig, log_name: str) -> Optional[float]:
+    prefix = re.escape(c.log_prefix)
+    if c.axis_type == "snr":
+        m = re.match(rf"^{prefix}_snr([0-9.]+)\.log$", log_name)
+        if not m:
+            return None
+        try:
+            return float(m.group(1))
+        except ValueError:
+            return None
+
+    m = re.match(rf"^{prefix}_k([0-9]+)\.log$", log_name)
+    if not m:
+        return None
+    try:
+        return float(int(m.group(1)))
+    except ValueError:
+        return None
 
 
 def adaptive_main_scan(
@@ -1164,6 +1369,16 @@ def adaptive_main_scan(
     min_fail = min_fail_cw_for_decision
 
     job_db = JobDB((Path(c.out_dir) / c.name / "jobs.json").resolve())
+    required_fail_cw = read_config_max_error_num(_resolve_cfg_path(c)) or 0
+    in_flight = _recover_stage_in_flight(
+        c,
+        manifest,
+        executor=executor,
+        job_db=job_db,
+        stages={"main"},
+        required_fail_cw=required_fail_cw,
+        stage_label="main",
+    )
 
     def _job_identity(job: Any) -> tuple[str, str]:
         # LsfJob has job_id; LocalJob has proc.pid. Duck-typed to avoid imports here.
@@ -1207,6 +1422,10 @@ def adaptive_main_scan(
         nonlocal in_flight, snr_trigger, ok_count, first_submitted_job_key
         log_path = _log_path_for(c, xv)
         cmd = build_cmd(c, xv)
+
+        if _in_flight_has_axis(in_flight, xv):
+            _status(f"[auto_fer_eval][adaptive] reuse(main) axis={c.axis_type} x={xv} still in-flight")
+            return
 
         # First check manifest for existing record (higher priority than log file).
         cached = find_run(manifest, c.axis_type, xv)
@@ -1259,6 +1478,7 @@ def adaptive_main_scan(
 
         job_name = f"{Path(c.name).name}_{c.log_prefix}_{_format_axis(xv, c.axis_type)}"
         job = executor.submit(cmd, cwd=c.workdir, log_path=log_path, job_name=job_name, queue=queue)
+        actual_log_path = _effective_job_log_path(job, log_path)
         backend, jid = _job_identity(job)
         job_key = f"{backend}:{jid}"
         if first_submitted_job_key is None:
@@ -1270,10 +1490,11 @@ def adaptive_main_scan(
                 "backend": backend,
                 "job_id": jid,
                 "job_name": job_name,
+                "point_key": _job_point_key("main", c.axis_type, xv),
                 "stage": "main",
                 "axis_type": c.axis_type,
                 "axis_value": float(xv),
-                "log_path": str(log_path),
+                "log_path": str(actual_log_path),
                 "cmd": cmd,
                 "submitted_at": t_submit,
             }
@@ -1285,10 +1506,10 @@ def adaptive_main_scan(
             "job_key": job_key,
             "submitted_at": time.time(),
             "running_since": None,
-            "log_path": log_path,
+            "log_path": actual_log_path,
             "cmd": cmd,
         }
-        _status(f"[auto_fer_eval][adaptive] submit(main) axis={c.axis_type} x={xv} -> {log_path.name}")
+        _status(f"[auto_fer_eval][adaptive] submit(main) axis={c.axis_type} x={xv} -> {actual_log_path.name}")
 
     def cancel_all_in_flight(*, reason: str) -> None:
         for xv, info in list(in_flight.items()):
@@ -1635,13 +1856,22 @@ def adaptive_deep_scan(
     min_fail = max(0, int(min_fail_cw_for_decision))
     job_db_path = (Path(c.out_dir) / c.name / "jobs.json").resolve()
     job_db = JobDB(job_db_path)
+    required_fail_cw = read_config_max_error_num(_resolve_cfg_path(c)) or 0
+    in_flight: dict[float, dict[str, Any]] = _recover_stage_in_flight(
+        c,
+        manifest,
+        executor=executor,
+        job_db=job_db,
+        stages={"deep"},
+        required_fail_cw=required_fail_cw,
+        stage_label="deep",
+    )
 
     export_sec = float(export_xlsx_sec) if export_xlsx_sec is not None else 0.0
     xlsx_path: Optional[Path] = None
     next_export_at: Optional[float] = None
     if export_sec > 0:
-        # Place xlsx next to "adaptive/" (i.e., parent of "main/") so each case has one file.
-        xlsx_path = (Path(c.out_dir) / c.name).resolve().parent / f"{c.log_prefix}_progress.xlsx"
+        xlsx_path = _progress_xlsx_path_for_case(c)
         next_export_at = time.time()
 
     def _job_identity(job: Any) -> tuple[str, str]:
@@ -1663,6 +1893,9 @@ def adaptive_deep_scan(
         x = _quantize_axis(x, step, axis_type=c.axis_type, origin=origin)
         if not _in_range(x, stop_snr, c.direction):
             break
+        if _in_flight_has_axis(in_flight, x):
+            x = _quantize_axis(x + c.direction * step, step, axis_type=c.axis_type, origin=origin)
+            continue
         # Skip if already exists with sufficient fail_cw.
         cached = find_run(manifest, c.axis_type, x)
         if cached and cached.get("ldpc_fer") is not None:
@@ -1683,59 +1916,67 @@ def adaptive_deep_scan(
 
     if not deep_points:
         _status(f"[auto_fer_eval][adaptive] deep scan: no new points needed (start={start_snr} stop={stop_snr})")
-        if xlsx_path is not None:
-            export_progress_xlsx(
-                c,
-                manifest,
-                xlsx_path=xlsx_path,
-                job_db_path=job_db_path,
-                planned_snrs=[],
-                pending_snrs=[],
-                in_flight_snrs=[],
-            )
+        next_export_at = _maybe_export_live_progress_xlsx(
+            c,
+            manifest,
+            executor=executor,
+            job_db=job_db,
+            xlsx_path=xlsx_path,
+            job_db_path=job_db_path,
+            planned_snrs=[],
+            pending_snrs=[],
+            in_flight=in_flight,
+            export_sec=export_sec,
+            next_export_at=next_export_at,
+            force=True,
+        )
         return
 
     _status(f"[auto_fer_eval][adaptive] deep scan: axis={c.axis_type} start={start_snr} stop={stop_snr} ({len(deep_points)} points)")
 
     # Submit and poll in parallel.
-    in_flight: dict[float, dict[str, Any]] = {}
     pending = list(deep_points)
     completed = 0
 
-    # Initial snapshot export once deep scan starts.
-    if xlsx_path is not None and next_export_at is not None and time.time() >= next_export_at:
-        export_progress_xlsx(
+    next_export_at = _maybe_export_live_progress_xlsx(
+        c,
+        manifest,
+        executor=executor,
+        job_db=job_db,
+        xlsx_path=xlsx_path,
+        job_db_path=job_db_path,
+        planned_snrs=deep_points,
+        pending_snrs=pending,
+        in_flight=in_flight,
+        export_sec=export_sec,
+        next_export_at=next_export_at,
+        force=True,
+    )
+
+    while pending or in_flight:
+        next_export_at = _maybe_export_live_progress_xlsx(
             c,
             manifest,
+            executor=executor,
+            job_db=job_db,
             xlsx_path=xlsx_path,
             job_db_path=job_db_path,
             planned_snrs=deep_points,
             pending_snrs=pending,
-            in_flight_snrs=list(in_flight.keys()),
+            in_flight=in_flight,
+            export_sec=export_sec,
+            next_export_at=next_export_at,
         )
-        next_export_at = time.time() + export_sec
-
-    while pending or in_flight:
-        # Periodic export (even if logs are incomplete).
-        if xlsx_path is not None and next_export_at is not None and time.time() >= next_export_at:
-            export_progress_xlsx(
-                c,
-                manifest,
-                xlsx_path=xlsx_path,
-                job_db_path=job_db_path,
-                planned_snrs=deep_points,
-                pending_snrs=pending,
-                in_flight_snrs=list(in_flight.keys()),
-            )
-            next_export_at = time.time() + export_sec
 
         # Fill pipeline.
+        submitted_any = False
         while pending and len(in_flight) < max_in_flight:
             xv = pending.pop(0)
             log_path = _log_path_for(c, xv)
             cmd = build_cmd(c, xv)
             job_name = f"{Path(c.name).name}_{c.log_prefix}_{_format_axis(xv, c.axis_type)}"
             job = executor.submit(cmd, cwd=c.workdir, log_path=log_path, job_name=job_name, queue=queue)
+            actual_log_path = _effective_job_log_path(job, log_path)
             backend, jid = _job_identity(job)
             job_key = f"{backend}:{jid}"
             t_submit = time.time()
@@ -1745,18 +1986,36 @@ def adaptive_deep_scan(
                     "backend": backend,
                     "job_id": jid,
                     "job_name": job_name,
+                    "point_key": _job_point_key("deep", c.axis_type, xv),
                     "stage": "deep",
                     "axis_type": c.axis_type,
                     "axis_value": float(xv),
-                    "log_path": str(log_path),
+                    "log_path": str(actual_log_path),
                     "cmd": cmd,
                     "submitted_at": t_submit,
                 }
             )
             job_db.set_state(job_key, "SUBMITTED", t=t_submit)
             job_db.flush()
-            in_flight[xv] = {"job": job, "job_key": job_key, "log_path": log_path, "cmd": cmd}
-            _status(f"[auto_fer_eval][adaptive] submit(deep) axis={c.axis_type} x={xv} -> {log_path.name}")
+            in_flight[xv] = {"job": job, "job_key": job_key, "log_path": actual_log_path, "cmd": cmd}
+            _status(f"[auto_fer_eval][adaptive] submit(deep) axis={c.axis_type} x={xv} -> {actual_log_path.name}")
+            submitted_any = True
+
+        if submitted_any:
+            next_export_at = _maybe_export_live_progress_xlsx(
+                c,
+                manifest,
+                executor=executor,
+                job_db=job_db,
+                xlsx_path=xlsx_path,
+                job_db_path=job_db_path,
+                planned_snrs=deep_points,
+                pending_snrs=pending,
+                in_flight=in_flight,
+                export_sec=export_sec,
+                next_export_at=next_export_at,
+                force=True,
+            )
 
         if not in_flight:
             break
@@ -1869,16 +2128,20 @@ def adaptive_deep_scan(
                                 pass
                             job_db.mark_cancel(str(info2["job_key"]), reason="fer_lo_reached")
                     job_db.flush()
-                    if xlsx_path is not None:
-                        export_progress_xlsx(
-                            c,
-                            manifest,
-                            xlsx_path=xlsx_path,
-                            job_db_path=job_db_path,
-                            planned_snrs=deep_points,
-                            pending_snrs=pending,
-                            in_flight_snrs=list(in_flight.keys()),
-                        )
+                    next_export_at = _maybe_export_live_progress_xlsx(
+                        c,
+                        manifest,
+                        executor=executor,
+                        job_db=job_db,
+                        xlsx_path=xlsx_path,
+                        job_db_path=job_db_path,
+                        planned_snrs=deep_points,
+                        pending_snrs=pending,
+                        in_flight=in_flight,
+                        export_sec=export_sec,
+                        next_export_at=next_export_at,
+                        force=True,
+                    )
                     return
 
             job_db.upsert({"key": job_key, "finished_at": time.time()})
@@ -1890,16 +2153,20 @@ def adaptive_deep_scan(
             time.sleep(poll_sec)
 
     # Final export after deep scan completes normally.
-    if xlsx_path is not None:
-        export_progress_xlsx(
-            c,
-            manifest,
-            xlsx_path=xlsx_path,
-            job_db_path=job_db_path,
-            planned_snrs=deep_points,
-            pending_snrs=[],
-            in_flight_snrs=[],
-        )
+    _maybe_export_live_progress_xlsx(
+        c,
+        manifest,
+        executor=executor,
+        job_db=job_db,
+        xlsx_path=xlsx_path,
+        job_db_path=job_db_path,
+        planned_snrs=deep_points,
+        pending_snrs=[],
+        in_flight=in_flight,
+        export_sec=export_sec,
+        next_export_at=next_export_at,
+        force=True,
+    )
 
 
 def _count_fit_points(c: CaseConfig, manifest: dict[str, Any], min_fail_cw: int) -> int:
@@ -1964,15 +2231,17 @@ def _cleanup_invalid_logs_after_main_scan(
     min_fail_cw: int,
 ) -> int:
     """
-    Clean up invalid/incomplete logs after main scan ends.
+    Clean up invalid logs after main scan ends.
 
     For points beyond snr_trigger that have:
-    - No fail_cw (log was killed before any complete [SIM] block)
-    - fail_cw < min_fail_cw (too few failures for reliable statistics)
+    - No parsable FER at all (log was killed before any complete [SIM] block)
 
-    We delete the log file and remove from manifest, so deep scan can re-run them.
+    We intentionally keep parseable partial logs in the manifest so they can be
+    re-submitted to completion later. Only truly invalid/unparseable logs are deleted.
 
-    Also scans the log directory for orphan log files (exist but not in manifest).
+    Also scans the log directory for orphan log files (exist but not in manifest):
+    - if the orphan log becomes parsable, it is inserted into the manifest
+    - if it is still unparseable and beyond trigger, it is deleted
 
     Returns the number of cleaned up points.
     """
@@ -2007,24 +2276,9 @@ def _cleanup_invalid_logs_after_main_scan(
         if not _is_beyond_trigger(x_f):
             continue
 
-        # Check if this entry is invalid/incomplete
-        fcw = r.get("fail_cw")
+        # Only delete truly invalid points with no parsable FER at all.
         fer = r.get("ldpc_fer")
-
-        # Invalid if: no FER, or no fail_cw, or fail_cw < threshold
-        is_invalid = False
         if fer is None:
-            is_invalid = True
-        elif fcw is None:
-            is_invalid = True
-        elif min_fail_cw > 0:
-            try:
-                if int(fcw) < min_fail_cw:
-                    is_invalid = True
-            except (TypeError, ValueError):
-                is_invalid = True
-
-        if is_invalid:
             runs_to_remove.append(r)
             # Delete the log file
             log_path = r.get("log_path")
@@ -2058,31 +2312,147 @@ def _cleanup_invalid_logs_after_main_scan(
                     pass
 
         # Find orphan log files
-        import re
         for log_file in log_dir.glob(f"{c.log_prefix}_{axis_prefix}*.log"):
-            # Extract axis from filename like "demo_snr3.85.log" or "demo_k350.log"
-            if c.axis_type == "snr":
-                m = re.search(r"snr([0-9.]+)\.log$", log_file.name)
-            else:
-                m = re.search(r"k([0-9]+)\.log$", log_file.name)
-            if m:
-                try:
-                    x_f = float(m.group(1))
-                    # Only clean up orphans beyond trigger
-                    if _is_beyond_trigger(x_f) and x_f not in manifest_xs:
-                        try:
-                            log_file.unlink()
-                            _status(f"[auto_fer_eval][adaptive] cleanup: deleted orphan log {log_file.name} (axis={c.axis_type} x={x_f})")
-                            cleaned += 1
-                        except Exception as e:
-                            _status(f"[auto_fer_eval][adaptive] cleanup: failed to delete orphan {log_file.name}: {e}")
-                except (TypeError, ValueError):
-                    pass
+            x_f = _axis_value_from_log_name(c, log_file.name)
+            if x_f is None:
+                continue
+            # Only clean up orphans beyond trigger
+            if not _is_beyond_trigger(x_f) or x_f in manifest_xs:
+                continue
+
+            cmd = build_cmd(c, x_f)
+            rec = _parse_done_log(c, x_f, log_file, cmd)
+            if rec is not None:
+                upsert_run(manifest, rec)
+                manifest_xs.add(x_f)
+                _status(
+                    f"[auto_fer_eval][adaptive] cleanup: recovered orphan log {log_file.name} "
+                    f"(axis={c.axis_type} x={x_f})"
+                )
+                continue
+
+            try:
+                log_file.unlink()
+                _status(f"[auto_fer_eval][adaptive] cleanup: deleted orphan log {log_file.name} (axis={c.axis_type} x={x_f})")
+                cleaned += 1
+            except Exception as e:
+                _status(f"[auto_fer_eval][adaptive] cleanup: failed to delete orphan {log_file.name}: {e}")
 
     if cleaned > 0:
         _status(f"[auto_fer_eval][adaptive] cleanup: removed {cleaned} invalid/orphan entries")
 
     return cleaned
+
+
+def _read_log_metrics(log_path: Path) -> Optional[Any]:
+    if not log_path.exists():
+        return None
+    try:
+        txt = log_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    return parse_log_text(txt)
+
+
+def _metrics_to_job_live_dict(metrics: Any, *, source: str) -> dict[str, Any]:
+    out = {
+        "source": str(source),
+        "updated_at": time.time(),
+    }
+    for name in ("raw_ber", "theo_rber", "ldpc_fer", "fail_cw", "total_packets", "retry_dec_avg_iter"):
+        v = getattr(metrics, name, None)
+        if v is not None:
+            out[name] = v
+    return out
+
+
+def _best_live_metrics_from_job(executor: Any, job: Any, log_path: Path) -> Optional[dict[str, Any]]:
+    metrics_file = _read_log_metrics(log_path)
+
+    metrics_peek = None
+    peek_text = getattr(executor, "peek_text", None)
+    if callable(peek_text):
+        try:
+            txt = peek_text(job, timeout_sec=5.0)
+        except Exception:
+            txt = None
+        if txt:
+            try:
+                metrics_peek = parse_log_text(txt)
+            except Exception:
+                metrics_peek = None
+
+    def _score(m: Any) -> tuple[int, int]:
+        if m is None:
+            return (-1, -1)
+        fields = (
+            getattr(m, "ldpc_fer", None),
+            getattr(m, "fail_cw", None),
+            getattr(m, "total_packets", None),
+            getattr(m, "raw_ber", None),
+            getattr(m, "retry_dec_avg_iter", None),
+        )
+        populated = sum(1 for v in fields if v is not None)
+        packets = getattr(m, "total_packets", None)
+        try:
+            packets_i = int(packets) if packets is not None else -1
+        except (TypeError, ValueError):
+            packets_i = -1
+        return (populated, packets_i)
+
+    picked = metrics_file
+    source = "log"
+    if _score(metrics_peek) > _score(metrics_file):
+        picked = metrics_peek
+        source = "bpeek"
+
+    if picked is None or getattr(picked, "ldpc_fer", None) is None:
+        return None
+    return _metrics_to_job_live_dict(picked, source=source)
+
+
+def _refresh_in_flight_live_metrics(
+    *,
+    executor: Any,
+    job_db: JobDB,
+    in_flight: dict[float, dict[str, Any]],
+) -> None:
+    dirty = False
+    for info in in_flight.values():
+        job_key = str(info.get("job_key") or "")
+        if not job_key:
+            continue
+        job = info.get("job")
+        if job is None:
+            continue
+        log_path = Path(info.get("log_path") or "").resolve()
+        live = _best_live_metrics_from_job(executor, job, log_path)
+        if live is None:
+            continue
+        job_db.upsert({"key": job_key, "live_metrics": live})
+        dirty = True
+    if dirty:
+        job_db.flush()
+
+
+def _log_has_required_fail_cw(log_path: Path, required_fail_cw: int) -> bool:
+    if required_fail_cw <= 0:
+        return True
+    m = _read_log_metrics(log_path)
+    if m is None:
+        return False
+    return _record_meets_required_fail_cw(
+        fail_cw=m.fail_cw,
+        ldpc_fer=m.ldpc_fer,
+        total_packets=m.total_packets,
+        required_fail_cw=required_fail_cw,
+    )
+
+
+def _log_is_complete_for_required_fail_cw(log_path: Path, required_fail_cw: int) -> bool:
+    if not _log_has_complete_statistics(log_path):
+        return False
+    return _log_has_required_fail_cw(log_path, required_fail_cw)
 
 
 def _log_has_complete_statistics(log_path: Path) -> bool:
@@ -2121,6 +2491,7 @@ def adaptive_finalize_fit_logs(
     timeout_log_grace_sec: float,
     max_in_flight: int = 10,
     queue: str = "",
+    export_xlsx_sec: float = 0.0,
 ) -> int:
     """
     Finalize (re-run) points in the fit window so their logs end with [STATISTICS].
@@ -2142,6 +2513,7 @@ def adaptive_finalize_fit_logs(
     min_fail = max(0, int(min_fail_cw_for_decision))
     trigger = float(snr_trigger) if snr_trigger is not None else None
     grace_sec = max(float(timeout_log_grace_sec), 30.0)
+    required_fail_cw = read_config_max_error_num(_resolve_cfg_path(c)) or 0
 
     def _is_beyond_trigger(x: float) -> bool:
         if trigger is None:
@@ -2178,7 +2550,8 @@ def adaptive_finalize_fit_logs(
             continue
 
         log_path = Path(r.get("log_path") or _log_path_for(c, x_f)).resolve()
-        if _log_has_complete_statistics(log_path):
+        rec_existing = _parse_done_log(c, x_f, log_path, build_cmd(c, x_f))
+        if _run_record_is_complete(log_path, rec_existing, required_fail_cw=required_fail_cw):
             continue
 
         cand[x_f] = {"log_path": log_path, "cmd": build_cmd(c, x_f)}
@@ -2193,20 +2566,61 @@ def adaptive_finalize_fit_logs(
         f"trigger={trigger if trigger is not None else 'none'})"
     )
 
-    job_db = JobDB((Path(c.out_dir) / c.name / "jobs.json").resolve())
+    job_db_path = (Path(c.out_dir) / c.name / "jobs.json").resolve()
+    job_db = JobDB(job_db_path)
+    in_flight: dict[float, dict[str, Any]] = _recover_stage_in_flight(
+        c,
+        manifest,
+        executor=executor,
+        job_db=job_db,
+        stages={"finalize_fit"},
+        required_fail_cw=required_fail_cw,
+        stage_label="finalize_fit",
+    )
+    export_sec = float(export_xlsx_sec) if export_xlsx_sec is not None else 0.0
+    xlsx_path: Optional[Path] = _progress_xlsx_path_for_case(c) if export_sec > 0 else None
+    next_export_at: Optional[float] = time.time() if xlsx_path is not None else None
 
     def _job_identity(job: Any) -> tuple[str, str]:
-        backend = job.__class__.__name__.replace("Job", "").lower()
-        jid = getattr(job, "job_id", None)
-        if jid is None:
-            jid = getattr(job, "pid", None)
-        return backend, str(jid)
+        if hasattr(job, "job_id"):
+            return ("lsf", str(getattr(job, "job_id")))
+        if hasattr(job, "proc") and hasattr(getattr(job, "proc"), "pid"):
+            return ("local", str(getattr(getattr(job, "proc"), "pid")))
+        return ("unknown", str(id(job)))
 
-    pending = list(xs)
-    in_flight: dict[float, dict[str, Any]] = {}
+    pending = [x for x in xs if not _in_flight_has_axis(in_flight, x)]
     completed = 0
+    next_export_at = _maybe_export_live_progress_xlsx(
+        c,
+        manifest,
+        executor=executor,
+        job_db=job_db,
+        xlsx_path=xlsx_path,
+        job_db_path=job_db_path,
+        planned_snrs=xs,
+        pending_snrs=pending,
+        in_flight=in_flight,
+        export_sec=export_sec,
+        next_export_at=next_export_at,
+        force=True,
+    )
 
     while pending or in_flight:
+        next_export_at = _maybe_export_live_progress_xlsx(
+            c,
+            manifest,
+            executor=executor,
+            job_db=job_db,
+            xlsx_path=xlsx_path,
+            job_db_path=job_db_path,
+            planned_snrs=xs,
+            pending_snrs=pending,
+            in_flight=in_flight,
+            export_sec=export_sec,
+            next_export_at=next_export_at,
+        )
+
+        submitted_any = False
         while pending and len(in_flight) < max_in_flight:
             xv = pending.pop(0)
             info = cand[xv]
@@ -2221,6 +2635,7 @@ def adaptive_finalize_fit_logs(
 
             job_name = f"{Path(c.name).name}_{c.log_prefix}_{_format_axis(xv, c.axis_type)}_finalize"
             job = executor.submit(cmd, cwd=c.workdir, log_path=log_path, job_name=job_name, queue=queue)
+            actual_log_path = _effective_job_log_path(job, log_path)
             backend, jid = _job_identity(job)
             job_key = f"{backend}:{jid}"
             t_submit = time.time()
@@ -2230,18 +2645,36 @@ def adaptive_finalize_fit_logs(
                     "backend": backend,
                     "job_id": jid,
                     "job_name": job_name,
+                    "point_key": _job_point_key("finalize_fit", c.axis_type, xv),
                     "stage": "finalize_fit",
                     "axis_type": c.axis_type,
                     "axis_value": float(xv),
-                    "log_path": str(log_path),
+                    "log_path": str(actual_log_path),
                     "cmd": cmd,
                     "submitted_at": t_submit,
                 }
             )
             job_db.set_state(job_key, "SUBMITTED", t=t_submit)
             job_db.flush()
-            in_flight[xv] = {"job": job, "job_key": job_key, "log_path": log_path, "cmd": cmd}
-            _status(f"[auto_fer_eval][adaptive] submit(finalize) axis={c.axis_type} x={xv} -> {log_path.name}")
+            in_flight[xv] = {"job": job, "job_key": job_key, "log_path": actual_log_path, "cmd": cmd}
+            _status(f"[auto_fer_eval][adaptive] submit(finalize) axis={c.axis_type} x={xv} -> {actual_log_path.name}")
+            submitted_any = True
+
+        if submitted_any:
+            next_export_at = _maybe_export_live_progress_xlsx(
+                c,
+                manifest,
+                executor=executor,
+                job_db=job_db,
+                xlsx_path=xlsx_path,
+                job_db_path=job_db_path,
+                planned_snrs=xs,
+                pending_snrs=pending,
+                in_flight=in_flight,
+                export_sec=export_sec,
+                next_export_at=next_export_at,
+                force=True,
+            )
 
         if not in_flight:
             break
@@ -2274,21 +2707,26 @@ def adaptive_finalize_fit_logs(
             t_end = time.time() + grace_sec
             while time.time() < t_end:
                 rec_done = _parse_done_log(c, xv, log_path, cmd)
-                if rec_done is not None and _log_has_complete_statistics(log_path):
+                if _run_record_is_complete(log_path, rec_done, required_fail_cw=required_fail_cw):
                     break
                 time.sleep(1.0)
 
             if rec_done is None:
                 _status(f"[auto_fer_eval][adaptive] warn: finalize log not parsable: {log_path}")
-            elif not _log_has_complete_statistics(log_path):
-                _status(f"[auto_fer_eval][adaptive] warn: finalize log still missing [STATISTICS]: {log_path}")
+            elif not _run_record_is_complete(log_path, rec_done, required_fail_cw=required_fail_cw):
+                got_fail_cw = _normalized_fail_cw(rec_done.fail_cw, rec_done.ldpc_fer, rec_done.total_packets)
+                _status(
+                    f"[auto_fer_eval][adaptive] warn: finalize log still incomplete: {log_path} "
+                    f"(need FAIL_CW>={required_fail_cw}, got {got_fail_cw if got_fail_cw is not None else '?'})"
+                )
                 # Still record the best effort metrics, but mark as not completed.
                 upsert_run(manifest, rec_done)
             else:
-                if min_fail > 0 and rec_done.fail_cw is not None and int(rec_done.fail_cw) < min_fail:
+                got_fail_cw = _normalized_fail_cw(rec_done.fail_cw, rec_done.ldpc_fer, rec_done.total_packets)
+                if min_fail > 0 and got_fail_cw is not None and got_fail_cw < min_fail:
                     _status(
                         f"[auto_fer_eval][adaptive] warn: finalize complete but low FAIL_CW: "
-                        f"axis={c.axis_type} x={xv} FAIL_CW={rec_done.fail_cw} < {min_fail}"
+                        f"axis={c.axis_type} x={xv} FAIL_CW={got_fail_cw} < {min_fail}"
                     )
                 upsert_run(manifest, rec_done)
                 completed += 1
@@ -2305,10 +2743,29 @@ def adaptive_finalize_fit_logs(
         if not done_any:
             time.sleep(poll_sec)
 
+    _maybe_export_live_progress_xlsx(
+        c,
+        manifest,
+        executor=executor,
+        job_db=job_db,
+        xlsx_path=xlsx_path,
+        job_db_path=job_db_path,
+        planned_snrs=xs,
+        pending_snrs=[],
+        in_flight=in_flight,
+        export_sec=export_sec,
+        next_export_at=next_export_at,
+        force=True,
+    )
     return completed
 
 
-def _load_latest_jobs_by_snr(job_db_path: Path, *, axis_type: str) -> dict[float, dict[str, Any]]:
+def _load_latest_jobs_by_snr(
+    job_db_path: Path,
+    *,
+    axis_type: str,
+    stages: Optional[set[str]] = None,
+) -> dict[float, dict[str, Any]]:
     """
     Read jobs.json and return the latest job record (by submitted_at/last_update)
     for each axis value of the requested axis_type.
@@ -2329,6 +2786,10 @@ def _load_latest_jobs_by_snr(job_db_path: Path, *, axis_type: str) -> dict[float
             continue
         if str(rec.get("axis_type") or "") != str(axis_type):
             continue
+        if stages is not None:
+            stage = str(rec.get("stage") or "")
+            if stage not in stages:
+                continue
         xv = rec.get("axis_value")
         if xv is None:
             continue
@@ -2359,6 +2820,471 @@ def _load_latest_jobs_by_snr(job_db_path: Path, *, axis_type: str) -> dict[float
     return out
 
 
+def _axis_key(x: float) -> float:
+    return float(round(float(x), 9))
+
+
+def _in_flight_has_axis(in_flight: dict[float, dict[str, Any]], xv: float) -> bool:
+    key = _axis_key(xv)
+    return any(_axis_key(k) == key for k in in_flight.keys())
+
+
+def _job_point_key(stage: str, axis_type: str, axis_value: float) -> str:
+    return f"{stage}:{axis_type}:{_format_axis(float(axis_value), axis_type)}"
+
+
+def _job_record_point_key(rec: dict[str, Any]) -> str:
+    point_key = str(rec.get("point_key") or "").strip()
+    if point_key:
+        return point_key
+    stage = str(rec.get("stage") or "").strip()
+    axis_type = str(rec.get("axis_type") or "").strip()
+    xv = rec.get("axis_value")
+    try:
+        x_f = float(xv)
+    except (TypeError, ValueError):
+        return ""
+    if not stage or not axis_type:
+        return ""
+    return _job_point_key(stage, axis_type, x_f)
+
+
+def _job_record_is_active(rec: dict[str, Any]) -> bool:
+    state = str(rec.get("last_state") or "").upper()
+    return state in {"SUBMITTED", "PEND", "RUN", "UNKNOWN", "PSUSP", "UNKWN"}
+
+
+def _load_latest_jobs_by_point(
+    job_db_path: Path,
+    *,
+    axis_type: str,
+    stages: Optional[set[str]] = None,
+) -> dict[str, dict[str, Any]]:
+    if not job_db_path.exists():
+        return {}
+    try:
+        data = json.loads(job_db_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    jobs = data.get("jobs", [])
+    if not isinstance(jobs, list):
+        return {}
+
+    out: dict[str, dict[str, Any]] = {}
+    for rec in jobs:
+        if not isinstance(rec, dict):
+            continue
+        if str(rec.get("axis_type") or "") != str(axis_type):
+            continue
+        if stages is not None:
+            stage = str(rec.get("stage") or "")
+            if stage not in stages:
+                continue
+        point_key = _job_record_point_key(rec)
+        if not point_key:
+            continue
+
+        t = rec.get("submitted_at")
+        if t is None:
+            t = rec.get("last_update")
+        try:
+            t_f = float(t) if t is not None else 0.0
+        except (TypeError, ValueError):
+            t_f = 0.0
+
+        prev = out.get(point_key)
+        prev_t = float(prev.get("_t", 0.0)) if isinstance(prev, dict) else -1.0
+        if prev is None or t_f >= prev_t:
+            rec2 = dict(rec)
+            rec2["_t"] = t_f
+            out[point_key] = rec2
+
+    for key in list(out.keys()):
+        out[key].pop("_t", None)
+    return out
+
+
+def _resume_executor_job(
+    executor: Any,
+    *,
+    cmd: list[str],
+    cwd: str,
+    log_path: Path,
+    rec: dict[str, Any],
+) -> Optional[Any]:
+    resume_job = getattr(executor, "resume_job", None)
+    if not callable(resume_job):
+        return None
+    return resume_job(
+        cmd=list(cmd),
+        cwd=str(cwd),
+        log_path=log_path.resolve(),
+        backend=str(rec.get("backend") or ""),
+        job_id=str(rec.get("job_id") or ""),
+    )
+
+
+def _recover_stage_in_flight(
+    c: CaseConfig,
+    manifest: dict[str, Any],
+    *,
+    executor: Any,
+    job_db: JobDB,
+    stages: set[str],
+    required_fail_cw: int,
+    stage_label: str,
+) -> dict[float, dict[str, Any]]:
+    """
+    Re-attach live jobs from previous scheduler runs and recover completed logs.
+
+    Only LSF-backed jobs are currently resumable. Other backends will simply fall
+    back to manifest/log reuse on restart.
+    """
+    latest_jobs = _load_latest_jobs_by_point(job_db.path, axis_type=c.axis_type, stages=stages)
+    if not latest_jobs:
+        return {}
+
+    adopted: dict[float, dict[str, Any]] = {}
+    now = time.time()
+
+    for rec in latest_jobs.values():
+        xv = rec.get("axis_value")
+        if xv is None:
+            continue
+        try:
+            x_f = float(xv)
+        except (TypeError, ValueError):
+            continue
+
+        log_path = Path(rec.get("log_path") or _log_path_for(c, x_f)).resolve()
+        cmd_raw = rec.get("cmd")
+        cmd = [str(x) for x in cmd_raw] if isinstance(cmd_raw, list) else build_cmd(c, x_f)
+        job_key = str(rec.get("key") or "")
+
+        if _log_is_complete_for_required_fail_cw(log_path, required_fail_cw):
+            rec_done = _parse_done_log(c, x_f, log_path, cmd)
+            if rec_done is not None:
+                upsert_run(manifest, rec_done)
+            if job_key:
+                job_db.set_state(job_key, "DONE", t=now)
+                job_db.upsert({"key": job_key, "finished_at": now})
+            continue
+
+        if not _job_record_is_active(rec):
+            continue
+
+        job = _resume_executor_job(executor, cmd=cmd, cwd=c.workdir, log_path=log_path, rec=rec)
+        if job is None:
+            continue
+
+        st = executor.poll(job)
+        if job_key:
+            job_db.set_state(job_key, st.state, t=now)
+
+        if st.done:
+            rec_done = _parse_done_log(c, x_f, log_path, cmd)
+            if rec_done is not None:
+                upsert_run(manifest, rec_done)
+            if job_key:
+                job_db.upsert({"key": job_key, "finished_at": now})
+            continue
+
+        adopted[x_f] = {
+            "job": job,
+            "job_key": job_key,
+            "submitted_at": float(rec.get("submitted_at") or now),
+            "running_since": rec.get("running_since"),
+            "log_path": log_path,
+            "cmd": cmd,
+            "adopted": True,
+        }
+        jid = rec.get("job_id")
+        jid_s = f" job_id={jid}" if jid not in {None, ''} else ""
+        _status(
+            f"[auto_fer_eval][adaptive] adopt({stage_label}) axis={c.axis_type} x={x_f}{jid_s} "
+            f"state={st.state}"
+        )
+
+    job_db.flush()
+    return adopted
+
+
+def adaptive_finalize_incomplete_logs(
+    c: CaseConfig,
+    manifest: dict[str, Any],
+    *,
+    executor: Any,
+    poll_sec: float,
+    fail_fast: bool,
+    timeout_log_grace_sec: float,
+    required_fail_cw: int,
+    max_in_flight: int = 10,
+    queue: str = "",
+    stages: Optional[set[str]] = None,
+    export_xlsx_sec: float = 0.0,
+) -> int:
+    """
+    Re-run retained adaptive points whose logs are still incomplete.
+
+    Completeness means:
+      1) the log reached the final [STATISTICS] section; and
+      2) FAIL_CW meets the configured maximum error number (when available).
+
+    We collect candidates from both manifest.json and jobs.json so points killed
+    before being written to manifest can still be recovered.
+    """
+    poll_sec = max(0.2, float(poll_sec))
+    max_in_flight = max(1, int(max_in_flight))
+    required_fail = max(0, int(required_fail_cw))
+    grace_sec = max(float(timeout_log_grace_sec), 30.0)
+
+    job_db_path = (Path(c.out_dir) / c.name / "jobs.json").resolve()
+    latest_jobs = _load_latest_jobs_by_snr(job_db_path, axis_type=c.axis_type, stages=stages)
+
+    cand: dict[float, dict[str, Any]] = {}
+
+    def _add_candidate(x_f: float, *, log_path: Path, cmd: list[str]) -> None:
+        cand[float(x_f)] = {
+            "log_path": log_path.resolve(),
+            "cmd": [str(x) for x in cmd],
+        }
+
+    for r in manifest.get("runs", []):
+        if r.get("axis_type") != c.axis_type:
+            continue
+        xv = r.get("axis_value")
+        if xv is None:
+            continue
+        try:
+            x_f = float(xv)
+        except (TypeError, ValueError):
+            continue
+        log_path = Path(r.get("log_path") or _log_path_for(c, x_f)).resolve()
+        if _log_is_complete_for_required_fail_cw(log_path, required_fail):
+            continue
+        cmd_raw = r.get("cmd")
+        cmd = [str(x) for x in cmd_raw] if isinstance(cmd_raw, list) else build_cmd(c, x_f)
+        _add_candidate(x_f, log_path=log_path, cmd=cmd)
+
+    for x_f, job in latest_jobs.items():
+        log_path = Path(job.get("log_path") or _log_path_for(c, x_f)).resolve()
+        if _log_is_complete_for_required_fail_cw(log_path, required_fail):
+            continue
+        cmd_raw = job.get("cmd")
+        cmd = [str(x) for x in cmd_raw] if isinstance(cmd_raw, list) else build_cmd(c, x_f)
+        _add_candidate(float(x_f), log_path=log_path, cmd=cmd)
+
+    if not cand:
+        return 0
+
+    xs = sorted(cand.keys(), reverse=(c.direction < 0))
+    stage_label = ",".join(sorted(stages)) if stages else "all"
+    need_lbl = f"FAIL_CW>={required_fail}" if required_fail > 0 else "[STATISTICS]"
+    _status(
+        f"[auto_fer_eval][adaptive] completion pass ({stage_label}): "
+        f"{len(xs)} point(s) need {need_lbl}"
+    )
+
+    job_db = JobDB(job_db_path)
+    in_flight: dict[float, dict[str, Any]] = _recover_stage_in_flight(
+        c,
+        manifest,
+        executor=executor,
+        job_db=job_db,
+        stages={"complete_logs"},
+        required_fail_cw=required_fail,
+        stage_label="complete_logs",
+    )
+    export_sec = float(export_xlsx_sec) if export_xlsx_sec is not None else 0.0
+    xlsx_path: Optional[Path] = _progress_xlsx_path_for_case(c) if export_sec > 0 else None
+    next_export_at: Optional[float] = time.time() if xlsx_path is not None else None
+
+    def _job_identity(job: Any) -> tuple[str, str]:
+        if hasattr(job, "job_id"):
+            return ("lsf", str(getattr(job, "job_id")))
+        if hasattr(job, "proc") and hasattr(getattr(job, "proc"), "pid"):
+            return ("local", str(getattr(getattr(job, "proc"), "pid")))
+        return ("unknown", str(id(job)))
+
+    pending = [x for x in xs if not _in_flight_has_axis(in_flight, x)]
+    completed = 0
+    next_export_at = _maybe_export_live_progress_xlsx(
+        c,
+        manifest,
+        executor=executor,
+        job_db=job_db,
+        xlsx_path=xlsx_path,
+        job_db_path=job_db_path,
+        planned_snrs=xs,
+        pending_snrs=pending,
+        in_flight=in_flight,
+        export_sec=export_sec,
+        next_export_at=next_export_at,
+        force=True,
+    )
+
+    while pending or in_flight:
+        next_export_at = _maybe_export_live_progress_xlsx(
+            c,
+            manifest,
+            executor=executor,
+            job_db=job_db,
+            xlsx_path=xlsx_path,
+            job_db_path=job_db_path,
+            planned_snrs=xs,
+            pending_snrs=pending,
+            in_flight=in_flight,
+            export_sec=export_sec,
+            next_export_at=next_export_at,
+        )
+
+        submitted_any = False
+        while pending and len(in_flight) < max_in_flight:
+            xv = pending.pop(0)
+            info = cand[xv]
+            log_path = Path(info["log_path"])
+            cmd = list(info["cmd"])
+
+            if log_path.exists():
+                try:
+                    log_path.unlink()
+                except Exception:
+                    pass
+
+            job_name = f"{Path(c.name).name}_{c.log_prefix}_{_format_axis(xv, c.axis_type)}_complete"
+            job = executor.submit(cmd, cwd=c.workdir, log_path=log_path, job_name=job_name, queue=queue)
+            actual_log_path = _effective_job_log_path(job, log_path)
+            backend, jid = _job_identity(job)
+            job_key = f"{backend}:{jid}"
+            t_submit = time.time()
+            job_db.upsert(
+                {
+                    "key": job_key,
+                    "backend": backend,
+                    "job_id": jid,
+                    "job_name": job_name,
+                    "point_key": _job_point_key("complete_logs", c.axis_type, xv),
+                    "stage": "complete_logs",
+                    "axis_type": c.axis_type,
+                    "axis_value": float(xv),
+                    "log_path": str(actual_log_path),
+                    "cmd": cmd,
+                    "submitted_at": t_submit,
+                }
+            )
+            job_db.set_state(job_key, "SUBMITTED", t=t_submit)
+            job_db.flush()
+            in_flight[xv] = {"job": job, "job_key": job_key, "log_path": actual_log_path, "cmd": cmd}
+            _status(
+                f"[auto_fer_eval][adaptive] submit(complete) axis={c.axis_type} x={xv} "
+                f"-> {actual_log_path.name}"
+            )
+            submitted_any = True
+
+        if submitted_any:
+            next_export_at = _maybe_export_live_progress_xlsx(
+                c,
+                manifest,
+                executor=executor,
+                job_db=job_db,
+                xlsx_path=xlsx_path,
+                job_db_path=job_db_path,
+                planned_snrs=xs,
+                pending_snrs=pending,
+                in_flight=in_flight,
+                export_sec=export_sec,
+                next_export_at=next_export_at,
+                force=True,
+            )
+
+        if not in_flight:
+            break
+
+        done_any = False
+        now = time.time()
+        for xv, info in list(in_flight.items()):
+            job = info["job"]
+            job_key = str(info["job_key"])
+            st = executor.poll(job)
+            job_db.set_state(job_key, st.state, t=now)
+
+            if not st.done:
+                continue
+
+            if st.state == "DRY_RUN_DONE":
+                in_flight.pop(xv, None)
+                done_any = True
+                continue
+
+            log_path = Path(info["log_path"])
+            cmd = list(info["cmd"])
+
+            if st.state == "EXIT" and fail_fast:
+                raise RuntimeError(
+                    f"[auto_fer_eval][adaptive] ERROR: completion job exited abnormally: "
+                    f"axis={c.axis_type} x={xv} log={log_path}"
+                )
+
+            rec_done = None
+            t_end = time.time() + grace_sec
+            while time.time() < t_end:
+                rec_done = _parse_done_log(c, xv, log_path, cmd)
+                if rec_done is not None and _log_is_complete_for_required_fail_cw(log_path, required_fail):
+                    break
+                time.sleep(1.0)
+
+            if rec_done is None:
+                msg = f"[auto_fer_eval][adaptive] warn: completion log not parsable: {log_path}"
+                _status(msg)
+                if fail_fast:
+                    raise RuntimeError(msg)
+            elif not _log_is_complete_for_required_fail_cw(log_path, required_fail):
+                parsed = _read_log_metrics(log_path)
+                fcw = parsed.fail_cw if parsed is not None else None
+                msg = (
+                    f"[auto_fer_eval][adaptive] warn: completion log still incomplete: "
+                    f"axis={c.axis_type} x={xv} FAIL_CW={fcw} need>={required_fail}"
+                )
+                _status(msg)
+                upsert_run(manifest, rec_done)
+                if fail_fast:
+                    raise RuntimeError(msg)
+            else:
+                upsert_run(manifest, rec_done)
+                completed += 1
+                fcw_s = str(rec_done.fail_cw) if rec_done.fail_cw is not None else "?"
+                tp_s = str(rec_done.total_packets) if rec_done.total_packets is not None else "?"
+                fer_s = f"{rec_done.ldpc_fer:.6g}" if rec_done.ldpc_fer is not None else "?"
+                _status(
+                    f"[auto_fer_eval][adaptive] done(complete): axis={c.axis_type} x={xv} "
+                    f"FER={fer_s} FAIL_CW={fcw_s} N={tp_s}"
+                )
+
+            job_db.upsert({"key": job_key, "finished_at": time.time()})
+            job_db.flush()
+            in_flight.pop(xv, None)
+            done_any = True
+
+        if not done_any:
+            time.sleep(poll_sec)
+
+    _maybe_export_live_progress_xlsx(
+        c,
+        manifest,
+        executor=executor,
+        job_db=job_db,
+        xlsx_path=xlsx_path,
+        job_db_path=job_db_path,
+        planned_snrs=xs,
+        pending_snrs=[],
+        in_flight=in_flight,
+        export_sec=export_sec,
+        next_export_at=next_export_at,
+        force=True,
+    )
+    return completed
+
+
 def export_progress_xlsx(
     c: CaseConfig,
     manifest: dict[str, Any],
@@ -2374,8 +3300,10 @@ def export_progress_xlsx(
 
     - Includes planned/pending/in-flight points even if log is incomplete.
     - Missing fields stay empty.
-    - Adds IsComplete flag: 1 if log has [STATISTICS] LDPC FER, else 0.
+    - Adds IsComplete flag: 1 if log has [STATISTICS] and satisfies required FAIL_CW.
     """
+    required_fail_cw = read_config_max_error_num(_resolve_cfg_path(c)) or 0
+
     # Unique axis value set
     snr_set: dict[float, float] = {}
     for snr in planned_snrs + pending_snrs + in_flight_snrs:
@@ -2418,8 +3346,17 @@ def export_progress_xlsx(
 
     for snr in snrs:
         key = float(round(float(snr), 9))
-        log_path = _log_path_for(c, snr)
+        job = latest_jobs.get(key)
         rec = find_run(manifest, c.axis_type, snr)
+        log_path = Path(
+            (
+                job.get("log_path")
+                if isinstance(job, dict) and job.get("log_path")
+                else rec.get("log_path")
+                if isinstance(rec, dict) and rec.get("log_path")
+                else _log_path_for(c, snr)
+            )
+        ).resolve()
 
         parsed = None
         if log_path.exists() and log_path.stat().st_size > 0:
@@ -2428,12 +3365,22 @@ def export_progress_xlsx(
             except Exception:
                 parsed = None
 
+        live = None
+        if isinstance(job, dict):
+            live_raw = job.get("live_metrics")
+            if isinstance(live_raw, dict):
+                live = live_raw
+
         def _pick(name: str) -> Any:
-            # Prefer parsed log values, then manifest record.
+            # Prefer parsed log values, then live metrics harvested from running jobs, then manifest.
             if parsed is not None:
                 v = getattr(parsed, name, None)
                 if v is not None:
                     return v
+            if live is not None:
+                v_live = live.get(name)
+                if v_live is not None:
+                    return v_live
             if rec is not None:
                 v2 = rec.get(name) if isinstance(rec, dict) else None
                 if v2 is not None:
@@ -2446,11 +3393,10 @@ def export_progress_xlsx(
         total_packets = _pick("total_packets")
         avg_iter = _pick("retry_dec_avg_iter")
 
-        is_complete = 1 if _log_has_complete_statistics(log_path) else 0
+        is_complete = 1 if _log_is_complete_for_required_fail_cw(log_path, required_fail_cw) else 0
 
         job_state = ""
         stage = ""
-        job = latest_jobs.get(key)
         if job is not None:
             job_state = str(job.get("last_state") or "")
             stage = str(job.get("stage") or "")
@@ -2560,6 +3506,16 @@ def adaptive_backfill_gaps(
     if c.axis_type == "k":
         step = float(max(1, int(round(step))))
     job_db = JobDB((Path(c.out_dir) / c.name / "jobs.json").resolve())
+    required_fail_cw = read_config_max_error_num(_resolve_cfg_path(c)) or 0
+    in_flight: dict[float, dict[str, Any]] = _recover_stage_in_flight(
+        c,
+        manifest,
+        executor=executor,
+        job_db=job_db,
+        stages={"backfill"},
+        required_fail_cw=required_fail_cw,
+        stage_label="backfill",
+    )
 
     def _job_identity(job: Any) -> tuple[str, str]:
         if hasattr(job, "job_id"):
@@ -2628,6 +3584,9 @@ def adaptive_backfill_gaps(
                 if xq <= x_hi + 1e-12:
                     break
             # Skip if already exists.
+            if _in_flight_has_axis(in_flight, xq):
+                x = float(xq) + float(c.direction) * step
+                continue
             cached = find_run(manifest, c.axis_type, xq)
             if cached and cached.get("ldpc_fer") is not None:
                 x = float(xq) + float(c.direction) * step
@@ -2655,7 +3614,6 @@ def adaptive_backfill_gaps(
         return 0
 
     # Submit and poll in parallel.
-    in_flight: dict[float, dict[str, Any]] = {}
     pending = list(backfill_points)
     added = 0
 
@@ -2667,6 +3625,7 @@ def adaptive_backfill_gaps(
             cmd = build_cmd(c, xv)
             job_name = f"{Path(c.name).name}_{c.log_prefix}_{_format_axis(xv, c.axis_type)}"
             job = executor.submit(cmd, cwd=c.workdir, log_path=log_path, job_name=job_name, queue=queue)
+            actual_log_path = _effective_job_log_path(job, log_path)
             backend, jid = _job_identity(job)
             job_key = f"{backend}:{jid}"
             t_submit = time.time()
@@ -2676,18 +3635,19 @@ def adaptive_backfill_gaps(
                     "backend": backend,
                     "job_id": jid,
                     "job_name": job_name,
+                    "point_key": _job_point_key("backfill", c.axis_type, xv),
                     "stage": "backfill",
                     "axis_type": c.axis_type,
                     "axis_value": float(xv),
-                    "log_path": str(log_path),
+                    "log_path": str(actual_log_path),
                     "cmd": cmd,
                     "submitted_at": t_submit,
                 }
             )
             job_db.set_state(job_key, "SUBMITTED", t=t_submit)
             job_db.flush()
-            in_flight[xv] = {"job": job, "job_key": job_key, "log_path": log_path, "cmd": cmd}
-            _status(f"[auto_fer_eval][adaptive] submit(backfill) axis={c.axis_type} x={xv} -> {log_path.name}")
+            in_flight[xv] = {"job": job, "job_key": job_key, "log_path": actual_log_path, "cmd": cmd}
+            _status(f"[auto_fer_eval][adaptive] submit(backfill) axis={c.axis_type} x={xv} -> {actual_log_path.name}")
 
         if not in_flight:
             break

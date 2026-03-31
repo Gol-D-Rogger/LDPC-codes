@@ -98,7 +98,7 @@ int main(int argc, char **argv)
 
         printf("################################\n");
         printf("# LDPC codes configuration: \n");
-        printf("# M = %d; N= %d; P= %d; pad_bit= %d \n", m-1, n-1, ex_factor, pad_bit);
+        printf("# M = %d; N= %d; P= %d; pad_bit= %d \n", m, n, ex_factor, pad_bit);
         printf("# Max. column weight = %d\n", wt);
         printf("################################\n");
         // 输出根目录支持：命令行 argv[4] 或环境变量 GENLDPC_OUT_DIR，默认 ./output

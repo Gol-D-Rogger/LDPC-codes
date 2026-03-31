@@ -265,8 +265,8 @@ void ldpc_config(int h_m,
     const float m_llr0 = (float)llr0 / 16.0f;
     const float m_llr1 = (float)llr1 / 16.0f;
 
-    g_bm_m = h_m + 1;
-    g_bm_n = h_n + 1;
+    g_bm_m = h_m;
+    g_bm_n = h_n;
     const int mask_len = h_sc - pad_bit;
     g_info_len = info_num;
     g_hm_m = g_bm_m * h_sc - mask_len;

@@ -4,7 +4,7 @@
 
 - 文件格式与字段解码方式
 - `flag_64_extra_userdata` 与 extra user-data payload 列的定义
-- `44'hFFFFFFFFFFF` 占位哨兵（zero-circulant placeholder）的生成原因与解析注意事项
+- `42'hFFFFFFFFFFF` 占位哨兵（zero-circulant placeholder）的生成原因与解析注意事项
 - 输出顺序（为何不是按 `col` 排序、为何会出现占位插入）
 - 以 `10x76ex512_w4` 为例的可验证证据
 
@@ -24,19 +24,19 @@
 文件每行对应一条 ROM case 形式：
 
 ```
-10'dADDR     :mmem_rdt=44'hXXXXXXXXXXX;
+10'dADDR     :mmem_rdt=42'hXXXXXXXXXXX;
 ```
 
 - `ADDR`：调度条目地址（自增）
-- `XXXXXXXXXXX`：11 个 hex 字符（44 bit）
+- `XXXXXXXXXXX`：11 个 hex 字符；实际有效位为低 42 bit
 
-> 重要：`44'hFFFFFFFFFFF`（44 bit 全 1）在本实现中被用作占位哨兵，不是正常条目。
+> 重要：`42'hFFFFFFFFFFF`（低 42 bit 全 1）在本实现中被用作占位哨兵，不是正常条目。
 
 ---
 
-## 1. 44-bit 字段定义与解码
+## 1. 42-bit 字段定义与解码
 
-IBEX 当前将调度信息打包为 44 bit（其中低 42 bit 有效，高 2 bit 通常为 0；占位哨兵除外）。
+IBEX 当前将调度信息打包为 42 bit，并按 11 个 hex 字符打印；最高显示出来的 2 个 bit 恒为 0。
 
 字段分布（见 `IBEX/src/ldpc_codec.cpp` 中 RDEC scheduler packing）：
 
@@ -47,7 +47,7 @@ IBEX 当前将调度信息打包为 44 bit（其中低 42 bit 有效，高 2 bit
 - `[30]` `last_in_row`（1 bit）：行内结束标志（注意：当前实现是“提前 1 cycle”，详见第 5 节）
 - `[31]` `flag_64_extra_userdata`（1 bit）：是否位于 extra user-data payload 列
 - `[32]` `mask_flag`（1 bit）：是否需要 lane mask（MASK/INVMASK）
-- `[41:33]` `mask_shift`（9 bit）：同列最后一行 circulant 的 shift（以 9 bit 二补码表示 $[-256,255]$）
+- `[41:33]` `delta_to_last`（9 bit）：无符号模 $Z$ 差值，定义为 $(last\_row\_shift - shift + Z)\bmod Z$
 
 建议的解码公式（`uint64_t word`）：
 
@@ -57,6 +57,13 @@ IBEX 当前将调度信息打包为 44 bit（其中低 42 bit 有效，高 2 bit
 - $shift\_delta = (word >> 21)\ \&\ 0x1FF$
 - $last = (word >> 30)\ \&\ 1$
 - $flag\_{64} = (word >> 31)\ \&\ 1$
+- $mask\_flag = (word >> 32)\ \&\ 1$
+- $delta\_to\_last = (word >> 33)\ \&\ 0x1FF$
+
+> `delta_to_last` 只有在 `mask_flag==1` 时才有意义。它表示“从当前 entry 的 shift 走到同列 last-row shift 的模 $Z$ 差值”，不是绝对 `mask_shift`。因此：
+> - last-row occupied 条目应满足 `delta_to_last==0`
+> - fade 条目应满足 `delta_to_last=(last_row_shift-fade_shift+Z)%Z`
+> - 不需要 `mask_role`，因为 DV 侧可用当前 row 是否为 `last_row` 来区分 `last_row` 与 `fade`
 
 ---
 
@@ -83,7 +90,7 @@ $bm_m=10,bm_n=76 \Rightarrow payload\_cols\_total=66$，extra user-data 列为 `
 
 ---
 
-## 3. `44'hFFFFFFFFFFF`：zero-circulant 占位哨兵（为什么会出现全 F）
+## 3. `42'hFFFFFFFFFFF`：zero-circulant 占位哨兵（为什么会出现全 F）
 
 ### 3.1 设计目的
 
@@ -91,7 +98,7 @@ IBEX 的导出策略是：对每一行（layer），对每一个 extra user-data
 
 当该行该列缺失非零 CPM 时，会输出占位哨兵：
 
-- `44'hFFFFFFFFFFF`（44 bit 全 1）
+- `42'hFFFFFFFFFFF`（低 42 bit 全 1）
 
 这使得硬件或后处理脚本可以按固定节拍消费 extra 列条目，而不需要再去查询 base-matrix 是否存在该 circulant。
 
@@ -109,7 +116,7 @@ IBEX 的导出策略是：对每一行（layer），对每一个 extra user-data
 
 ```mermaid
 flowchart TD
-  A["ROW i: 输出真实条目（按依赖分组）"] --> B["ROW i: 追加 extra-userdata 缺失列占位 44'hFFFFFFFFFFF"]
+  A["ROW i: 输出真实条目（按依赖分组）"] --> B["ROW i: 追加 extra-userdata 缺失列占位 42'hFFFFFFFFFFF"]
   B --> C["ROW i 结束，进入 ROW i+1"]
 ```
 
@@ -307,14 +314,14 @@ ROW  0: ...|1X|...
 
 ### 6.3 在 `rdec_sched` 中的对应条目（可复现解码）
 
-在 `IBEX/output/rdec_sched_10x76ex512_w4.txt` 中可见：
+在当前 42-bit 导出格式下，可按下面的方式理解对应条目：
 
-- `10'd32:mmem_rdt=44'h13E4C290040;`  
-  解码：`col=64`，`flag_64_extra_userdata=1`（真实条目）
-- `10'd33:mmem_rdt=44'hFFFFFFFFFFF;`  
+- `10'd32:mmem_rdt=42'hXXXXXXXXXXX;`  
+  解码：真实条目，且 `col=64`、`flag_64_extra_userdata=1`
+- `10'd33:mmem_rdt=42'hFFFFFFFFFFF;`  
   占位哨兵（对应缺失的 `col=65`）
-- `10'd34:mmem_rdt=44'h0001C031A4B;`  
-  解码：`col=75`，`flag_64_extra_userdata=0`（已进入下一 row 的真实条目）
+- `10'd34:mmem_rdt=42'hXXXXXXXXXXX;`  
+  解码：下一条真实条目
 
 结论：`addr=33` 不是“第 33 个真实 circulant”，而是 row0 的 extra-userdata 缺失列占位。
 
@@ -344,7 +351,7 @@ python3 scripts/check_rdec_flag64_col0.py IBEX/output/rdec_sched_10x76ex512_w4.t
 
 ## 8. 常见误区（建议自检）
 
-1) **未过滤 `44'hFFFFFFFFFFF` 就解析字段**  
+1) **未过滤 `42'hFFFFFFFFFFF` 就解析字段**  
 会得到 `col=127/flag=1/last=1` 等“假象”，从而误判 `flag_64_extra_userdata` 或 `last_in_row`。
 
 2) **误以为 row 内按 `col` 递增排序**  
@@ -404,7 +411,7 @@ flowchart LR
    - `rdec_sched`：会按 `j=1..bm_m-1` 分组输出（第 4 节与 4.2 小例子）。
    - `ldpc_dec_layer2()`：不分组，直接按 `qc_bm` 的 row 链表顺序走。
 
-2) **是否会出现 `44'hFFFFFFFFFFF` 占位**
+2) **是否会出现 `42'hFFFFFFFFFFF` 占位**
    - `rdec_sched`：为 extra-userdata 缺失列插入占位（第 3 节、第 6 节）。
    - `ldpc_dec_layer2()`：遍历的对象是 `qc_bm` 的真实非零项；占位并不存在于 `qc_bm`，因此软件解码不会“看到”占位条目。
 

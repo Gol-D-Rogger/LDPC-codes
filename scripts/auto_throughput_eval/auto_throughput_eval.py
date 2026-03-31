@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -26,6 +28,7 @@ def _ensure_repo_on_syspath() -> None:
 _ensure_repo_on_syspath()
 
 from auto_fer_eval.executors import LocalExecutor, LsfExecutor
+from auto_fer_eval.job_db import JobDB
 from auto_fer_eval.log_parser import parse_log_text
 from auto_fer_eval.manifest import RunRecord, find_run, load_manifest, save_manifest, upsert_run
 
@@ -261,12 +264,13 @@ def run_case_local(c: CaseConfig, *, runner: RunnerConfig, dry_run: bool) -> Non
         log_path = log_path_for(c, xv)
         cmd = build_cmd(c, xv, config_arg=str(runtime_cfg))
 
-        found = find_run(manifest, c.axis_type, xv)
-        if found and found.get("raw_ber") is not None and found.get("retry_dec_avg_iter") is not None:
-            cached += 1
-            continue
-
-        rec_done = parse_done_log(axis_type=c.axis_type, axis_value=xv, log_path=log_path, cmd=cmd)
+        rec_done = _resolve_complete_record(
+            axis_type=c.axis_type,
+            axis_value=xv,
+            manifest_rec=find_run(manifest, c.axis_type, xv),
+            fallback_log_path=log_path,
+            fallback_cmd=cmd,
+        )
         if rec_done is not None:
             upsert_run(manifest, rec_done)
             cached += 1
@@ -361,41 +365,53 @@ def run_case_lsf(c: CaseConfig, *, runner: RunnerConfig, lsf: LsfConfig, dry_run
 
     manifest_path = case_dir / "manifest.json"
     manifest = load_manifest(manifest_path)
+    job_db_path = (case_dir / "jobs.json").resolve()
+    jobs_by_point = _load_job_records_by_point(job_db_path, axis_type=c.axis_type)
 
     cfg_abs = resolve_cfg_path(c)
     runtime_cfg = (case_dir / "config_runtime.cnfg").resolve()
     matrix_size = parse_matrix_size(cfg_abs)
     xs = list(build_axis_grid(c.x_low, c.x_high, c.x_step, axis_type=c.axis_type))
 
-    todo: list[tuple[float, Path, list[str], str]] = []
-    cached = 0
-    for xv in xs:
-        log_path = log_path_for_submission(c, xv, lsf=lsf)
-        cmd = build_cmd(c, xv, config_arg=str(runtime_cfg))
-        job_name = build_job_name(c, matrix_size=matrix_size, axis_value=xv)
-
-        found = find_run(manifest, c.axis_type, xv)
-        if found and found.get("raw_ber") is not None and found.get("retry_dec_avg_iter") is not None:
-            cached += 1
-            continue
-
-        rec_done = parse_done_log(axis_type=c.axis_type, axis_value=xv, log_path=log_path, cmd=cmd)
-        if rec_done is not None:
-            upsert_run(manifest, rec_done)
-            cached += 1
-            continue
-
-        todo.append((xv, log_path, cmd, job_name))
-
-    save_manifest(manifest_path, manifest)
-
-    print(f"\n[auto_throughput_eval] case={c.name} axis={c.axis_type} grid={len(xs)} cached={cached} todo={len(todo)} out={case_dir}")
     if dry_run:
+        todo: list[tuple[float, Path, list[str], str]] = []
+        cached = 0
+        active_recorded = 0
+        for xv in xs:
+            log_path = log_path_for_submission(c, xv, lsf=lsf)
+            cmd = build_cmd(c, xv, config_arg=str(runtime_cfg))
+            job_name = build_job_name(c, matrix_size=matrix_size, axis_value=xv)
+            point_key = _throughput_point_key(c.axis_type, xv)
+
+            rec_done = _resolve_complete_record(
+                axis_type=c.axis_type,
+                axis_value=xv,
+                manifest_rec=find_run(manifest, c.axis_type, xv),
+                fallback_log_path=log_path,
+                fallback_cmd=cmd,
+            )
+            if rec_done is not None:
+                upsert_run(manifest, rec_done)
+                cached += 1
+                continue
+
+            if any(_job_record_is_active(rec) for rec in jobs_by_point.get(point_key, [])):
+                active_recorded += 1
+                continue
+            todo.append((xv, log_path, cmd, job_name))
+
+        save_manifest(manifest_path, manifest)
+        print(
+            f"\n[auto_throughput_eval] case={c.name} axis={c.axis_type} grid={len(xs)} "
+            f"cached={cached} active_recorded={active_recorded} todo={len(todo)} out={case_dir}"
+        )
         if todo:
             print(
                 f"[dry-run] would generate runtime config: {runtime_cfg} (from {cfg_abs}) "
                 f"(max_sim_num={c.max_sim_num}, max_err_num={c.max_err_num})"
             )
+        if active_recorded:
+            print(f"[dry-run] recorded active jobs from jobs.json: {active_recorded}")
         cwd_abs = str(Path(c.workdir).resolve())
         for xv, log_path, cmd, job_name in todo:
             bsub_cmd = build_bsub_command_line(
@@ -410,9 +426,6 @@ def run_case_lsf(c: CaseConfig, *, runner: RunnerConfig, lsf: LsfConfig, dry_run
             print(f"          {bsub_cmd}")
         return
 
-    if todo:
-        patch_config_max_sim_num(cfg_abs, runtime_cfg, c.max_sim_num, max_error_num=c.max_err_num)
-
     ex = LsfExecutor(
         queue=lsf.queue,
         bsub_extra=lsf.bsub_extra,
@@ -420,10 +433,117 @@ def run_case_lsf(c: CaseConfig, *, runner: RunnerConfig, lsf: LsfConfig, dry_run
         bkill_extra=lsf.bkill_extra,
         log_base_dir="",  # log path mapping is handled by log_path_for_submission()
     )
+    job_db = JobDB(job_db_path)
     max_in_flight = max(1, int(runner.max_in_flight))
     poll_sec = max(0.2, float(runner.poll_sec))
 
     in_flight: dict[float, dict[str, Any]] = {}
+    todo: list[tuple[float, Path, list[str], str, str]] = []
+    cached = 0
+    adopted = 0
+
+    for xv in xs:
+        log_path = log_path_for_submission(c, xv, lsf=lsf)
+        cmd = build_cmd(c, xv, config_arg=str(runtime_cfg))
+        job_name = build_job_name(c, matrix_size=matrix_size, axis_value=xv)
+        point_key = _throughput_point_key(c.axis_type, xv)
+
+        rec_done = _resolve_complete_record(
+            axis_type=c.axis_type,
+            axis_value=xv,
+            manifest_rec=find_run(manifest, c.axis_type, xv),
+            fallback_log_path=log_path,
+            fallback_cmd=cmd,
+        )
+        if rec_done is not None:
+            upsert_run(manifest, rec_done)
+            cached += 1
+            continue
+
+        reused = False
+        for job_rec in jobs_by_point.get(point_key, []):
+            job_key = str(job_rec.get("key") or "")
+            job_log_path = Path(job_rec.get("log_path") or log_path).resolve()
+            job_cmd_raw = job_rec.get("cmd")
+            job_cmd = [str(x) for x in job_cmd_raw] if isinstance(job_cmd_raw, list) else list(cmd)
+
+            rec_done = parse_done_log(
+                axis_type=c.axis_type,
+                axis_value=xv,
+                log_path=job_log_path,
+                cmd=job_cmd,
+                debug=False,
+            )
+            if rec_done is not None:
+                upsert_run(manifest, rec_done)
+                cached += 1
+                now = time.time()
+                if job_key:
+                    job_db.set_state(job_key, "DONE", t=now)
+                    job_db.upsert({"key": job_key, "finished_at": now})
+                reused = True
+                break
+
+            if not _job_record_is_active(job_rec):
+                continue
+
+            job = _resume_executor_job(ex, cmd=job_cmd, cwd=c.workdir, log_path=job_log_path, rec=job_rec)
+            if job is None:
+                continue
+
+            now = time.time()
+            st = ex.poll(job)
+            if job_key:
+                job_db.set_state(job_key, st.state, t=now)
+
+            if st.done:
+                rec_done = parse_done_log_with_grace(
+                    axis_type=c.axis_type,
+                    axis_value=xv,
+                    log_path=job_log_path,
+                    cmd=job_cmd,
+                    grace_sec=max(float(runner.timeout_log_grace_sec), 30.0),
+                )
+                if rec_done is not None:
+                    upsert_run(manifest, rec_done)
+                    cached += 1
+                    if job_key:
+                        job_db.set_state(job_key, "DONE", t=now)
+                        job_db.upsert({"key": job_key, "finished_at": now})
+                    reused = True
+                    break
+                if job_key:
+                    job_db.upsert({"key": job_key, "finished_at": now})
+                continue
+
+            in_flight[xv] = {
+                "job": job,
+                "job_key": job_key,
+                "log_path": job_log_path,
+                "cmd": job_cmd,
+                "job_name": str(job_rec.get("job_name") or job_name),
+                "adopted": True,
+            }
+            adopted += 1
+            reused = True
+            jid = job_rec.get("job_id")
+            print(f"[auto_throughput_eval] adopt axis={c.axis_type} x={xv} job_id={jid} state={st.state}")
+            break
+
+        if reused:
+            continue
+
+        todo.append((xv, log_path, cmd, job_name, point_key))
+
+    save_manifest(manifest_path, manifest)
+    job_db.flush()
+    print(
+        f"\n[auto_throughput_eval] case={c.name} axis={c.axis_type} grid={len(xs)} "
+        f"cached={cached} adopted={adopted} todo={len(todo)} out={case_dir}"
+    )
+
+    if todo:
+        patch_config_max_sim_num(cfg_abs, runtime_cfg, c.max_sim_num, max_error_num=c.max_err_num)
 
     def cancel_all(reason: str) -> None:
         for xv, info in list(in_flight.items()):
@@ -431,14 +551,47 @@ def run_case_lsf(c: CaseConfig, *, runner: RunnerConfig, lsf: LsfConfig, dry_run
                 ex.cancel(info["job"])
             except Exception:
                 pass
+            job_key = str(info.get("job_key") or "")
+            if job_key:
+                job_db.mark_cancel(job_key, reason=reason)
             print(f"[auto_throughput_eval] cancel axis={c.axis_type} x={xv} reason={reason}")
             in_flight.pop(xv, None)
+        job_db.flush()
     try:
         while todo or in_flight:
             while todo and len(in_flight) < max_in_flight:
-                xv, log_path, cmd, job_name = todo.pop(0)
+                xv, log_path, cmd, job_name, point_key = todo.pop(0)
                 job = ex.submit(cmd, cwd=c.workdir, log_path=Path(log_path), job_name=job_name, queue=lsf.queue)
-                in_flight[xv] = {"job": job, "log_path": log_path, "cmd": cmd, "job_name": job_name}
+                backend, jid = _job_identity(job)
+                job_key = f"{backend}:{jid}"
+                t_submit = time.time()
+                job_db.upsert(
+                    {
+                        "key": job_key,
+                        "backend": backend,
+                        "job_id": jid,
+                        "job_name": job_name,
+                        "point_key": point_key,
+                        "stage": "throughput",
+                        "axis_type": c.axis_type,
+                        "axis_value": float(xv),
+                        "log_path": str(Path(log_path).resolve()),
+                        "cmd": list(cmd),
+                        "submitted_at": t_submit,
+                        "required_max_sim_num": int(c.max_sim_num),
+                        "required_max_err_num": int(c.max_err_num),
+                    }
+                )
+                job_db.set_state(job_key, "SUBMITTED", t=t_submit)
+                job_db.flush()
+                in_flight[xv] = {
+                    "job": job,
+                    "job_key": job_key,
+                    "log_path": Path(log_path).resolve(),
+                    "cmd": list(cmd),
+                    "job_name": job_name,
+                    "adopted": False,
+                }
                 jid = getattr(job, "job_id", "?")
                 print(f"[auto_throughput_eval] bsub axis={c.axis_type} x={xv} job_id={jid} job_name={job_name}")
 
@@ -448,10 +601,35 @@ def run_case_lsf(c: CaseConfig, *, runner: RunnerConfig, lsf: LsfConfig, dry_run
             time.sleep(poll_sec)
             for xv, info in list(in_flight.items()):
                 st = ex.poll(info["job"])
+                job_key = str(info.get("job_key") or "")
+                now = time.time()
+                if job_key:
+                    job_db.set_state(job_key, st.state, t=now)
                 if not st.done:
                     continue
 
                 in_flight.pop(xv, None)
+                rec = parse_done_log_with_grace(
+                    axis_type=c.axis_type,
+                    axis_value=xv,
+                    log_path=Path(info["log_path"]),
+                    cmd=list(info["cmd"]),
+                    grace_sec=max(float(runner.timeout_log_grace_sec), 30.0),
+                )
+                if rec is not None:
+                    upsert_run(manifest, rec)
+                    save_manifest(manifest_path, manifest)
+                    if job_key:
+                        job_db.set_state(job_key, "DONE", t=now)
+                        job_db.upsert({"key": job_key, "finished_at": now})
+                        job_db.flush()
+                    print(f"[auto_throughput_eval] done axis={c.axis_type} x={xv} RBER={rec.raw_ber} aver_iter={rec.retry_dec_avg_iter}")
+                    continue
+
+                if job_key:
+                    job_db.upsert({"key": job_key, "finished_at": now})
+                    job_db.flush()
+
                 if not st.ok:
                     msg = f"job EXIT: axis={c.axis_type} x={xv} log={info['log_path']} job_name={info.get('job_name')}"
                     print(f"[auto_throughput_eval] {msg}")
@@ -461,14 +639,6 @@ def run_case_lsf(c: CaseConfig, *, runner: RunnerConfig, lsf: LsfConfig, dry_run
                         raise SystemExit(msg)
                     continue
 
-                # LSF can report DONE before bsub -o is flushed; use a grace window.
-                rec = parse_done_log_with_grace(
-                    axis_type=c.axis_type,
-                    axis_value=xv,
-                    log_path=Path(info["log_path"]),
-                    cmd=list(info["cmd"]),
-                    grace_sec=max(float(runner.timeout_log_grace_sec), 30.0),
-                )
                 if rec is None:
                     msg = f"parse failed: axis={c.axis_type} x={xv} log={info['log_path']} job_name={info.get('job_name')}"
                     print(f"[auto_throughput_eval] {msg}")
@@ -478,11 +648,120 @@ def run_case_lsf(c: CaseConfig, *, runner: RunnerConfig, lsf: LsfConfig, dry_run
                         raise SystemExit(msg)
                     continue
 
-                upsert_run(manifest, rec)
-                save_manifest(manifest_path, manifest)
-                print(f"[auto_throughput_eval] done axis={c.axis_type} x={xv} RBER={rec.raw_ber} aver_iter={rec.retry_dec_avg_iter}")
     finally:
-        pass
+        job_db.flush()
+
+
+def _throughput_point_key(axis_type: str, axis_value: float) -> str:
+    return f"throughput:{axis_type}:{format_axis_tag(axis_value, axis_type=axis_type)}"
+
+
+def _job_sort_key(rec: dict[str, Any]) -> float:
+    t = rec.get("submitted_at")
+    if t is None:
+        t = rec.get("last_update")
+    try:
+        return float(t) if t is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _load_job_records_by_point(job_db_path: Path, *, axis_type: str) -> dict[str, list[dict[str, Any]]]:
+    if not job_db_path.exists():
+        return {}
+    try:
+        data = json.loads(job_db_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    jobs = data.get("jobs", [])
+    if not isinstance(jobs, list):
+        return {}
+
+    out: dict[str, list[dict[str, Any]]] = {}
+    for rec in jobs:
+        if not isinstance(rec, dict):
+            continue
+        if str(rec.get("axis_type") or "") != str(axis_type):
+            continue
+        point_key = str(rec.get("point_key") or "").strip()
+        if not point_key:
+            xv = rec.get("axis_value")
+            try:
+                point_key = _throughput_point_key(axis_type, float(xv))
+            except (TypeError, ValueError):
+                continue
+        rec2 = dict(rec)
+        rec2["point_key"] = point_key
+        out.setdefault(point_key, []).append(rec2)
+
+    for point_key in list(out.keys()):
+        out[point_key].sort(key=_job_sort_key, reverse=True)
+    return out
+
+
+def _job_record_is_active(rec: dict[str, Any]) -> bool:
+    state = str(rec.get("last_state") or "").upper()
+    return state in {"SUBMITTED", "PEND", "RUN", "UNKNOWN", "PSUSP", "UNKWN"}
+
+
+def _job_identity(job: Any) -> tuple[str, str]:
+    if hasattr(job, "job_id"):
+        return ("lsf", str(getattr(job, "job_id")))
+    if hasattr(job, "proc") and hasattr(getattr(job, "proc"), "pid"):
+        return ("local", str(getattr(getattr(job, "proc"), "pid")))
+    return ("unknown", str(id(job)))
+
+
+def _resume_executor_job(executor: Any, *, cmd: list[str], cwd: str, log_path: Path, rec: dict[str, Any]) -> Optional[Any]:
+    resume_job = getattr(executor, "resume_job", None)
+    if not callable(resume_job):
+        return None
+    return resume_job(
+        cmd=list(cmd),
+        cwd=str(cwd),
+        log_path=log_path.resolve(),
+        backend=str(rec.get("backend") or ""),
+        job_id=str(rec.get("job_id") or ""),
+    )
+
+
+def _resolve_complete_record(
+    *,
+    axis_type: str,
+    axis_value: float,
+    manifest_rec: Optional[dict[str, Any]],
+    fallback_log_path: Path,
+    fallback_cmd: list[str],
+) -> Optional[RunRecord]:
+    candidates: list[tuple[Path, list[str]]] = []
+    if manifest_rec is not None:
+        rec_log_raw = manifest_rec.get("log_path")
+        rec_log_path = Path(str(rec_log_raw)).resolve() if rec_log_raw else fallback_log_path.resolve()
+        rec_cmd_raw = manifest_rec.get("cmd")
+        rec_cmd = [str(x) for x in rec_cmd_raw] if isinstance(rec_cmd_raw, list) else list(fallback_cmd)
+        candidates.append((rec_log_path, rec_cmd))
+
+    fallback = (fallback_log_path.resolve(), list(fallback_cmd))
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for log_path, cmd in candidates + [fallback]:
+        key = (str(log_path), tuple(str(x) for x in cmd))
+        if key in seen:
+            continue
+        seen.add(key)
+        rec_done = parse_done_log(
+            axis_type=axis_type,
+            axis_value=axis_value,
+            log_path=log_path,
+            cmd=list(cmd),
+            debug=False,
+        )
+        if rec_done is not None:
+            return rec_done
+    return None
+
+
+def _text_has_final_statistics(text: str) -> bool:
+    return re.search(r"^\s*\[STATISTICS\]\s+LDPC\s+FER\s*:\s*[0-9eE+\-\.]+\s*$", text, flags=re.M) is not None
 
 
 def patch_config_max_sim_num(src: Path, dst: Path, max_sim_num: int, max_error_num: Optional[int] = None) -> None:
@@ -567,6 +846,14 @@ def parse_done_log(
         return None
 
     txt = log_path.read_text(encoding="utf-8", errors="replace")
+    if not _text_has_final_statistics(txt):
+        if debug:
+            print(f"[auto_throughput_eval] DEBUG: Log missing final [STATISTICS]: {log_path}")
+            print(f"[auto_throughput_eval] DEBUG: Log file size: {log_path.stat().st_size} bytes")
+            print(f"[auto_throughput_eval] DEBUG: Last 500 chars of log:")
+            print(txt[-500:] if len(txt) > 500 else txt)
+        return None
+
     m = parse_log_text(txt)
 
     if m.raw_ber is None or m.retry_dec_avg_iter is None:
@@ -797,21 +1084,19 @@ def export_case_csv(c: CaseConfig, *, lsf: LsfConfig) -> Path:
 
     for xv in xs:
         rec = find_run(manifest, c.axis_type, xv)
-        raw_ber = rec.get("raw_ber") if rec else None
-        avg_it = rec.get("retry_dec_avg_iter") if rec else None
-
-        if raw_ber is None or avg_it is None:
-            log_p = None
-            if rec and rec.get("log_path"):
-                log_p = Path(str(rec["log_path"]))
-            if log_p is None:
-                log_p = log_path_for_submission(c, xv, lsf=lsf)
-            cmd = list(rec.get("cmd")) if rec and isinstance(rec.get("cmd"), list) else build_cmd(c, xv)
-            rec_done = parse_done_log(axis_type=c.axis_type, axis_value=xv, log_path=log_p, cmd=cmd)
-            if rec_done is not None:
-                upsert_run(manifest, rec_done)
-                raw_ber = rec_done.raw_ber
-                avg_it = rec_done.retry_dec_avg_iter
+        log_p = log_path_for_submission(c, xv, lsf=lsf)
+        cmd = build_cmd(c, xv)
+        rec_done = _resolve_complete_record(
+            axis_type=c.axis_type,
+            axis_value=xv,
+            manifest_rec=rec,
+            fallback_log_path=log_p,
+            fallback_cmd=cmd,
+        )
+        raw_ber = rec_done.raw_ber if rec_done is not None else None
+        avg_it = rec_done.retry_dec_avg_iter if rec_done is not None else None
+        if rec_done is not None:
+            upsert_run(manifest, rec_done)
 
         if raw_ber is None or avg_it is None:
             missing.append(float(xv))

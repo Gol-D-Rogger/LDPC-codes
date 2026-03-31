@@ -11,6 +11,7 @@
 已实现：
 - `local`：本地并发运行 + 日志解析 + `manifest.json` 记录
 - `lsf`：`bsub/bjobs/bkill` 提交与轮询
+- `lsf` 断点重续：`jobs.json` 持久化提交记录；脚本重启后会优先接管仍处于 `PEND/RUN` 的旧 job，避免重复提交同一点
 - 结果导出：从 `manifest.json`/日志汇总并写入 `csv`
 
 ---
@@ -43,8 +44,6 @@
 
 ## 2. 配置文件（TOML）
 
-参考 `auto_throughput_eval/example.toml`。
-
 要点：
 - 轴选择：
   - `AWGN/TAWGN`：默认 `axis_type="snr"`，使用 `snr_low/snr_high/snr_step`
@@ -61,4 +60,9 @@
 对每个 case：
 - 日志：`<out_dir>/<case>/ <log_prefix>_snrX.log` 或 `<log_prefix>_kX.log`
 - 记录：`<out_dir>/<case>/manifest.json`
+- 作业数据库：`<out_dir>/<case>/jobs.json`
 - 表格：`<out_dir>/<case>/throughput.csv`
+
+说明：
+- `manifest.json` 只接受带最终 `[STATISTICS]` 的完整日志；被 kill 或未完整落盘的 partial log 不会再被当成完成点复用。
+- `jobs.json` 仅对 `lsf` 模式生效；脚本重启后会先查询旧记录并尝试接管活 job，再决定是否重提。

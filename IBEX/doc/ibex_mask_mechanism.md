@@ -685,9 +685,9 @@ IBEX BF 的 `weight` 统计在 `extra_bytes_of_parity>0` 时会用 `occupied(las
 
 当前仓库的 `print_hm()`（`src/ldpc_codec.cpp`）对 `cir_sz=512` 的 `rdec_sched` 导出为“Verilog ROM case 语句”风格，每行一条：
 
-`10'dADDR     :mmem_rdt=44'hXXXXXXXXXXX;`
+`10'dADDR     :mmem_rdt=42'hXXXXXXXXXXX;`
 
-其中 `XXXXXXXXXXX` 是 11 个 hex（44bit）。通常情况下仅低 42bit 有效（高 2bit 恒为 0）；但当导出“extra user-data 列”的 **0-circulant 占位**时，会直接输出 `44'hFFFFFFFFFFF`（44bit 全 1）作为占位标志。
+其中 `XXXXXXXXXXX` 是 11 个 hex；实际有效位为低 42bit，高 2 个显示 bit 恒为 0。当导出“extra user-data 列”的 **0-circulant 占位**时，会直接输出 `42'hFFFFFFFFFFF`（低 42bit 全 1）作为占位标志。
 
 - `sched64`：调度本体（低 32bit 复用旧字段，同时携带 mask 相关最小信息）
   - `[6:0] col`（7bit）
@@ -697,12 +697,14 @@ IBEX BF 的 `weight` 统计在 `extra_bytes_of_parity>0` 时会用 `occupied(las
   - `[30] last_in_row`（1bit）
   - `[31] flag_64_extra_userdata`（1bit）：当该条目位于“extra user-data payload 列”时为 1；定义为 `col ∈ [64, (n-m))`（payload 列超过 64 时生效）。例如 11x76（payload 列数 $n-m=65$）只有 `col=64` 属于该范围。
   - `[32] mask_flag`（1bit）：该 circulant 需要做 lane mask（MASK 或 INVMASK）
-  - `[41:33] mask_shift`（9bit）：同列最后一行 circulant 的 shift，用 9bit 二补码表示范围 $[-256,255]$
-  - `[63:42] reserved`
+  - `[41:33] delta_to_last`（9bit）：无符号模 $Z$ 差值，定义为 $(last\_row\_shift-entry\_shift+Z)\bmod Z$
 
-这样做的好处是：硬件可以直接把 mask 位图做成 ROM 初始化内容（或直接解析 `rdec_sched` 文本），无需在运行时再生成 `mask[col][k]`。
+这样做的好处是：调度文件只携带矩阵静态信息。运行时只要知道当前 `L=pad_bit` 和当前 row 是否为 `last_row`，就能直接恢复本地窗口：
 
-> 仍需强调：软件里 `mask[col][k]` 的生成使用的是 `element[rows-1][col]`（见 `src/ldpc_codec.cpp:1671-1680`），不是当前条目的 `shift`。因此 `sched64.mask_shift` 的来源必须是同列最后一行的 `element[last_row][col]`，不能用 `sched64.shift` 替代。
+- `mask_flag=1` 且 `row==last_row`：`start_local=0`，`len=L`
+- `mask_flag=1` 且 `row!=last_row`：`start_local=(delta_to_last+L)\bmod Z`，`len=Z-L`
+
+> 仍需强调：软件里 `mask[col][k]` 的生成仍然使用 `element[rows-1][col]`（见 `src/ldpc_codec.cpp:1671-1680`），不是当前条目的 `shift`。`rdec_sched` 这里只是把该绝对位移重新编码成了 `delta_to_last=(last_row_shift-entry_shift+Z)\bmod Z`，便于 DV/RTL 侧按当前 `L` 直接恢复每个 entry 的本地窗口。
 
 ---
 

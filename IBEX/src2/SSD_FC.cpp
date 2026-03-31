@@ -662,13 +662,13 @@ void read_config_file()
         int n_full = 67 + h_m;
         printf("LDPC DEBUG h_m=%d h_n=%d n_full=%d\n", h_m, h_n, n_full);
         snprintf(pchk_file, sizeof(pchk_file),
-                 "%s/%dx%d/matrix/LDPC_%dx%dex%d_w%d_dense%d_QC_H_%d.txt",
+                 "%s/%dx%d/matrix/LDPC_%dx%dex%d_w%d_dense%d_QC_H_1_%d.txt",
                  matrix_dir, h_m, n_full, h_m, n_full, h_sc, h_wt, h_dense, h_matrix_id);
         snprintf(fade_file, sizeof(fade_file),
-                "%s/%dx%d/fade_matrix/LDPC_%dx%dex%d_w%d_dense%d_fade_%d.txt",
+                "%s/%dx%d/fade_matrix/LDPC_%dx%dex%d_w%d_dense%d_fade_1_%d.txt",
                 matrix_dir, h_m, n_full, h_m, n_full, h_sc, h_wt, h_dense, h_matrix_id);
         snprintf(occupied_file, sizeof(occupied_file),
-                 "%s/%dx%d/occupied_matrix/LDPC_%dx%dex%d_w%d_dense%d_occupied_%d.txt",
+                 "%s/%dx%d/occupied_matrix/LDPC_%dx%dex%d_w%d_dense%d_occupied_1_%d.txt",
                  matrix_dir, h_m, n_full, h_m, n_full, h_sc, h_wt, h_dense, h_matrix_id);
         printf("%s\n%s\n%s\n", pchk_file, fade_file, occupied_file);
     }

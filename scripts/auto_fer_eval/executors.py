@@ -123,6 +123,20 @@ class DryRunExecutor:
     def cancel(self, job: DryRunJob) -> None:
         print(f"[dry-run] bkill {job.job_id} (snr point)")
 
+    def resume_job(
+        self,
+        *,
+        cmd: list[str],
+        cwd: str,
+        log_path: Path,
+        backend: str,
+        job_id: str,
+    ) -> Optional[DryRunJob]:
+        return None
+
+    def peek_text(self, job: DryRunJob, *, timeout_sec: float = 5.0) -> Optional[str]:
+        return None
+
     def get_submitted_jobs(self) -> list[DryRunJob]:
         return list(self._submitted_jobs)
 
@@ -174,6 +188,25 @@ class LocalExecutor:
         except Exception:
             pass
 
+    def resume_job(
+        self,
+        *,
+        cmd: list[str],
+        cwd: str,
+        log_path: Path,
+        backend: str,
+        job_id: str,
+    ) -> Optional[LocalJob]:
+        return None
+
+    def peek_text(self, job: LocalJob, *, timeout_sec: float = 5.0) -> Optional[str]:
+        try:
+            if not job.log_path.exists():
+                return None
+            return job.log_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return None
+
 
 class LsfExecutor:
     def __init__(
@@ -182,6 +215,7 @@ class LsfExecutor:
         bsub_cmd: str = "bsub",
         bjobs_cmd: str = "bjobs",
         bkill_cmd: str = "bkill",
+        bpeek_cmd: str = "bpeek",
         queue: str = "",
         queue_slow: str = "",
         queue_fast: str = "",
@@ -189,10 +223,12 @@ class LsfExecutor:
         bsub_extra: Optional[list[str]] = None,
         bjobs_extra: Optional[list[str]] = None,
         bkill_extra: Optional[list[str]] = None,
+        bpeek_extra: Optional[list[str]] = None,
     ) -> None:
         self.bsub_cmd = bsub_cmd
         self.bjobs_cmd = bjobs_cmd
         self.bkill_cmd = bkill_cmd
+        self.bpeek_cmd = bpeek_cmd
         self.queue = queue
         self.queue_slow = queue_slow or queue  # fallback to queue
         self.queue_fast = queue_fast or queue  # fallback to queue
@@ -200,16 +236,16 @@ class LsfExecutor:
         self.bsub_extra = list(bsub_extra or [])
         self.bjobs_extra = list(bjobs_extra or [])
         self.bkill_extra = list(bkill_extra or [])
+        self.bpeek_extra = list(bpeek_extra or [])
         self._poll_warned: set[int] = set()
 
     @staticmethod
-    def _log_has_any_ldpc_fer(log_path: Path) -> bool:
+    def _log_has_final_statistics(log_path: Path) -> bool:
         """
-        Return True if the log already contains any parsable LDPC FER line
-        ([STATISTICS] or [SIM]).
+        Return True only when the job log reached the final [STATISTICS] block.
 
-        This is used as a best-effort fallback when bjobs polling is unavailable
-        (e.g., transient LSF CLI errors).
+        Partial [SIM] blocks are not sufficient to conclude that the LSF job has
+        finished; they only prove the process emitted some intermediate metrics.
         """
         if not log_path.exists():
             return False
@@ -217,28 +253,42 @@ class LsfExecutor:
             txt = log_path.read_text(encoding="utf-8", errors="replace")
         except Exception:
             return False
-        return (
-            re.search(r"^\s*\[STATISTICS\]\s+LDPC\s+FER\s*:\s*[0-9eE+\-\.]+\s*$", txt, flags=re.M) is not None
-            or re.search(r"^\s*\[SIM\]\s+LDPC\s+FER\s*:\s*[0-9eE+\-\.]+\s*$", txt, flags=re.M) is not None
-        )
+        return re.search(r"^\s*\[STATISTICS\]\s+LDPC\s+FER\s*:\s*[0-9eE+\-\.]+\s*$", txt, flags=re.M) is not None
 
     def _fallback_state_from_log(self, job: LsfJob) -> JobState:
         """
         Fallback when bjobs output is not available.
 
         Policy:
-          - If log already contains LDPC FER (STATISTICS or SIM): treat as DONE.
+          - If log already contains final [STATISTICS]: treat as DONE.
           - Else if log exists and non-empty: treat as RUN (best-effort).
           - Else: treat as UNKNOWN/PEND-like.
         """
         try:
             if job.log_path.exists() and job.log_path.stat().st_size > 0:
-                if self._log_has_any_ldpc_fer(job.log_path):
+                if self._log_has_final_statistics(job.log_path):
                     return JobState(state="DONE", done=True, ok=True)
                 return JobState(state="RUN", done=False, ok=False)
         except Exception:
             pass
         return JobState(state="UNKNOWN", done=False, ok=False)
+
+    def resume_job(
+        self,
+        *,
+        cmd: list[str],
+        cwd: str,
+        log_path: Path,
+        backend: str,
+        job_id: str,
+    ) -> Optional[LsfJob]:
+        if str(backend).lower() != "lsf":
+            return None
+        try:
+            job_id_i = int(str(job_id))
+        except (TypeError, ValueError):
+            return None
+        return LsfJob(cmd=list(cmd), cwd=str(cwd), log_path=Path(log_path).resolve(), job_id=job_id_i)
 
     def submit(
         self,
@@ -341,7 +391,7 @@ class LsfExecutor:
         if p.returncode != 0 or not out:
             # LSF may have purged DONE jobs, or bjobs may be temporarily unavailable.
             # Prefer a conservative log-based check.
-            if self._log_has_any_ldpc_fer(job.log_path):
+            if self._log_has_final_statistics(job.log_path):
                 return JobState(state="DONE", done=True, ok=True)
             if job.log_path.exists() and job.log_path.stat().st_size > 0:
                 return JobState(state="RUN", done=False, ok=False)
@@ -380,3 +430,24 @@ class LsfExecutor:
         bkill.extend(self.bkill_extra)
         bkill.append(str(job.job_id))
         subprocess.run(bkill, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+    def peek_text(self, job: LsfJob, *, timeout_sec: float = 5.0) -> Optional[str]:
+        bpeek = [self.bpeek_cmd]
+        bpeek.extend(self.bpeek_extra)
+        bpeek.append(str(job.job_id))
+        try:
+            p = subprocess.run(
+                bpeek,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                errors="replace",
+                check=False,
+                timeout=max(0.1, float(timeout_sec)),
+            )
+        except Exception:
+            return None
+        out = p.stdout or ""
+        if p.returncode != 0 or not out.strip():
+            return None
+        return out
