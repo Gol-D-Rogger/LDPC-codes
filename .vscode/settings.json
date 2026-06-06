@@ -1,12 +1,9 @@
 {
-    "chatgpt.openOnStartup": true,
-    
+    "chatgpt.openOnStartup": false,
     // ============ clangd 配置 ============
-    
     // 禁用 Microsoft C++ IntelliSense，使用 clangd
     "C_Cpp.intelliSenseEngine": "disabled",
     "C_Cpp.autocomplete": "disabled",
-    
     // clangd 扩展配置
     "clangd.arguments": [
         // 使用编译命令数据库
@@ -22,16 +19,13 @@
         // 启用不完整的行补全
         "--completion-parse=auto"
     ],
-    
     // clangd 启用 InlayHints（参数名和类型提示）
     "clangd.inlayHints.enabled": true,
     "clangd.inlayHints.parameters": true,
     "clangd.inlayHints.deducedTypes": true,
-    
     // 启用符号大纲
     "outline.showKeys": true,
     "outline.showValues": true,
-    
     // C/C++ 文件关联
     "files.associations": {
         "*.h": "cpp",
@@ -39,7 +33,6 @@
         "*.cpp": "cpp",
         "*.c": "c"
     },
-    
     // 编辑器设置
     "editor.formatOnSave": true,
     "[cpp]": {
@@ -49,7 +42,6 @@
     "[c]": {
         "editor.defaultFormatter": "clangd"
     },
-    
     // 代码诊断显示
     "problems.showCurrentInEditor": true
 }

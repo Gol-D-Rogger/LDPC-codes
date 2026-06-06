@@ -67,11 +67,13 @@ class DryRunExecutor:
         queue_fast: str = "", 
         log_base_dir: str = "",
         bsub_extra: Optional[list[str]] = None,
+        include_cwd: bool = True,
         ) -> None:
         self.queue_slow = queue_slow
         self.queue_fast = queue_fast
         self.log_base_dir = log_base_dir
         self.bsub_extra = list(bsub_extra or [])
+        self.include_cwd = bool(include_cwd)
         self._job_counter = 0
         self._submitted_jobs: list[DryRunJob] = []
 
@@ -99,7 +101,9 @@ class DryRunExecutor:
 
         cwd_abs = str(Path(cwd).resolve())
 
-        bsub: list[str] = ["bsub", "-o", str(actual_log_path), "-cwd", cwd_abs]
+        bsub: list[str] = ["bsub", "-o", str(actual_log_path)]
+        if self.include_cwd:
+            bsub.extend(["-cwd", cwd_abs])
         use_queue = queue  # 注意：DryRunExecutor 只接受调用方传入的 queue（通常是 queue_slow/queue_fast）
         if use_queue:
             bsub.extend(["-q", use_queue])
@@ -224,6 +228,7 @@ class LsfExecutor:
         bjobs_extra: Optional[list[str]] = None,
         bkill_extra: Optional[list[str]] = None,
         bpeek_extra: Optional[list[str]] = None,
+        include_cwd: bool = True,
     ) -> None:
         self.bsub_cmd = bsub_cmd
         self.bjobs_cmd = bjobs_cmd
@@ -237,6 +242,7 @@ class LsfExecutor:
         self.bjobs_extra = list(bjobs_extra or [])
         self.bkill_extra = list(bkill_extra or [])
         self.bpeek_extra = list(bpeek_extra or [])
+        self.include_cwd = bool(include_cwd)
         self._poll_warned: set[int] = set()
 
     @staticmethod
@@ -335,7 +341,9 @@ class LsfExecutor:
         actual_log_path.parent.mkdir(parents=True, exist_ok=True)
         cwd_abs = str(Path(cwd).resolve())
 
-        bsub: list[str] = [self.bsub_cmd, "-o", str(actual_log_path), "-cwd", cwd_abs]
+        bsub: list[str] = [self.bsub_cmd, "-o", str(actual_log_path)]
+        if self.include_cwd:
+            bsub.extend(["-cwd", cwd_abs])
         use_queue = queue or self.queue
         if use_queue:
             bsub.extend(["-q", use_queue])
@@ -424,6 +432,70 @@ class LsfExecutor:
             return JobState(state="RUN", done=False, ok=False)
 
         return JobState(state="UNKNOWN", done=False, ok=False)
+
+    def poll_batch(self, jobs: list[LsfJob]) -> dict[int, JobState]:
+        """Query multiple job IDs in a single bjobs call."""
+        if not jobs:
+            return {}
+        bjobs_cmd = [self.bjobs_cmd] + list(self.bjobs_extra) + [str(j.job_id) for j in jobs]
+        job_map = {j.job_id: j for j in jobs}
+        result: dict[int, JobState] = {}
+
+        try:
+            p = subprocess.run(
+                bjobs_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+                check=False,
+            )
+        except Exception:
+            # Fall back to per-job poll on failure
+            for j in jobs:
+                result[j.job_id] = self.poll(j)
+            return result
+
+        out = (p.stdout or "").strip()
+        if p.returncode != 0 or not out:
+            for j in jobs:
+                result[j.job_id] = self._fallback_state_from_log(j)
+            return result
+
+        # Parse bjobs tabular output
+        parsed_ids: set[int] = set()
+        for ln in out.splitlines():
+            ln = ln.strip()
+            if not ln or ln.startswith("JOBID"):
+                continue
+            toks = ln.split()
+            if not toks:
+                continue
+            try:
+                jid = int(toks[0])
+            except (ValueError, IndexError):
+                continue
+            if jid not in job_map:
+                continue
+            stat = toks[2].upper() if len(toks) >= 3 else ""
+            if stat == "DONE":
+                result[jid] = JobState(state="DONE", done=True, ok=True)
+            elif stat in {"EXIT", "ZOMBI"}:
+                result[jid] = JobState(state="EXIT", done=True, ok=False)
+            elif stat == "UNKWN":
+                result[jid] = self._fallback_state_from_log(job_map[jid])
+            elif stat in {"PEND", "PSUSP"}:
+                result[jid] = JobState(state="PEND", done=False, ok=False)
+            else:
+                result[jid] = JobState(state="RUN", done=False, ok=False)
+            parsed_ids.add(jid)
+
+        # Jobs not found in output (purged) — fall back to log
+        for j in jobs:
+            if j.job_id not in parsed_ids:
+                result[j.job_id] = self._fallback_state_from_log(j)
+
+        return result
 
     def cancel(self, job: LsfJob) -> None:
         bkill = [self.bkill_cmd]

@@ -63,9 +63,12 @@ static bool try_load_family_lut_file(const char *path,
   if (!path || !*path || !lut)
     return false;
 
+  printf("[LDPC] Try family LUT SVH: %s\n", path);
   std::ifstream file(path);
-  if (!file.good())
+  if (!file.good()) {
+    printf("[LDPC WARN] Cannot open family LUT SVH: %s\n", path);
     return false;
+  }
 
   std::memset(lut, 0, sizeof(*lut));
   for (int row = 0; row < LDPC_MAX_ROWS; row++) {
@@ -119,8 +122,11 @@ static bool try_load_family_lut_file(const char *path,
 
   const bool ok = (lut->min_m > 0) && (lut->max_m >= lut->min_m) &&
                   (lut->k_max >= lut->k_min);
-  if (!ok)
+  if (!ok) {
+    printf("[LDPC WARN] Invalid family LUT SVH format: %s (min_m=%d max_m=%d k_min=%d k_max=%d)\n",
+           path, lut->min_m, lut->max_m, lut->k_min, lut->k_max);
     return false;
+  }
 
   snprintf(lut->source_path, sizeof(lut->source_path), "%s", path);
   lut->loaded = true;
@@ -137,19 +143,6 @@ const ibex_family_lut &get_ibex_family_lut() {
 
   initialized = true;
   std::memset(&lut, 0, sizeof(lut));
-
-  const char *env_path = std::getenv("IBEX_FAMILY_LUT_SVH");
-  if (env_path && *env_path) {
-    if (std::strcmp(env_path, "none") == 0) {
-      printf("[LDPC] IBEX family LUT disabled via IBEX_FAMILY_LUT_SVH=none\n");
-      return lut;
-    }
-    if (try_load_family_lut_file(env_path, &lut))
-      return lut;
-    printf("[LDPC WARN] IBEX_FAMILY_LUT_SVH=%s failed to load; "
-           "skipping default path search.\n", env_path);
-    return lut;
-  }
 
   const char *default_paths[] = {
       "IBEX/ibex_matrix/family_lut_output/ldpc_matrix_lut_fixed_wrap_base.svh",
@@ -292,8 +285,7 @@ void build_rtl_view(const s_h_matrix &h_matrix,
     } else {
       const int le = (last_active_shift >= 0) ? last_active_shift
                                               : h_matrix.last_element[row];
-      const int searched = search_wrap_base_delta(
-          le, wb, h_matrix.delta[row], h_matrix.bits);
+      const int searched = search_wrap_base_delta(le, wb, h_matrix.delta[row], h_matrix.bits);
       view->wrap_base_delta[row] =
           (searched >= 0) ? searched : h_matrix.wrap_num_deltas[row];
     }
@@ -477,6 +469,68 @@ static FILE *open_bf_ibex_rtl_cn_like_dump_file() {
   return fp;
 }
 
+static FILE *open_bf_ibex_rtl_cn_post_ctrl_dump_file() {
+  static unsigned int cw_seq = 0;
+  char path[128];
+  mkdir_if_missing_rtl("./output");
+  snprintf(path, sizeof(path),
+           "./output/ldpc_dbg_bf_ibex_rtl_cn_post_ctrl_cw%04u.txt",
+           cw_seq++);
+  FILE *fp = fopen(path, "w");
+  if (!fp)
+    printf("[LDPC WARN] failed to open RTL-CN post-ctrl dump: %s\n", path);
+  return fp;
+}
+
+static FILE *open_bf_ibex_rtl_cn_post_eff_dump_file() {
+  static unsigned int cw_seq = 0;
+  char path[128];
+  mkdir_if_missing_rtl("./output");
+  snprintf(path, sizeof(path),
+           "./output/ldpc_dbg_bf_ibex_rtl_cn_post_eff_cw%04u.txt", cw_seq++);
+  FILE *fp = fopen(path, "w");
+  if (!fp)
+    printf("[LDPC WARN] failed to open RTL-CN post-eff dump: %s\n", path);
+  return fp;
+}
+
+static FILE *open_bf_ibex_rtl_cn_post_trace_dump_file() {
+  static unsigned int cw_seq = 0;
+  char path[128];
+  mkdir_if_missing_rtl("./output");
+  snprintf(path, sizeof(path),
+           "./output/ldpc_dbg_bf_ibex_rtl_cn_post_trace_cw%04u.txt",
+           cw_seq++);
+  FILE *fp = fopen(path, "w");
+  if (!fp)
+    printf("[LDPC WARN] failed to open RTL-CN post-trace dump: %s\n", path);
+  return fp;
+}
+
+static FILE *open_bf_ibex_rtl_cn_unsat_dump_file() {
+  static unsigned int cw_seq = 0;
+  char path[128];
+  mkdir_if_missing_rtl("./output");
+  snprintf(path, sizeof(path),
+           "./output/ldpc_dbg_bf_ibex_rtl_cn_unsat_cw%04u.txt", cw_seq++);
+  FILE *fp = fopen(path, "w");
+  if (!fp)
+    printf("[LDPC WARN] failed to open RTL-CN unsat dump: %s\n", path);
+  return fp;
+}
+
+static FILE *open_bf_ibex_rtl_cn_prng512_dump_file() {
+  static unsigned int cw_seq = 0;
+  char path[128];
+  mkdir_if_missing_rtl("./output");
+  snprintf(path, sizeof(path),
+           "./output/ldpc_dbg_bf_ibex_rtl_cn_prng512_cw%04u.txt", cw_seq++);
+  FILE *fp = fopen(path, "w");
+  if (!fp)
+    printf("[LDPC WARN] failed to open RTL-CN prng512 dump: %s\n", path);
+  return fp;
+}
+
 static void dump_bf_ibex_rtl_cn_col_likelihood(FILE *fp,
                                                const s_variable_nodes &vn,
                                                int itr_cnt, int col_cnt,
@@ -490,9 +544,95 @@ static void dump_bf_ibex_rtl_cn_col_likelihood(FILE *fp,
   fputc('\n', fp);
 }
 
+static void dump_bf_ibex_rtl_cn_col_unsat(FILE *fp,
+                                          const unsigned char *unsat_cnt,
+                                          int itr_cnt, int col_cnt,
+                                          int cir_bits) {
+  if (!fp || !unsat_cnt || (col_cnt < 0) || (cir_bits <= 0))
+    return;
+
+  fprintf(fp, "itr_cnt:%03d col_cnt:%03d:", itr_cnt, col_cnt);
+  for (int k = cir_bits - 1; k >= 0; k--)
+    fprintf(fp, "%1X", (unsigned int)unsat_cnt[k]);
+  fputc('\n', fp);
+}
+
+static void log_bf_ibex_rtl_cn_post_ctrl(
+    FILE *fp, int iteration, int col, int post_iter, int syndrome_weight,
+    int syndrome_weight_delayed, int prev_sw, bool pushing, bool post_trigger,
+    bool post_trigger2, int likelihood_min, int flip_thr, int thr_post,
+    int thr_qc, int post_ratio) {
+  if (!fp)
+    return;
+  fprintf(fp,
+          "%8d %6d %9d %8d %8d %8d %8d %6d %6d %10d %8d %8d %8d %10d\n",
+          iteration, col, post_iter, syndrome_weight, syndrome_weight_delayed,
+          prev_sw, (int)pushing, (int)post_trigger, (int)post_trigger2,
+          likelihood_min, flip_thr, thr_post, thr_qc, post_ratio);
+}
+
+static void log_bf_ibex_rtl_cn_post_eff(FILE *fp, int iteration, int col,
+                                        int post1_cnt, int post2_cnt,
+                                        int aggressive_cnt,
+                                        int flipchg_cnt,
+                                        int syndrome_weight_after_update) {
+  if (!fp)
+    return;
+  fprintf(fp, "%8d %6d %8d %8d %10d %10d %16d\n", iteration, col, post1_cnt,
+          post2_cnt, aggressive_cnt, flipchg_cnt,
+          syndrome_weight_after_update);
+}
+
+static void dump_bf_ibex_rtl_cn_post_trace(
+    FILE *fp, const s_variable_nodes &vn, int iteration, int col,
+    int post_iteration, int syndrome_weight, int syndrome_weight_delayed,
+    bool post_trigger, bool post_trigger2, int likelihood_min, int flip_thr,
+    int thr_post, int thr_qc, int post_ratio, int post1_cnt, int post2_cnt,
+    int aggressive_cnt, int flipchg_cnt, int syndrome_weight_after_update,
+    int cir_bits) {
+  if (!fp || (col < 0) || (cir_bits <= 0))
+    return;
+
+  fprintf(fp,
+          "================================================================\n");
+  fprintf(fp, "[RTL_CN POST] ITER=%04d COL=%02d POST_ITER=%d\n", iteration, col,
+          post_iteration);
+  fprintf(fp,
+          "[CTRL] sw=%d sw_dly=%d trig=%d trig2=%d like_min=%d flip_thr=%d "
+          "thr_post=%d thr_qc=%d post_ratio=%d\n",
+          syndrome_weight, syndrome_weight_delayed, (int)post_trigger,
+          (int)post_trigger2, likelihood_min, flip_thr, thr_post, thr_qc,
+          post_ratio);
+  fprintf(fp,
+          "[EFF] post1=%d post2=%d aggr=%d flipchg=%d sw_after_update=%d\n",
+          post1_cnt, post2_cnt, aggressive_cnt, flipchg_cnt,
+          syndrome_weight_after_update);
+  fprintf(fp, "[LIKE]\n");
+  dump_bf_ibex_rtl_cn_col_likelihood(fp, vn, iteration, col, cir_bits);
+  fputc('\n', fp);
+  fflush(fp);
+}
+
 static char dbg_hex_digit(unsigned int val) {
   static const char kHex[] = "0123456789ABCDEF";
   return kHex[val & 0xF];
+}
+
+static void dump_bf_ibex_rtl_cn_prng512(FILE *fp, const s_512_bits &prng,
+                                        int itr_cnt, int col_cnt) {
+  if (!fp || (col_cnt < 0))
+    return;
+
+  fprintf(fp, "itr_cnt:%03d col_cnt:%03d:", itr_cnt, col_cnt);
+  for (int k = 511; k >= 0; k -= 4) {
+    unsigned int nibble = 0;
+    nibble |= prng.b[k] ? 8u : 0u;
+    nibble |= prng.b[k - 1] ? 4u : 0u;
+    nibble |= prng.b[k - 2] ? 2u : 0u;
+    nibble |= prng.b[k - 3] ? 1u : 0u;
+    fputc(dbg_hex_digit(nibble), fp);
+  }
+  fputc('\n', fp);
 }
 
 static void dbg_fprint_bool_bits_hex(FILE *fp, const bool *bits, int nbits,
@@ -753,6 +893,8 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
   s_hard_codeword hard_codeword;
   s_variable_nodes vn;
   s_check_nodes cn;
+  s_check_nodes cn_delay1;
+  s_check_nodes cn_delay2;
   s_check_nodes cn_ref;
   s_likelihood_levels likelihood_levels;
   s_256_bits prng_256;
@@ -770,9 +912,33 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
 #ifdef _LDPC_DBG_DUMP
   FILE *dbg_trace_fp = open_bf_ibex_rtl_cn_trace_dump_file();
   FILE *dbg_like_fp = open_bf_ibex_rtl_cn_like_dump_file();
+  FILE *dbg_post_ctrl_fp = open_bf_ibex_rtl_cn_post_ctrl_dump_file();
+  FILE *dbg_post_eff_fp = open_bf_ibex_rtl_cn_post_eff_dump_file();
+  FILE *dbg_post_trace_fp = open_bf_ibex_rtl_cn_post_trace_dump_file();
+  FILE *dbg_unsat_fp = open_bf_ibex_rtl_cn_unsat_dump_file();
+  FILE *dbg_prng512_fp = open_bf_ibex_rtl_cn_prng512_dump_file();
   if (dbg_trace_fp)
     fprintf(dbg_trace_fp,
             "[RTL_CN TRACE] per-column and per-iteration syndrome dump\n");
+  if (dbg_post_ctrl_fp)
+    fprintf(dbg_post_ctrl_fp,
+            "%8s %6s %9s %8s %8s %8s %8s %6s %6s %10s %8s %8s %8s %10s\n",
+            "iter", "col", "post_iter", "sw", "sw_dly", "prev_sw",
+            "pushing", "trig", "trig2", "like_min", "flip_thr",
+            "thr_post", "thr_qc", "post_ratio");
+  if (dbg_post_eff_fp)
+    fprintf(dbg_post_eff_fp,
+            "%8s %6s %8s %8s %10s %10s %16s\n", "iter", "col", "post1",
+            "post2", "aggr", "flipchg", "sw_after_update");
+  if (dbg_post_trace_fp)
+    fprintf(dbg_post_trace_fp,
+            "[RTL_CN POST TRACE] post-only per-column control/result/likelihood\n");
+  if (dbg_unsat_fp)
+    fprintf(dbg_unsat_fp,
+            "[RTL_CN UNSAT] per-column per-bit unsat count, 1-digit hex per bit (MSB->LSB)\n");
+  if (dbg_prng512_fp)
+    fprintf(dbg_prng512_fp,
+            "[RTL_CN PRNG512] per-column PRNG state after init/advance, 1-digit hex per 4 bits (MSB->LSB)\n");
 #endif
 
   prng_init[31] = 0x083d;
@@ -844,6 +1010,8 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
     rotate_cn_row(&cn.r[i], h_matrix.bits, first_shift);
     accum_rot[i] = first_shift;
   }
+  cn_delay1 = cn;
+  cn_delay2 = cn;
   if (diag_ab) {
     printf("[DIAG] Initial rotation applied. Verifying syndrome equivalence...\n");
     for (int i = 0; i < h_matrix.rows; i++) {
@@ -923,7 +1091,15 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
     for (int idx = 0; idx < 5; idx++)
       syndrome_weight_r[idx] = syndrome_weight;
     iteration = 1;
-  } 
+  }
+  const int post_start_iteration =
+      (ldpc_decoder_input.post_iteration < 1) ? 1
+                                              : ldpc_decoder_input.post_iteration;
+  // Real RTL advances the delayed-syndrome pipeline per clock. Boundary
+  // columns (col0 / last col) consume two clocks, so warmup and steady-state
+  // tap selection must track a global syndrome-delay clock index rather than
+  // the column index alone.
+  int sw_delay_clock_idx = 0;
 
   for (int j = 0; j < h_matrix.cols; j++) {
     for (int k = 0; k < h_matrix.bits; k++) {
@@ -956,32 +1132,51 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
   }
 
   while ((iteration < ldpc_decoder_input.iteration_limit) && !finished) {
+    // Initial syndrome calculation is iteration 0.  At each real iteration,
+    // col0/col1 read this settled snapshot; col2 first sees col0's update.
+    cn_delay1 = cn;
+    cn_delay2 = cn;
     log_bf_ibex_sw_rtl(sw_delta_fp, iteration, "iter_pre", -1,
                        syndrome_weight);
     log_bf_ibex_row_sw_rtl(row_sw_fp, iteration, "iter_pre", -1, h_matrix, cn);
     for (int j = 0; j < h_matrix.cols; j++) {
       clock_cycles++;
 
-      if ((iteration == ldpc_decoder_input.post_iteration) && (j == 0)) {
+      if ((iteration == post_start_iteration) && (j == 0)) {
         for (int i = 0; i < 256; i++)
           prng_256.b[i] = (prng_init[int(i / 16)] >> (i % 16)) & 1;
         for (int i = 0; i < 512; i++)
           prng_512.b[i] = (0x1fe0 >> (i % 16)) & 1;
-      } else if (iteration >= ldpc_decoder_input.post_iteration) {
+      } else if (iteration >= post_start_iteration) {
         prng_256 = f_256_bit_lfsr(prng_256);
         prng_512 = f_512_bit_lfsr(prng_512);
       }
+#ifdef _LDPC_DBG_DUMP
+      if ((h_matrix.bits == 512) &&
+          (iteration >= ldpc_decoder_input.post_iteration))
+        dump_bf_ibex_rtl_cn_prng512(dbg_prng512_fp, prng_512, iteration, j);
+#endif
 
-      syndrome_weight_r[4] = syndrome_weight_r[3];
-      syndrome_weight_r[3] = syndrome_weight_r[2];
-      syndrome_weight_r[2] = syndrome_weight_r[1];
-      syndrome_weight_r[1] = syndrome_weight_r[0];
-      syndrome_weight_r[0] = syndrome_weight;
-      if (iteration == 0)
-        syndrome_weight_delayed =
-            (j <= 3) ? syndrome_weight_r[0] : syndrome_weight_r[4];
-      else
-        syndrome_weight_delayed = syndrome_weight_r[4];
+      // Boundary columns occupy two RTL clocks after post-iteration starts.
+      // Advance the delayed-syndrome FIFO once per consumed clock and sample
+      // the last phase as the effective sw_dly for this column.
+      const bool extra_sw_clock =
+          (iteration >= ldpc_decoder_input.post_iteration) &&
+          ((j == 0) || (j == (h_matrix.cols - 1)));
+      const int sw_shift_cycles = extra_sw_clock ? 2 : 1;
+      int sw_dly_sample = syndrome_weight_delayed;
+      for (int sw_clk = 0; sw_clk < sw_shift_cycles; ++sw_clk) {
+        syndrome_weight_r[4] = syndrome_weight_r[3];
+        syndrome_weight_r[3] = syndrome_weight_r[2];
+        syndrome_weight_r[2] = syndrome_weight_r[1];
+        syndrome_weight_r[1] = syndrome_weight_r[0];
+        syndrome_weight_r[0] = syndrome_weight;
+        sw_dly_sample =
+            (sw_delay_clock_idx < 4) ? syndrome_weight_r[3]
+                                     : syndrome_weight_r[4];
+        sw_delay_clock_idx++;
+      }
+      syndrome_weight_delayed = sw_dly_sample;
 
       bool post_trigger = false;
       bool post_trigger2 = false;
@@ -1006,6 +1201,19 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
           (iteration == 0) ? syndrome_weight_delayed : syndrome_weight_r[3];
       const bool pushing = (syndrome_weight_delayed >= prev_sw);
 
+#ifdef _LDPC_DBG_DUMP
+      if (iteration >= ldpc_decoder_input.post_iteration) {
+        log_bf_ibex_rtl_cn_post_ctrl(
+            dbg_post_ctrl_fp, iteration, j, ldpc_decoder_input.post_iteration,
+            syndrome_weight, syndrome_weight_delayed, prev_sw, pushing,
+            post_trigger, post_trigger2, likelihood_levels.min,
+            likelihood_levels.flip_thr,
+            ldpc_decoder_parameters.syndrome_weight_thr_post,
+            ldpc_decoder_parameters.syndrome_weight_thr_qc,
+            ldpc_decoder_parameters.post_ratio);
+      }
+#endif
+
       if (diag_ab && !diag_mismatch_found && (iteration == 0)) {
         for (int i = 0; i < h_matrix.rows; i++) {
           if (rtl_view.shift[i][j] < 0)
@@ -1019,6 +1227,12 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
         }
       }
 
+      int col_post1_cnt = 0;
+      int col_post2_cnt = 0;
+      int col_aggressive_cnt = 0;
+      int col_flipchg_cnt = 0;
+      unsigned char col_unsat_cnt[LDPC_MAX_CIRC_BITS] = {0};
+      const s_check_nodes &cn_for_weight = cn_delay2;
       for (int k = 0; k < h_matrix.bits; k++) {
         bool do_not_use_this_bit = false;
         do_not_use_this_bit |= ((h_matrix.extra_bits_of_parity > 0) &&
@@ -1036,19 +1250,21 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
           if (shift < 0)
             continue;
           if (h_matrix.extra_bytes_of_parity == 0) {
-            if (h_matrix.occupied[i][j] && cn.r[i].b[k])
+            if (h_matrix.occupied[i][j] && cn_for_weight.r[i].b[k])
               weight++;
           } else {
             if (h_matrix.occupied[i][j] && (i < (h_matrix.rows - 1)) &&
-                cn.r[i].b[k])
+                cn_for_weight.r[i].b[k])
               weight++;
             if (h_matrix.occupied[i][j] && (i == (h_matrix.rows - 1)) &&
-                cn.r[i].b[k] && rtl_view.mask[j][k])
+                cn_for_weight.r[i].b[k] && rtl_view.mask[j][k])
               weight++;
-            if (h_matrix.fade[i][j] && cn.r[i].b[k] && !rtl_view.mask[j][k])
+            if (h_matrix.fade[i][j] && cn_for_weight.r[i].b[k] &&
+                !rtl_view.mask[j][k])
               weight++;
           }
         }
+        col_unsat_cnt[k] = (unsigned char)weight;
 
         if (diag_ab && !diag_mismatch_found && (iteration == 0) && (k < 8)) {
           int ref_weight = 0;
@@ -1104,11 +1320,17 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
                ldpc_decoder_parameters.syndrome_weight_thr_post) &&
               ((h_matrix.bits == 512) ? prng_512.b[k] : prng_256.b[k]);
         }
+        if (prng_post_process)
+          col_post1_cnt++;
+        if (prng_post_process2)
+          col_post2_cnt++;
 
         const bool aggressive =
             (ldpc_decoder_input.soft_bits > 0) &&
             (likelihood_levels.min < ldpc_decoder_parameters.likelihood_thr &&
              !flipped_prev);
+        if (aggressive)
+          col_aggressive_cnt++;
         int adjusted_weight = weight;
         if (aggressive && (weight == 2))
           adjusted_weight = 3;
@@ -1125,6 +1347,7 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
             (vn.c[j].b[k].likelihood >= likelihood_levels.flip_thr);
 
         if (flipped_prev != vn.c[j].b[k].flipped) {
+          col_flipchg_cnt++;
           for (int i = 0; i < h_matrix.rows; i++) {
             const int shift = rtl_view.shift[i][j];
             if (shift < 0)
@@ -1165,11 +1388,32 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
         }
       }
 
-#ifdef _LDPC_DBG_DUMP
-      dump_bf_ibex_rtl_cn_col_likelihood(dbg_like_fp, vn, iteration, j,
-                                         h_matrix.bits);
       const int syndrome_weight_after_update =
           f_check_node_weight(h_matrix, cn);
+
+#ifdef _LDPC_DBG_DUMP
+      if (iteration >= ldpc_decoder_input.post_iteration) {
+        dump_bf_ibex_rtl_cn_col_unsat(dbg_unsat_fp, col_unsat_cnt, iteration,
+                                      j, h_matrix.bits);
+        dump_bf_ibex_rtl_cn_col_likelihood(dbg_like_fp, vn, iteration, j,
+                                           h_matrix.bits);
+      }
+      if (iteration >= ldpc_decoder_input.post_iteration) {
+        log_bf_ibex_rtl_cn_post_eff(dbg_post_eff_fp, iteration, j,
+                                    col_post1_cnt, col_post2_cnt,
+                                    col_aggressive_cnt, col_flipchg_cnt,
+                                    syndrome_weight_after_update);
+        dump_bf_ibex_rtl_cn_post_trace(
+            dbg_post_trace_fp, vn, iteration, j,
+            ldpc_decoder_input.post_iteration, syndrome_weight,
+            syndrome_weight_delayed, post_trigger, post_trigger2,
+            likelihood_levels.min, likelihood_levels.flip_thr,
+            ldpc_decoder_parameters.syndrome_weight_thr_post,
+            ldpc_decoder_parameters.syndrome_weight_thr_qc,
+            ldpc_decoder_parameters.post_ratio, col_post1_cnt, col_post2_cnt,
+            col_aggressive_cnt, col_flipchg_cnt, syndrome_weight_after_update,
+            h_matrix.bits);
+      }
       dump_cn_synd_snapshot_rtl(dbg_trace_fp, h_matrix, rtl_view, cn,
                                 accum_rot, iteration, j, "post_update",
                                 syndrome_weight_after_update, true);
@@ -1178,6 +1422,8 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
       for (int i = 0; i < h_matrix.rows; i++) {
         if (rtl_view.shift[i][j] >= 0) {
           rotate_cn_row(&cn.r[i], h_matrix.bits, h_matrix.delta[i]);
+          rotate_cn_row(&cn_delay1.r[i], h_matrix.bits, h_matrix.delta[i]);
+          rotate_cn_row(&cn_delay2.r[i], h_matrix.bits, h_matrix.delta[i]);
           accum_rot[i] = (accum_rot[i] + h_matrix.delta[i]) % h_matrix.bits;
         }
       }
@@ -1192,20 +1438,14 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
         log_bf_ibex_sw_rtl(sw_delta_fp, iteration, "col_post", j,
                            syndrome_weight);
       log_bf_ibex_row_sw_rtl(row_sw_fp, iteration, "col_post", j, h_matrix, cn);
+      ldpc_decoder_output.col_cnt = j;
+      cn_delay2 = cn_delay1;
+      cn_delay1 = cn;
       if (syndrome_weight == 0) {
-        ldpc_decoder_output.col_cnt = j;
         finished = true;
         break;
       }
     }
-
-    syndrome_weight = f_check_node_weight(h_matrix, cn);
-    finished = (syndrome_weight == 0);
-    syndrome_weight_r[4] = syndrome_weight_r[3];
-    syndrome_weight_r[3] = syndrome_weight_r[2];
-    syndrome_weight_r[2] = syndrome_weight_r[1];
-    syndrome_weight_r[1] = syndrome_weight_r[0];
-    syndrome_weight_r[0] = syndrome_weight;
 
 #ifdef _LDPC_DBG_DUMP
     if (!finished) {
@@ -1262,6 +1502,16 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
     fclose(dbg_trace_fp);
   if (dbg_like_fp)
     fclose(dbg_like_fp);
+  if (dbg_post_ctrl_fp)
+    fclose(dbg_post_ctrl_fp);
+  if (dbg_post_eff_fp)
+    fclose(dbg_post_eff_fp);
+  if (dbg_post_trace_fp)
+    fclose(dbg_post_trace_fp);
+  if (dbg_unsat_fp)
+    fclose(dbg_unsat_fp);
+  if (dbg_prng512_fp)
+    fclose(dbg_prng512_fp);
 #else
   if (sw_delta_fp)
     fclose(sw_delta_fp);

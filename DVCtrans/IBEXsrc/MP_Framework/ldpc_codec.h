@@ -17,6 +17,7 @@ enum
     LDPC_MAX_COLS = 84,
     LDPC_MAX_PAYLOAD_COLS = 67,
     LDPC_MAX_CIRC_BITS = 512,
+    LDPC_PMS_LUT_SIZE = 6,
 };
 
 enum dec_model
@@ -253,6 +254,10 @@ struct ldpc_packet : ch_packet
     int *sb_thrshd1_w1;     
 
     float alpha;
+    float alpha_pms[LDPC_PMS_LUT_SIZE];
+    float beta_pms[LDPC_PMS_LUT_SIZE];
+    float point1;
+    float point2;
     int finite_mode;
     int finite_q_num;
     int finite_r_num;
@@ -302,7 +307,9 @@ struct ldpc_packet : ch_packet
     // QC-LDPC config & clean up
 
     void ldpc_config(int, int, int, int, int);
-    void ldpc_dec_config(int, int, int, float, int, int, int, int, int, int, int, int, int);
+    void ldpc_dec_config(int, int, int, float, const float *, const float *,
+                         float, float, int, int, int, int, int, int, int, int,
+                         int, int);
     void ldpc_gen_gm();
     void ldpc_clean();
     void ldpc_ibex_phck(s_h_matrix);
@@ -361,6 +368,10 @@ struct ldpc_packet : ch_packet
     // LDPC layer decoder
     void ldpc_dec_layer();
     void ldpc_dec_layer2();
+
+    // LDPC PMS decoder
+    void ldpc_dec_pms();
+    int ldpc_pms_ind(float, float);
     // Skip LDPC decoder
     void ldpc_dec_skip();
 

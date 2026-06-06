@@ -201,7 +201,8 @@ int main (int argc, char **argv)
 #endif
         sim_pckt->ch_detector();        
 
-        if (sim_pckt->raw_err_num < (int)(dsp_blk_len * sim_pckt->rber))
+        if (ch_mode == TRUNC_AWGN &&
+            sim_pckt->raw_err_num < (int)(dsp_blk_len * sim_pckt->rber))
         {
             sim_cnt--;
             continue;

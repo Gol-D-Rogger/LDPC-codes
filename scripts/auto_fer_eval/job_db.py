@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -96,6 +98,22 @@ class JobDB:
         if not self._dirty:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.data, indent=2, sort_keys=True), encoding="utf-8")
+        content = json.dumps(self.data, indent=2, sort_keys=True)
+        # Atomic write: tmp file + rename to avoid corruption on crash
+        fd, tmp = tempfile.mkstemp(
+            dir=str(self.path.parent), suffix=".tmp", prefix=".jobs_"
+        )
+        try:
+            os.write(fd, content.encode("utf-8"))
+            os.fsync(fd)
+            os.close(fd)
+            os.replace(tmp, str(self.path))
+        except BaseException:
+            os.close(fd) if not os.get_inheritable(fd) else None
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
         self._dirty = False
 

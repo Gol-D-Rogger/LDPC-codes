@@ -95,6 +95,7 @@ struct ch_packet{
     float llr_max;
     float llr_min;
 
+    void ch_config(int, int, enum ch_model, float, int, int, int);
     void ch_config(int, int, enum ch_model, float, int, int, int, int);
     void ch_pckt_alloc();
     void ch_pckt_clean();

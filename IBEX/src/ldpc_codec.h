@@ -311,6 +311,7 @@ struct ldpc_packet : ch_packet
     
     // print H matrix
     void print_hm();
+    void print_hm_192();
     //syndrome check
     int ldpc_synd(char *);
     // LDPC enc

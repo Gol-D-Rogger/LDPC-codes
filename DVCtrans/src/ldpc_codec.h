@@ -43,6 +43,7 @@ struct ldpc_packet : ch_packet
     int hm_k; // user length of the H matrix
     
     int pad_len; // length of the padding bits
+    int out_len;
 
     // layer decoder scheduler constraints
     int rdec_cmem_cont_thrshd;

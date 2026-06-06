@@ -1,107 +1,131 @@
-#pragma once
+#include <cuda_runtime.h>
+#include <curand_kernel.h>
 
-#include <cstdint>
-#include <cstring>
-#include <iostream>
-
+#include <ctime>
+#include <cuda_fp16.h>
 #include "decoder.h"
 
-#if __has_include(<cuda_runtime.h>)
-#include <cuda_runtime.h>
-#define LDPC_GPU_HAS_CUDA_RUNTIME 1
-#else
-#define LDPC_GPU_HAS_CUDA_RUNTIME 0
-#endif
-
-#if __has_include(<cuda_fp16.h>)
-#include <cuda_fp16.h>
-#define LDPC_GPU_HAS_HALF 1
-#else
-#define LDPC_GPU_HAS_HALF 0
-#endif
-
 struct row_info {
-  uint16_t actual_idx = 0;
-  uint16_t mask_weight = 0;
-  uint16_t mask_offset = 0;
-  uint16_t element = 0;
+    uint16_t actual_idx;
+    uint16_t mask_weight;
+    uint16_t mask_offset;
+    uint16_t element;
 };
 
 struct device_global_info_struct {
-  // H matrix info
-  int16_t cols = 0;
-  int16_t rows = 0;
-  int16_t bits = LDPC_P;
-  int16_t e_pre[LDPC_M][LDPC_N] = {{0}};
+    short cols;
+    short rows;
+    char e_pre[LDPC_M][LDPC_N];
 
-  // Decoder input params
-  uint16_t nand_strobes = 0;
-  uint16_t soft_bits = 0;
-  uint16_t iteration_limit = 0;
+    uint16_t nand_strobes;
+    uint16_t soft_bits;
+    uint16_t iteration_limit;
 
-  // Decoder params
-  uint8_t VN_BITS = 8;
-  bool post_process_en = true;
-  uint16_t syndrome_weight_thr_qc = 16;
-  uint16_t syndrome_weight_thr_post = 48;
-  uint16_t likelihood_thr = 128;
-  uint16_t post_ratio = 12;
-  uint16_t likelihood_init_coef_all[8][4] = {{0}};
-  uint16_t likelihood_init_fraction[3] = {0, 6, 6};
+    char VN_BITS;
+    bool post_process_en;
+    uint16_t syndrome_weight_thr_qc;
+    uint16_t syndrome_weight_thr_post;
+    uint16_t likelihood_thr;
+    uint16_t post_ratio;
+    uint16_t likelihood_init_coef_all[8][4];
+    uint16_t likelihood_init_fraction[3];
 
-  // Error injection params
-  float error_region_prob[7] = {0.0f};
-  float vref[7] = {0.0f};
-  uint8_t max = 0;
-  uint8_t flip_thr = 0;
-  bool prng_verilog_mode = false;
+    float error_region_prob[7];
+    float vref[7];
+    uint8_t max;
+    uint8_t flip_thr;
 
-  // H-matrix related data
-  uint16_t element[LDPC_M][LDPC_N] = {{0}};
-  int8_t fade[LDPC_M][LDPC_N] = {{0}};
-  int8_t occupied[LDPC_M][LDPC_N] = {{0}};
-  uint16_t mask[LDPC_N][32] = {{0}}; // 32x16 = 512 bits
+    bool prng_verilog_mode;
 
-  int8_t extra_bytes_of_parity = 0;
-  int8_t extra_bytes_of_userdata = 0;
-  int32_t extra_bits_of_parity = 0;
+    uint16_t bits;
+    uint16_t element[LDPC_M][LDPC_N];
+    char fade[LDPC_M][LDPC_N];
+    char occupied[LDPC_M][LDPC_N];
+    uint16_t mask[LDPC_N][32];
+    char extra_bytes_of_parity;
+    char extra_bytes_of_userdata;
+    int extra_bits_of_parity;
 
-  // finite params
-  int finite_mode = 0;
-  int finite_q_num = 0;
-  int finite_c_num = 0;
-  int finite_f_num = 0;
-  float finite_q_max = 0.0f;
-  float finite_q_min = 0.0f;
-  float finite_r_max = 0.0f;
-  float finite_r_min = 0.0f;
-  float finite_c_max = 0.0f;
-  float finite_c_min = 0.0f;
-  float alpha = 0.0f;
-
-  float llr_table[8] = {0.0f};
-  float awgn_sigma = 0.0f;
+    int finite_mode;
+    int finite_q_num;
+    int finite_c_num;
+    int finite_f_num;
+    float finite_q_max;
+    float finite_q_min;
+    float finite_r_max;
+    float finite_r_min;
+    float finite_c_max;
+    float finite_c_min;
+    float alpha;
+    float llr_table[8];
+    float awgn_sigma;
 };
 
-#if defined(__CUDACC__) || defined(DECODER_GPU_IMPL)
-void copy_decoder_info_to_device(
-    const device_global_info_struct &host_decoder_info);
-int execute_gpu_kernel(const uint64_t TOTAL_CODEWORDS,
-                       const uint64_t MAX_FAILURE_COUNT,
-                       decoder_input_cw *test_cw = nullptr);
-#else
-static inline void copy_decoder_info_to_device(
-    const device_global_info_struct &host_decoder_info) {
-  (void)host_decoder_info;
-}
+struct check_nodes_gpu {
+    static constexpr int WORD_COUNT = 8;
+    static constexpr int WORD_SIZE = 64;
+    static constexpr int MAX_ROW_COUNT = LDPC_M;
 
-static inline int execute_gpu_kernel(const uint64_t TOTAL_CODEWORDS,
-                                     const uint64_t MAX_FAILURE_COUNT,
-                                     decoder_input_cw *test_cw = nullptr) {
-  (void)test_cw;
-  std::cout << "[GPU-STUB] CUDA runtime unavailable in this build.\n";
-  std::cout << "[GPU-STUB] Requested TOTAL_CODEWORDS=" << TOTAL_CODEWORDS
-            << ", MAX_FAILURE_COUNT=" << MAX_FAILURE_COUNT << "\n";
-  return 0;
-}
-#endif
+    uint64_t rows[MAX_ROW_COUNT][WORD_COUNT];
+};
+
+struct cn_msg {
+    __half min1_val;
+    __half min2_val;
+    uint8_t min1_pos;
+};
+
+struct variable_nodes_gpu {
+    static constexpr int WORD_COUNT = 8;
+    static constexpr int WORD_SIZE = 64;
+    static constexpr int MAX_COL_COUNT = LDPC_N;
+    static constexpr int MAX_ROW_COUNT = LDPC_M;
+
+    __half cn_c_mem_min1_val[MAX_COL_COUNT][WORD_COUNT * WORD_SIZE];
+    __half cn_c_mem_min2_val[MAX_COL_COUNT][WORD_COUNT * WORD_SIZE];
+    uint8_t cn_c_mem_min1_pos[MAX_COL_COUNT][WORD_COUNT * WORD_SIZE];
+    __half cn_q_mem[MAX_COL_COUNT][WORD_COUNT * WORD_SIZE];
+    codeword dec_do_blk;
+};
+
+struct decoder_workspace {
+    static constexpr int MAX_COL_COUNT = LDPC_N;
+    variable_nodes_gpu vn;
+    uint32_t cn_q_sign[5 * MAX_COL_COUNT][16];
+    check_nodes_gpu cn;
+};
+
+/*
+struct OptimizedSharedMemory {
+    static constexpr int MAX_COL_COUNT = LDPC_N;
+
+    uint16_t syndrome_weight;
+    bool finished;
+
+    uint8_t min;
+    uint8_t likelihood_levels[4];
+
+    __half cn_app_pre[512];
+    __half cn_c_sel_cur_min1_val[512];
+    __half cn_c_updt_cur_min1_val[512];
+    __half cn_c_sel_cur_min2_val[512];
+    __half cn_c_updt_cur_min2_val[512];
+
+    uint8_t cn_c_sel_cur_min1_pos[512];
+    uint8_t cn_c_updt_cur_min1_pos[512];
+
+    uint32_t dec_init[3];
+    uint16_t layer_synd[32], vn_dec_hd[32], cn_dec_hd[32];
+    uint16_t syndrome_weight;
+    bool finished;
+    uint8_t _pad0;
+
+    // Likelihood levels (4 byte total)
+    uint8_t min;
+    uint8_t likelihood_levels[4];
+    uint8_t _pad1[3];
+};
+*/
+
+void copy_decoder_info_to_device(const device_global_info_struct &host_decoder_info);
+int execute_gpu_kernel(const uint64_t TOTAL_CODEWORDS, const uint64_t MAX_FAILURE_COUNT, decoder_input_cw *test_cw = NULL);

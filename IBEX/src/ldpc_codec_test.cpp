@@ -101,6 +101,7 @@ void ldpc_packet::ldpc_gen_gm() {
   printf("[LDPC] A/B/C/D/E matrices ready!\n");
 
 #ifdef _LDPC_DUMP
+  FILE *fp;
   char MH[50] = "H_matrix.txt";
   char MA[50] = "A_matrix.txt";
   char MB[50] = "B_matrix.txt";

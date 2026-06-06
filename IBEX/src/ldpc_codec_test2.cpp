@@ -2535,6 +2535,37 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
   const int aggr_iter_lo = env_aggr_iter_lo ? atoi(env_aggr_iter_lo) : 110;
   const int aggr_synd_th = env_aggr_synd_th ? atoi(env_aggr_synd_th) : 280;
   const int aggr_strong_synd_th = env_aggr_strong_synd_th ? atoi(env_aggr_strong_synd_th) : (1 << 30);
+
+  // Multi-phase diversity (no per-VN state):
+  // Allow retry phases (phase>0) to use different aggr thresholds to explore alternative trajectories.
+  // By default, retry phases inherit phase0 thresholds unless explicit env overrides are provided.
+  const char *env_phase1_aggr_iter_hi = getenv("IBEX_PHASE1_AGGR_ITER_HI");
+  const char *env_phase1_aggr_iter_lo = getenv("IBEX_PHASE1_AGGR_ITER_LO");
+  const char *env_phase1_aggr_synd_th = getenv("IBEX_PHASE1_AGGR_SYND_TH");
+  const char *env_phase1_aggr_strong_synd_th = getenv("IBEX_PHASE1_AGGR_STRONG_SW_TH");
+  int phase1_aggr_iter_hi = env_phase1_aggr_iter_hi ? atoi(env_phase1_aggr_iter_hi) : -1;
+  int phase1_aggr_iter_lo = env_phase1_aggr_iter_lo ? atoi(env_phase1_aggr_iter_lo) : -1;
+  int phase1_aggr_synd_th = env_phase1_aggr_synd_th ? atoi(env_phase1_aggr_synd_th) : -1;
+  int phase1_aggr_strong_synd_th =
+      env_phase1_aggr_strong_synd_th ? atoi(env_phase1_aggr_strong_synd_th) : -1;
+  if (phase1_aggr_iter_hi < 0) phase1_aggr_iter_hi = -1;
+  if (phase1_aggr_iter_lo < 0) phase1_aggr_iter_lo = -1;
+  if (phase1_aggr_synd_th < 0) phase1_aggr_synd_th = -1;
+  if (phase1_aggr_strong_synd_th < 0) phase1_aggr_strong_synd_th = -1;
+  // Optional phase2 overrides (for restart_phases >= 3). If unset, phase2 inherits phase1 behavior.
+  const char *env_phase2_aggr_iter_hi = getenv("IBEX_PHASE2_AGGR_ITER_HI");
+  const char *env_phase2_aggr_iter_lo = getenv("IBEX_PHASE2_AGGR_ITER_LO");
+  const char *env_phase2_aggr_synd_th = getenv("IBEX_PHASE2_AGGR_SYND_TH");
+  const char *env_phase2_aggr_strong_synd_th = getenv("IBEX_PHASE2_AGGR_STRONG_SW_TH");
+  int phase2_aggr_iter_hi = env_phase2_aggr_iter_hi ? atoi(env_phase2_aggr_iter_hi) : -1;
+  int phase2_aggr_iter_lo = env_phase2_aggr_iter_lo ? atoi(env_phase2_aggr_iter_lo) : -1;
+  int phase2_aggr_synd_th = env_phase2_aggr_synd_th ? atoi(env_phase2_aggr_synd_th) : -1;
+  int phase2_aggr_strong_synd_th =
+      env_phase2_aggr_strong_synd_th ? atoi(env_phase2_aggr_strong_synd_th) : -1;
+  if (phase2_aggr_iter_hi < 0) phase2_aggr_iter_hi = -1;
+  if (phase2_aggr_iter_lo < 0) phase2_aggr_iter_lo = -1;
+  if (phase2_aggr_synd_th < 0) phase2_aggr_synd_th = -1;
+  if (phase2_aggr_strong_synd_th < 0) phase2_aggr_strong_synd_th = -1;
   const char *env_2bit_mode = getenv("IBEX_2BIT_MODE");
   const int mode_2bit = env_2bit_mode ? atoi(env_2bit_mode) : 0;
 
@@ -2591,6 +2622,23 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
 		      env_w2_boost_soft_only ? (atoi(env_w2_boost_soft_only) != 0) : false;
 		  const char *env_w2_tail_guard = getenv("IBEX_W2_TAIL_GUARD");
 		  const bool w2_tail_guard = env_w2_tail_guard ? (atoi(env_w2_tail_guard) != 0) : false;
+		  // Syndrome-weight delta gate for w=2 boost (global only; no per-VN state):
+		  // In retry phases, if the syndrome weight worsens too much between iterations, temporarily forbid w=2 boosting
+		  // to avoid "adding fuel to the fire" on diverging trajectories.
+		  const char *env_w2_boost_sw_delta_gate = getenv("IBEX_W2_BOOST_SW_DELTA_GATE");
+		  const bool w2_boost_sw_delta_gate =
+		      env_w2_boost_sw_delta_gate ? (atoi(env_w2_boost_sw_delta_gate) != 0) : false;
+		  const char *env_w2_boost_sw_delta_hi = getenv("IBEX_W2_BOOST_SW_DELTA_HI");
+		  int w2_boost_sw_delta_hi = env_w2_boost_sw_delta_hi ? atoi(env_w2_boost_sw_delta_hi) : 8;
+		  if (w2_boost_sw_delta_hi < 0) w2_boost_sw_delta_hi = 0;
+		  const char *env_w2_boost_sw_delta_min_iter = getenv("IBEX_W2_BOOST_SW_DELTA_MIN_ITER");
+		  int w2_boost_sw_delta_min_iter =
+		      env_w2_boost_sw_delta_min_iter ? atoi(env_w2_boost_sw_delta_min_iter)
+		                                     : ldpc_decoder_input.post_iteration;
+		  if (w2_boost_sw_delta_min_iter < 0)
+		    w2_boost_sw_delta_min_iter = 0;
+		  if (w2_boost_sw_delta_min_iter > ldpc_decoder_input.iteration_limit)
+		    w2_boost_sw_delta_min_iter = ldpc_decoder_input.iteration_limit;
 		  const char *env_toggle_strong = getenv("IBEX_TOGGLE_STRONG");
 		  const bool toggle_strong = env_toggle_strong ? (atoi(env_toggle_strong) != 0) : false;
 		  // Temporarily forbid any extra per-VN state beyond the 2-bit likelihood (pure 2bit route).
@@ -2611,17 +2659,43 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
 		  const bool tabu1 = (k_allow_extra_vn_state && env_tabu1) ? (atoi(env_tabu1) != 0) : false;
 		  const char *env_tabu_rev = getenv("IBEX_TABU_REV");
 		  const bool tabu_rev = (k_allow_extra_vn_state && env_tabu_rev) ? (atoi(env_tabu_rev) != 0) : false;
-			  const char *env_restart_phases = getenv("IBEX_RESTART_PHASES");
-			  int restart_phases = env_restart_phases ? atoi(env_restart_phases) : ((ibex_profile >= 2) ? 3 : 1);
-			  if (restart_phases < 1) restart_phases = 1;
-			  if (restart_phases > 4) restart_phases = 4;
-			  const char *env_phase1_w2_not_pushing = getenv("IBEX_PHASE1_W2_NOT_PUSHING");
-			  const bool phase1_w2_not_pushing =
-			      env_phase1_w2_not_pushing ? (atoi(env_phase1_w2_not_pushing) != 0) : false;
-			  // Pure-2bit architectural exploration knobs (must NOT add any per-VN extra state).
-			  // 1) Stall-triggered escape: when a phase stalls, make w=2 boosting more decisive in retry phases.
-			  const char *env_stall_w2_esc = getenv("IBEX_STALL_W2_ESC");
-			  const bool stall_w2_esc = env_stall_w2_esc ? (atoi(env_stall_w2_esc) != 0) : (ibex_profile >= 2);
+				  const char *env_restart_phases = getenv("IBEX_RESTART_PHASES");
+				  int restart_phases = env_restart_phases ? atoi(env_restart_phases) : ((ibex_profile >= 2) ? 3 : 1);
+				  if (restart_phases < 1) restart_phases = 1;
+				  if (restart_phases > 4) restart_phases = 4;
+				  const char *env_phase1_w2_not_pushing = getenv("IBEX_PHASE1_W2_NOT_PUSHING");
+				  const bool phase1_w2_not_pushing =
+				      env_phase1_w2_not_pushing ? (atoi(env_phase1_w2_not_pushing) != 0) : false;
+				  const char *env_phase1_w2_boost_to = getenv("IBEX_PHASE1_W2_BOOST_TO");
+				  int phase1_w2_boost_to = env_phase1_w2_boost_to ? atoi(env_phase1_w2_boost_to) : 3;
+				  if (phase1_w2_boost_to < 3) phase1_w2_boost_to = 3;
+				  if (phase1_w2_boost_to > 7) phase1_w2_boost_to = 7;
+				  const char *env_phase2_w2_not_pushing = getenv("IBEX_PHASE2_W2_NOT_PUSHING");
+				  int phase2_w2_not_pushing_override = env_phase2_w2_not_pushing ? atoi(env_phase2_w2_not_pushing) : -1;
+				  if (phase2_w2_not_pushing_override < 0) phase2_w2_not_pushing_override = -1;
+				  const char *env_phase2_w2_boost_to = getenv("IBEX_PHASE2_W2_BOOST_TO");
+				  int phase2_w2_boost_to = env_phase2_w2_boost_to ? atoi(env_phase2_w2_boost_to) : -1;
+				  if (phase2_w2_boost_to >= 0) {
+				    if (phase2_w2_boost_to < 3) phase2_w2_boost_to = 3;
+				    if (phase2_w2_boost_to > 7) phase2_w2_boost_to = 7;
+				  } else {
+				    phase2_w2_boost_to = -1;
+				  }
+				  // FM-PGDBF style "flip probability gate" (phase2-only; no per-VN state).
+				  const char *env_phase2_flip_rand_gate = getenv("IBEX_PHASE2_FLIP_RAND_GATE");
+				  const bool phase2_flip_rand_gate =
+				      env_phase2_flip_rand_gate ? (atoi(env_phase2_flip_rand_gate) != 0) : false;
+				  const char *env_phase2_flip_rand_gate_max_w = getenv("IBEX_PHASE2_FLIP_RAND_GATE_MAX_W");
+				  int phase2_flip_rand_gate_max_w = env_phase2_flip_rand_gate_max_w ? atoi(env_phase2_flip_rand_gate_max_w) : 3;
+				  if (phase2_flip_rand_gate_max_w < 0) phase2_flip_rand_gate_max_w = 0;
+				  const char *env_phase2_flip_rand_gate_gates = getenv("IBEX_PHASE2_FLIP_RAND_GATE_GATES");
+				  int phase2_flip_rand_gate_gates = env_phase2_flip_rand_gate_gates ? atoi(env_phase2_flip_rand_gate_gates) : 2;
+				  if (phase2_flip_rand_gate_gates < 1) phase2_flip_rand_gate_gates = 1;
+				  if (phase2_flip_rand_gate_gates > 8) phase2_flip_rand_gate_gates = 8;
+				  // Pure-2bit architectural exploration knobs (must NOT add any per-VN extra state).
+				  // 1) Stall-triggered escape: when a phase stalls, make w=2 boosting more decisive in retry phases.
+				  const char *env_stall_w2_esc = getenv("IBEX_STALL_W2_ESC");
+				  const bool stall_w2_esc = env_stall_w2_esc ? (atoi(env_stall_w2_esc) != 0) : (ibex_profile >= 2);
 			  const char *env_stall_w2_esc_iters = getenv("IBEX_STALL_W2_ESC_ITERS");
 			  int stall_w2_esc_iters = env_stall_w2_esc_iters ? atoi(env_stall_w2_esc_iters) : 8;
 			  if (stall_w2_esc_iters < 1) stall_w2_esc_iters = 1;
@@ -2644,6 +2718,58 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
 				  if (ppbf_esc_min_iter > ldpc_decoder_input.iteration_limit)
 				    ppbf_esc_min_iter = ldpc_decoder_input.iteration_limit;
 				  const int stall_count_w2_min_iter = std::min(stall_w2_esc_min_iter, ppbf_esc_min_iter);
+
+				  // 1c) Stall-triggered "mode window" (global only; no per-VN state):
+				  // When a retry phase stalls, open a short window to temporarily boost escape actions
+				  // (e.g., PPBF-like p(E) and/or column-level escape acceptance).
+				  const char *env_mode_win = getenv("IBEX_MODE_WIN");
+				  const bool mode_win = env_mode_win ? (atoi(env_mode_win) != 0) : false;
+				  const char *env_mode_win_len = getenv("IBEX_MODE_WIN_LEN");
+				  int mode_win_len = env_mode_win_len ? atoi(env_mode_win_len) : 16;
+				  if (mode_win_len < 1) mode_win_len = 1;
+				  if (mode_win_len > ldpc_decoder_input.iteration_limit)
+				    mode_win_len = ldpc_decoder_input.iteration_limit;
+				  const char *env_mode_win_trig_iters = getenv("IBEX_MODE_WIN_TRIG_ITERS");
+				  int mode_win_trig_iters =
+				      env_mode_win_trig_iters ? atoi(env_mode_win_trig_iters)
+				                              : std::min(stall_w2_esc_iters, ppbf_esc_iters);
+				  if (mode_win_trig_iters < 1) mode_win_trig_iters = 1;
+				  const char *env_mode_win_ppbf_boost = getenv("IBEX_MODE_WIN_PPBF_BOOST");
+				  const bool mode_win_ppbf_boost =
+				      env_mode_win_ppbf_boost ? (atoi(env_mode_win_ppbf_boost) != 0) : true;
+				  const char *env_mode_win_col_esc_boost = getenv("IBEX_MODE_WIN_COL_ESC_BOOST");
+				  const bool mode_win_col_esc_boost =
+				      env_mode_win_col_esc_boost ? (atoi(env_mode_win_col_esc_boost) != 0) : true;
+
+				  // 1d) PPBF p(E) annealing (global schedule; no per-VN state):
+				  // Make p(E) hotter right after post_iteration, colder later to reduce tail mis-flips.
+				  const char *env_ppbf_anneal = getenv("IBEX_PPBF_ESC_ANNEAL");
+				  const bool ppbf_anneal = env_ppbf_anneal ? (atoi(env_ppbf_anneal) != 0) : false;
+				  const char *env_ppbf_anneal_iters = getenv("IBEX_PPBF_ESC_ANNEAL_ITERS");
+				  int ppbf_anneal_iters = env_ppbf_anneal_iters ? atoi(env_ppbf_anneal_iters) : 64;
+				  if (ppbf_anneal_iters < 0) ppbf_anneal_iters = 0;
+				  if (ppbf_anneal_iters > ldpc_decoder_input.iteration_limit)
+				    ppbf_anneal_iters = ldpc_decoder_input.iteration_limit;
+
+				  // 1e) NGDBF-lite discrete noise bump (LFSR-gated; no per-VN state):
+				  // In stall windows, occasionally add +1 to the tiny energy proxy to increase escape probability.
+				  const char *env_ngdbf_noise = getenv("IBEX_NGDBF_NOISE");
+				  const bool ngdbf_noise = env_ngdbf_noise ? (atoi(env_ngdbf_noise) != 0) : false;
+				  const char *env_ngdbf_noise_gates = getenv("IBEX_NGDBF_NOISE_GATES");
+				  int ngdbf_noise_gates = env_ngdbf_noise_gates ? atoi(env_ngdbf_noise_gates) : 3; // ~1/8
+				  if (ngdbf_noise_gates < 1) ngdbf_noise_gates = 1;
+				  if (ngdbf_noise_gates > 8) ngdbf_noise_gates = 8;
+				  const char *env_ngdbf_noise_min_w = getenv("IBEX_NGDBF_NOISE_MIN_W");
+				  int ngdbf_noise_min_w = env_ngdbf_noise_min_w ? atoi(env_ngdbf_noise_min_w) : 2;
+				  if (ngdbf_noise_min_w < 0) ngdbf_noise_min_w = 0;
+				  const char *env_ngdbf_noise_only_stall = getenv("IBEX_NGDBF_NOISE_ONLY_STALL");
+				  const bool ngdbf_noise_only_stall =
+				      env_ngdbf_noise_only_stall ? (atoi(env_ngdbf_noise_only_stall) != 0) : true;
+				  const char *env_ngdbf_noise_stall_iters = getenv("IBEX_NGDBF_NOISE_STALL_ITERS");
+				  int ngdbf_noise_stall_iters =
+				      env_ngdbf_noise_stall_iters ? atoi(env_ngdbf_noise_stall_iters)
+				                                  : std::min(stall_w2_esc_iters, ppbf_esc_iters);
+				  if (ngdbf_noise_stall_iters < 1) ngdbf_noise_stall_iters = 1;
 				  // 2) Randomized layered schedule: rotate bit-scan start within each column (optional retry-only).
 				  const char *env_rotate_k = getenv("IBEX_ROTATE_K");
 				  const bool rotate_k = env_rotate_k ? (atoi(env_rotate_k) != 0) : (ibex_profile >= 1);
@@ -2668,14 +2794,17 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
 		  if (stall_iters > ldpc_decoder_input.iteration_limit) stall_iters = ldpc_decoder_input.iteration_limit;
 		  const char *env_stall_min_iter = getenv("IBEX_STALL_MIN_ITER");
 		  int stall_min_iter = env_stall_min_iter ? atoi(env_stall_min_iter) : 200;
-		  if (stall_min_iter < 0) stall_min_iter = 0;
-		  if (stall_min_iter > ldpc_decoder_input.iteration_limit) stall_min_iter = ldpc_decoder_input.iteration_limit;
-		  const char *env_restart_relax_post_gate = getenv("IBEX_RESTART_RELAX_POST_GATE");
-		  const bool restart_relax_post_gate =
-		      env_restart_relax_post_gate ? (atoi(env_restart_relax_post_gate) != 0) : false;
-		  const char *env_restart_split_budget = getenv("IBEX_RESTART_SPLIT_BUDGET");
-		  const bool restart_split_budget =
-		      env_restart_split_budget ? (atoi(env_restart_split_budget) != 0) : (ibex_profile >= 2);
+			  if (stall_min_iter < 0) stall_min_iter = 0;
+			  if (stall_min_iter > ldpc_decoder_input.iteration_limit) stall_min_iter = ldpc_decoder_input.iteration_limit;
+			  const char *env_restart_relax_post_gate = getenv("IBEX_RESTART_RELAX_POST_GATE");
+			  const bool restart_relax_post_gate =
+			      env_restart_relax_post_gate ? (atoi(env_restart_relax_post_gate) != 0) : false;
+			  const char *env_phase2_relax_post_gate = getenv("IBEX_PHASE2_RELAX_POST_GATE");
+			  const bool phase2_relax_post_gate =
+			      env_phase2_relax_post_gate ? (atoi(env_phase2_relax_post_gate) != 0) : false;
+			  const char *env_restart_split_budget = getenv("IBEX_RESTART_SPLIT_BUDGET");
+			  const bool restart_split_budget =
+			      env_restart_split_budget ? (atoi(env_restart_split_budget) != 0) : (ibex_profile >= 2);
 		  const char *env_smooth_fail = getenv("IBEX_SMOOTH_FAIL");
 		  const bool smooth_fail = (k_allow_extra_vn_state && env_smooth_fail) ? (atoi(env_smooth_fail) != 0) : false;
 		  const char *env_smooth_win = getenv("IBEX_SMOOTH_WIN");
@@ -2683,12 +2812,29 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
 		  if (smooth_win <= 0) smooth_win = 64;
 		  if (smooth_win > ldpc_decoder_input.iteration_limit) smooth_win = ldpc_decoder_input.iteration_limit;
 
-		  // Column-level global escape + backtracking (no per-VN state; optional small per-column buffers allowed).
-		  const char *env_col_global_esc = getenv("IBEX_COL_GLOBAL_ESC");
-		  const bool col_global_esc = env_col_global_esc ? (atoi(env_col_global_esc) != 0) : false;
-		  const char *env_col_global_esc_iters = getenv("IBEX_COL_GLOBAL_ESC_ITERS");
-		  int col_global_esc_iters = env_col_global_esc_iters ? atoi(env_col_global_esc_iters) : 8;
-		  if (col_global_esc_iters < 1) col_global_esc_iters = 1;
+			  // Column-level global escape + backtracking (no per-VN state; optional small per-column buffers allowed).
+			  const char *env_col_global_esc = getenv("IBEX_COL_GLOBAL_ESC");
+			  const bool col_global_esc = env_col_global_esc ? (atoi(env_col_global_esc) != 0) : false;
+			  const char *env_col_global_esc_min_phase = getenv("IBEX_COL_GLOBAL_ESC_MIN_PHASE");
+			  int col_global_esc_min_phase = env_col_global_esc_min_phase ? atoi(env_col_global_esc_min_phase) : 1;
+			  if (col_global_esc_min_phase < 0) col_global_esc_min_phase = 0;
+			  if (col_global_esc_min_phase > 4) col_global_esc_min_phase = 4;
+			  const char *env_col_esc_target_hot = getenv("IBEX_COL_ESC_TARGET_HOT");
+			  const bool col_esc_target_hot = env_col_esc_target_hot ? (atoi(env_col_esc_target_hot) != 0) : false;
+			  const char *env_col_esc_target_hot_min_phase = getenv("IBEX_COL_ESC_TARGET_HOT_MIN_PHASE");
+			  int col_esc_target_hot_min_phase =
+			      env_col_esc_target_hot_min_phase ? atoi(env_col_esc_target_hot_min_phase) : 2;
+			  if (col_esc_target_hot_min_phase < 0) col_esc_target_hot_min_phase = 0;
+			  if (col_esc_target_hot_min_phase > 4) col_esc_target_hot_min_phase = 4;
+			  const char *env_col_esc_target_hot_min_iter = getenv("IBEX_COL_ESC_TARGET_HOT_MIN_ITER");
+			  int col_esc_target_hot_min_iter =
+			      env_col_esc_target_hot_min_iter ? atoi(env_col_esc_target_hot_min_iter) : ldpc_decoder_input.post_iteration;
+			  if (col_esc_target_hot_min_iter < 0) col_esc_target_hot_min_iter = 0;
+			  if (col_esc_target_hot_min_iter > ldpc_decoder_input.iteration_limit)
+			    col_esc_target_hot_min_iter = ldpc_decoder_input.iteration_limit;
+			  const char *env_col_global_esc_iters = getenv("IBEX_COL_GLOBAL_ESC_ITERS");
+			  int col_global_esc_iters = env_col_global_esc_iters ? atoi(env_col_global_esc_iters) : 8;
+			  if (col_global_esc_iters < 1) col_global_esc_iters = 1;
 		  const char *env_col_global_esc_min_iter = getenv("IBEX_COL_GLOBAL_ESC_MIN_ITER");
 		  int col_global_esc_min_iter =
 		      env_col_global_esc_min_iter ? atoi(env_col_global_esc_min_iter) : ldpc_decoder_input.post_iteration;
@@ -2860,11 +3006,64 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
 			    int best_sw_phase_w2 = syndrome_weight;
 			    int stall_count_w2 = 0;
 			    int prev_iter_sw = syndrome_weight;
-			    bool pushing_iter = true;
-			    int col_esc_target_col = 0; // selected escape column for this iteration (updated at j==0)
+				    bool pushing_iter = true;
+				    bool w2_boost_sw_delta_allow = true;
+				    // Retry-phase diversity (no per-VN state): optionally use different aggr thresholds in phase>0.
+				    int aggr_iter_hi_eff = aggr_iter_hi;
+				    int aggr_iter_lo_eff = aggr_iter_lo;
+				    int aggr_synd_th_eff = aggr_synd_th;
+				    int aggr_strong_synd_th_eff = aggr_strong_synd_th;
+				    if (phase > 0) {
+				      if (phase1_aggr_iter_hi >= 0) aggr_iter_hi_eff = phase1_aggr_iter_hi;
+				      if (phase1_aggr_iter_lo >= 0) aggr_iter_lo_eff = phase1_aggr_iter_lo;
+				      if (phase1_aggr_synd_th >= 0) aggr_synd_th_eff = phase1_aggr_synd_th;
+				      if (phase1_aggr_strong_synd_th >= 0) aggr_strong_synd_th_eff = phase1_aggr_strong_synd_th;
+				    }
+				    if (phase >= 2) {
+				      if (phase2_aggr_iter_hi >= 0) aggr_iter_hi_eff = phase2_aggr_iter_hi;
+				      if (phase2_aggr_iter_lo >= 0) aggr_iter_lo_eff = phase2_aggr_iter_lo;
+				      if (phase2_aggr_synd_th >= 0) aggr_synd_th_eff = phase2_aggr_synd_th;
+				      if (phase2_aggr_strong_synd_th >= 0) aggr_strong_synd_th_eff = phase2_aggr_strong_synd_th;
+				    }
+				    int w2_boost_to_phase_eff = 3;
+				    bool w2_not_pushing_phase_eff = false;
+				    if (phase > 0) {
+				      w2_boost_to_phase_eff = phase1_w2_boost_to;
+				      w2_not_pushing_phase_eff = phase1_w2_not_pushing;
+				    }
+				    if (phase >= 2) {
+				      if (phase2_w2_boost_to >= 0)
+				        w2_boost_to_phase_eff = phase2_w2_boost_to;
+				      if (phase2_w2_not_pushing_override >= 0)
+				        w2_not_pushing_phase_eff = (phase2_w2_not_pushing_override != 0);
+				    }
+				    const bool relax_post_gate_phase_eff =
+				        (restart_relax_post_gate && (phase > 0)) || (phase2_relax_post_gate && (phase >= 2));
+				    const bool flip_rand_gate_phase_eff = phase2_flip_rand_gate && (phase >= 2);
+				    const int flip_rand_gate_max_w_eff = phase2_flip_rand_gate_max_w;
+				    const int flip_rand_gate_gates_eff = phase2_flip_rand_gate_gates;
+				    int col_esc_target_col = 0; // selected escape column for this iteration (updated at j==0)
+				    int mode_win_rem = 0;
+				    int mode_win_cooldown = 0;
+				    int hot_col_prev = 0; // hottest column index from the previous iteration (global-only; no per-VN state)
 
-			    while ((iteration < phase_iter_limit) && (finished == 0) && (give_up == 0)) {
-			    for (j = 0; j < h_matrix.cols; j++) {
+				    while ((iteration < phase_iter_limit) && (finished == 0) && (give_up == 0)) {
+				      const bool mode_win_trig =
+				          mode_win && (phase > 0) && (iteration >= stall_count_w2_min_iter) &&
+				          (iteration >= ldpc_decoder_input.post_iteration) &&
+				          (stall_count_w2 >= mode_win_trig_iters);
+			      if (mode_win_rem == 0) {
+			        if (mode_win_cooldown > 0) {
+			          mode_win_cooldown--;
+			        } else if (mode_win_trig) {
+			          mode_win_rem = std::min(mode_win_len, phase_iter_limit);
+			          mode_win_cooldown = mode_win_len; // simple symmetric cooldown by default
+			        }
+				      }
+				      const bool mode_win_active = mode_win && (mode_win_rem > 0);
+				      int hot_col_next = hot_col_prev;
+				      int hot_col_best_score = -1;
+				    for (j = 0; j < h_matrix.cols; j++) {
 			      clock_cycles++;
 			      if ((iteration == (ldpc_decoder_input.post_iteration + 0)) && (j == 0)) {
 	        for (i = 0; i < 256; i++)
@@ -2884,24 +3083,30 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
 		        prng_512 = f_512_bit_lfsr(prng_512);
 		      }
 
-      if (col_global_esc && (j == 0) && (h_matrix.cols > 0)) {
-        // Pick one column per iteration for escape to cap overhead. Derived from existing PRNG state.
-        int rnd = 0;
-        if (h_matrix.bits == 512) {
-          for (int bb = 0; bb < 8; bb++) {
-            const int idx = (iteration * 13 + bb * 37) & 511;
-            if (prng_512.b[idx])
-              rnd |= (1 << bb);
-          }
-        } else {
-          for (int bb = 0; bb < 8; bb++) {
-            const int idx = (iteration * 13 + bb * 37) & 255;
-            if (prng_256.b[idx])
-              rnd |= (1 << bb);
-          }
-        }
-        col_esc_target_col = (h_matrix.cols > 0) ? (rnd % h_matrix.cols) : 0;
-      }
+	      if (col_global_esc && (j == 0) && (h_matrix.cols > 0)) {
+	        const bool use_hot_target = col_esc_target_hot && (phase >= col_esc_target_hot_min_phase) &&
+	                                    (iteration >= col_esc_target_hot_min_iter);
+	        if (use_hot_target) {
+	          col_esc_target_col = (h_matrix.cols > 0) ? (hot_col_prev % h_matrix.cols) : 0;
+	        } else {
+	          // Pick one column per iteration for escape to cap overhead. Derived from existing PRNG state.
+	          int rnd = 0;
+	          if (h_matrix.bits == 512) {
+	            for (int bb = 0; bb < 8; bb++) {
+	              const int idx = (iteration * 13 + bb * 37) & 511;
+	              if (prng_512.b[idx])
+	                rnd |= (1 << bb);
+	            }
+	          } else {
+	            for (int bb = 0; bb < 8; bb++) {
+	              const int idx = (iteration * 13 + bb * 37) & 255;
+	              if (prng_256.b[idx])
+	                rnd |= (1 << bb);
+	            }
+	          }
+	          col_esc_target_col = (h_matrix.cols > 0) ? (rnd % h_matrix.cols) : 0;
+	        }
+	      }
 
       syndrome_weight_r[4] = syndrome_weight_r[3];
       syndrome_weight_r[3] = syndrome_weight_r[2];
@@ -2920,6 +3125,11 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
       bool pushing = true;
       if (push_dynamic) {
         pushing = (push_mode == 1) ? pushing_iter : (syndrome_weight_delayed >= prev_sw_col);
+      }
+      w2_boost_sw_delta_allow = true;
+      if (w2_boost_sw_delta_gate && (phase > 0) && (iteration >= w2_boost_sw_delta_min_iter)) {
+        const int sw_delta_col = syndrome_weight_delayed - prev_sw_col;
+        w2_boost_sw_delta_allow = (sw_delta_col >= 0) && (sw_delta_col <= w2_boost_sw_delta_hi);
       }
 
       if (VERBOSITY > 0)
@@ -2986,10 +3196,11 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
 	            k_start = k_start % h_matrix.bits;
 	        }
 	      }
-	      const bool cap_toggles_eff =
-	          (max_toggles_per_col > 0) && (!max_toggles_tail_only || (iteration >= ldpc_decoder_input.post_iteration));
-	      int toggles_in_col = 0;
-	      for (int kk = 0; kk < h_matrix.bits; kk++) {
+		      const bool cap_toggles_eff =
+		          (max_toggles_per_col > 0) && (!max_toggles_tail_only || (iteration >= ldpc_decoder_input.post_iteration));
+		      int toggles_in_col = 0;
+		      int col_weight_sum = 0;
+		      for (int kk = 0; kk < h_matrix.bits; kk++) {
 	        k = rotate_k_eff ? (((h_matrix.bits == 512) ? ((kk + k_start) & 511)
 	                                                    : ((h_matrix.bits == 256) ? ((kk + k_start) & 255)
 	                                                                              : ((kk + k_start) % h_matrix.bits))))
@@ -3009,24 +3220,25 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
 	            continue;
 	          }
 	          weight = 0;
-	          for (i = 0; i < h_matrix.rows; i++) {
-	            m = (k + h_matrix.bits - h_matrix.element[i][j]) % h_matrix.bits;
-	            if (h_matrix.extra_bytes_of_parity == 0) {
-              if (h_matrix.occupied[i][j] && (cn.r[i].b[m] == 1))
-                weight++;
-            } else {
+		          for (i = 0; i < h_matrix.rows; i++) {
+		            m = (k + h_matrix.bits - h_matrix.element[i][j]) % h_matrix.bits;
+		            if (h_matrix.extra_bytes_of_parity == 0) {
+	              if (h_matrix.occupied[i][j] && (cn.r[i].b[m] == 1))
+	                weight++;
+	            } else {
               if (h_matrix.occupied[i][j] && (i < (h_matrix.rows - 1)) && (cn.r[i].b[m] == 1))
                 weight++;
               if (h_matrix.occupied[i][j] && (i == (h_matrix.rows - 1)) && (cn.r[i].b[m] == 1) && h_matrix.mask[j][k])
                 weight++;
               if (h_matrix.fade[i][j] && (cn.r[i].b[m] == 1) && !h_matrix.mask[j][k])
                 weight++;
-            }
-          }
-          if (iteration == 0) {
-            if (ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_is_error)
-              hard_codeword.errors_at_level_and_weight[ldpc_decoder_input.corrupted_codeword.c[j].b[k].level][weight]++;
-            else
+	            }
+	          }
+		          col_weight_sum += weight;
+	          if (iteration == 0) {
+	            if (ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_is_error)
+	              hard_codeword.errors_at_level_and_weight[ldpc_decoder_input.corrupted_codeword.c[j].b[k].level][weight]++;
+	            else
               hard_codeword
                   .correct_at_level_and_weight[ldpc_decoder_input.corrupted_codeword.c[j].b[k].level][weight]++;
           }
@@ -3076,8 +3288,8 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
 	          const bool upgdbf_rand_enable = (iteration >= upgdbf_active_iter_eff) || upgdbf_stall_trigger;
 
 	          bool aggr = ((VN_BITS <= 2) &&
-	                       (((iteration >= aggr_iter_hi) && (syndrome_weight < aggr_strong_synd_th)) ||
-	                        ((iteration >= aggr_iter_lo) && (syndrome_weight < aggr_synd_th)))) ||
+	                       (((iteration >= aggr_iter_hi_eff) && (syndrome_weight < aggr_strong_synd_th_eff)) ||
+	                        ((iteration >= aggr_iter_lo_eff) && (syndrome_weight < aggr_synd_th_eff)))) ||
 	                      ((ldpc_decoder_input.soft_bits > 0) &&
 	                       (likelihood_levels.min < ldpc_decoder_parameters.likelihood_thr &&
 	                        ((VN_BITS <= 2) || !flipped_prev)));
@@ -3100,11 +3312,16 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
 	                  if (w2_soft_only_ok) {
 			                    const bool w2_strong_unflipped =
 			                        (VN_BITS <= 2) && (likelihood_prev < (likelihood_levels.flip_thr - 1));
+				                    const int w2_boost_to_eff = w2_boost_to_phase_eff;
+			                    const bool stall_w2_esc_gate =
+			                        mode_win ? mode_win_active : (stall_count_w2 >= stall_w2_esc_iters);
 			                    const bool stall_w2_esc_active =
-			                        stall_w2_esc && (phase > 0) && (stall_count_w2 >= stall_w2_esc_iters) &&
+			                        stall_w2_esc && (phase > 0) && stall_w2_esc_gate &&
 			                        (iteration >= stall_w2_esc_min_iter);
+		                    const bool ppbf_esc_gate =
+		                        mode_win ? mode_win_active : (stall_count_w2 >= ppbf_esc_iters);
 		                    const bool ppbf_esc_active =
-		                        ppbf_esc && upgdbf_rand_enable && (phase > 0) && (stall_count_w2 >= ppbf_esc_iters) &&
+		                        ppbf_esc && upgdbf_rand_enable && (phase > 0) && ppbf_esc_gate &&
 		                        (iteration >= std::max(ppbf_esc_min_iter, ldpc_decoder_input.post_iteration));
 			                    bool w2_cand_allow = true;
 			                    if (w2_cand_strong && push_dynamic && w2_strong_unflipped && !w2_cand_mem.empty()) {
@@ -3160,22 +3377,22 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
 		                            if (cand_bad && (!w2_boost_weak_only || !w2_strong_unflipped))
 		                              rand_boost = true;
 		                          }
-		                          if (rand_boost)
-		                            w = 3; // 2->3 (attack)
+		                          if (rand_boost && w2_boost_sw_delta_allow)
+		                            w = w2_boost_to_eff;
 		                        } else {
 		                          if (!w2_boost_only_when_pushing) {
-		                            if (!w2_boost_weak_only || !w2_strong_unflipped)
-		                              w = 3; // 2->3 (attack)
+		                            if (w2_boost_sw_delta_allow && (!w2_boost_weak_only || !w2_strong_unflipped))
+		                              w = w2_boost_to_eff;
 		                          } else if (stall_w2_esc_active) {
 		                            // If a phase has stalled, allow a small amount of w=2 boost even when not pushing.
 		                            const bool cand_bad = (!w2_strong_unflipped) || soft_unreliable;
 		                            if (cand_bad && (!w2_boost_weak_only || !w2_strong_unflipped)) {
 		                              const int prng_idx6 = (h_matrix.bits == 512) ? ((k + 101) & 511) : ((k + 101) & 255);
 		                              const bool r6 = (h_matrix.bits == 512) ? prng_512.b[prng_idx6] : prng_256.b[prng_idx6];
-		                              if (r6)
-		                                w = 3;
+		                              if (r6 && w2_boost_sw_delta_allow)
+		                                w = w2_boost_to_eff;
 		                            }
-		                          } else if (phase1_w2_not_pushing && (phase > 0)) {
+			                          } else if (w2_not_pushing_phase_eff) {
 		                            // Retry-phase escape hatch: even if "only-when-pushing" is enabled, allow a very small
 		                            // probability of w=2 boost when the trend is not pushing, to escape some trap sets.
 		                            const bool cand_bad = (!w2_strong_unflipped) || soft_unreliable;
@@ -3185,8 +3402,8 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
 		                              const bool r4 = (h_matrix.bits == 512) ? prng_512.b[prng_idx4] : prng_256.b[prng_idx4];
 		                              const bool r5 = (h_matrix.bits == 512) ? prng_512.b[prng_idx5] : prng_256.b[prng_idx5];
 		                              // ~1/4 (two independent gates) on top of the base rand_boost in the pushing path.
-		                              if (r4 && r5)
-		                                w = 3;
+		                              if (r4 && r5 && w2_boost_sw_delta_allow)
+		                                w = w2_boost_to_eff;
 		                            }
 		                          } else if (ppbf_esc_active) {
 		                            // PPBF-like escape hatch: boost w=2 with probability p(E) based on a tiny energy proxy.
@@ -3197,18 +3414,59 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
 		                                E++;
 		                              if (!pushing)
 		                                E++;
+		                              if (ngdbf_noise && (weight >= ngdbf_noise_min_w)) {
+		                                const bool noise_stall_ok =
+		                                    !ngdbf_noise_only_stall ||
+		                                    ((iteration >= stall_count_w2_min_iter) &&
+		                                     (stall_count_w2 >= ngdbf_noise_stall_iters));
+		                                if (noise_stall_ok) {
+		                                  bool bump = true;
+		                                  for (int gg = 0; gg < ngdbf_noise_gates; gg++) {
+		                                    const int idx = (h_matrix.bits == 512)
+		                                                        ? ((k + 19 + gg * 37) & 511)
+		                                                        : ((k + 19 + gg * 37) & 255);
+		                                    const bool rb = (h_matrix.bits == 512) ? prng_512.b[idx] : prng_256.b[idx];
+		                                    bump &= rb;
+		                                  }
+		                                  if (bump)
+		                                    E++; // discrete +1 noise bump (NGDBF-lite)
+		                                }
+		                              }
 		                              const int prng_idx7 = (h_matrix.bits == 512) ? ((k + 79) & 511) : ((k + 79) & 255);
 		                              const int prng_idx8 = (h_matrix.bits == 512) ? ((k + 157) & 511) : ((k + 157) & 255);
+		                              const int prng_idx9 = (h_matrix.bits == 512) ? ((k + 211) & 511) : ((k + 211) & 255);
 		                              const bool r7 = (h_matrix.bits == 512) ? prng_512.b[prng_idx7] : prng_256.b[prng_idx7];
 		                              const bool r8 = (h_matrix.bits == 512) ? prng_512.b[prng_idx8] : prng_256.b[prng_idx8];
+		                              const bool r9 = (h_matrix.bits == 512) ? prng_512.b[prng_idx9] : prng_256.b[prng_idx9];
+		                              const bool ppbf_hot =
+		                                  (mode_win_active && mode_win_ppbf_boost && !hamming_weight_lt_post_thr) ||
+		                                  (ppbf_anneal && !hamming_weight_lt_post_thr &&
+		                                   (iteration < (ppbf_esc_min_iter + ppbf_anneal_iters)));
+		                              const bool ppbf_cold = ppbf_anneal && !ppbf_hot;
 		                              bool rand_boost = false;
-		                              if (E >= 4) {
-		                                rand_boost = r7; // ~1/2
-		                              } else if (E == 3) {
-		                                rand_boost = r7 && r8; // ~1/4
+		                              if (ppbf_hot) {
+		                                if (E >= 4) {
+		                                  rand_boost = r7; // ~1/2
+		                                } else if (E == 3) {
+		                                  rand_boost = r7; // ~1/2 (hotter)
+		                                } else if (E == 2) {
+		                                  rand_boost = r7 && r8 && r9; // ~1/8 (very small widening)
+		                                }
+		                              } else if (ppbf_cold) {
+		                                if (E >= 4) {
+		                                  rand_boost = r7 && r8; // ~1/4
+		                                } else if (E == 3) {
+		                                  rand_boost = r7 && r8 && r9; // ~1/8
+		                                }
+		                              } else {
+		                                if (E >= 4) {
+		                                  rand_boost = r7; // ~1/2
+		                                } else if (E == 3) {
+		                                  rand_boost = r7 && r8; // ~1/4
+		                                }
 		                              }
-		                              if (rand_boost)
-		                                w = 3;
+		                              if (rand_boost && w2_boost_sw_delta_allow)
+		                                w = w2_boost_to_eff;
 		                            }
 		                          }
 		                        }
@@ -3216,8 +3474,8 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
 		                        // Before post_iteration, avoid stochastic/early w=2 boost to reduce chaotic mass-flips.
 	                      }
 	                    } else {
-	                      if (!w2_boost_weak_only || !w2_strong_unflipped)
-	                        w = 3; // 2->3 (attack)
+	                      if (w2_boost_sw_delta_allow && (!w2_boost_weak_only || !w2_strong_unflipped))
+	                        w = w2_boost_to_eff;
 	                    }
 	                  }
 	                }
@@ -3233,8 +3491,7 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
 				                   "CORRUPTED: %x FLIPPED: %x WEIGHT: %1d MIN: %3d LIKELIHOOD: %3d\n",
 				                   iteration, syndrome_weight, j, k, 0, ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_hard,
 				                   vn.c[j].b[k].flipped, weight, likelihood_levels.min, vn.c[j].b[k].likelihood);
-          const bool post_gate_mode =
-              (mode_2bit >= 2) ? (!aggr || (restart_relax_post_gate && (phase > 0))) : true;
+	          const bool post_gate_mode = (mode_2bit >= 2) ? (!aggr || relax_post_gate_phase_eff) : true;
           const bool post_gate_push = post_only_when_pushing ? pushing : true;
           const bool post_gate_soft = soft_guard ? soft_unreliable : true;
           const bool post_gate = post_gate_mode && post_gate_push && post_gate_soft;
@@ -3271,17 +3528,35 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
 	                   vn.c[j].b[k].flipped, weight, likelihood_levels.min, vn.c[j].b[k].likelihood,
 	                   likelihood_levels.flip_thr);
 
-		          if (cap_toggles_eff && (flipped_prev != vn.c[j].b[k].flipped) &&
-		              (toggles_in_col >= max_toggles_per_col)) {
-		            // Tail-stage safety: suppress excessive toggles within a column and clamp to the boundary.
-		            vn.c[j].b[k].likelihood = flipped_prev ? likelihood_levels.flip_thr : (likelihood_levels.flip_thr - 1);
-		            vn.c[j].b[k].flipped = flipped_prev;
-		          }
+			          if (cap_toggles_eff && (flipped_prev != vn.c[j].b[k].flipped) &&
+			              (toggles_in_col >= max_toggles_per_col)) {
+			            // Tail-stage safety: suppress excessive toggles within a column and clamp to the boundary.
+			            vn.c[j].b[k].likelihood = flipped_prev ? likelihood_levels.flip_thr : (likelihood_levels.flip_thr - 1);
+			            vn.c[j].b[k].flipped = flipped_prev;
+			          }
 
-		          // Increment update syndrome if flipped state changed
-		          if (flipped_prev != vn.c[j].b[k].flipped) {
-		            toggles_in_col++;
-		            if (tabu1 || tabu_rev)
+			          if (flip_rand_gate_phase_eff && hamming_weight_lt_circ_thr &&
+			              (iteration >= ldpc_decoder_input.post_iteration) && (flipped_prev != vn.c[j].b[k].flipped) &&
+			              (weight <= flip_rand_gate_max_w_eff)) {
+			            // FM-PGDBF style probability gate: randomly suppress some "weak" flip events to break
+			            // deterministic time cycles. Phase2-only to isolate side-effects; no per-VN state.
+			            bool allow = false;
+			            for (int gg = 0; gg < flip_rand_gate_gates_eff; gg++) {
+			              const int idx = (h_matrix.bits == 512) ? ((k + 37 + gg * 73 + j * 11) & 511)
+			                                                    : ((k + 37 + gg * 73 + j * 11) & 255);
+			              const bool r = (h_matrix.bits == 512) ? prng_512.b[idx] : prng_256.b[idx];
+			              allow |= r;
+			            }
+			            if (!allow) {
+			              vn.c[j].b[k].likelihood = flipped_prev ? likelihood_levels.flip_thr : (likelihood_levels.flip_thr - 1);
+			              vn.c[j].b[k].flipped = flipped_prev;
+			            }
+			          }
+
+			          // Increment update syndrome if flipped state changed
+			          if (flipped_prev != vn.c[j].b[k].flipped) {
+			            toggles_in_col++;
+			            if (tabu1 || tabu_rev)
 		              last_toggle_iter[vn_idx] = static_cast<int16_t>(iteration);
 		            for (i = 0; i < h_matrix.rows; i++) {
 		              m = (k + h_matrix.bits - h_matrix.element[i][j]) % h_matrix.bits;
@@ -3307,12 +3582,19 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
               f_print_check_nodes(cn, h_matrix.rows, h_matrix.bits);
             }
           }
-        }
-      }
+	        }
+	      }
 
-      // Column-level global escape + optional energy backtracking (no per-VN state; per-column tiny buffers only).
-      if (col_global_esc) {
-        int upgdbf_active_iter_eff2 = upgdbf_active_iter_base;
+	      if (col_esc_target_hot && (phase >= col_esc_target_hot_min_phase)) {
+	        if (col_weight_sum > hot_col_best_score) {
+	          hot_col_best_score = col_weight_sum;
+	          hot_col_next = j;
+	        }
+	      }
+
+	      // Column-level global escape + optional energy backtracking (no per-VN state; per-column tiny buffers only).
+	      if (col_global_esc) {
+	        int upgdbf_active_iter_eff2 = upgdbf_active_iter_base;
         if ((phase > 0) && (upgdbf_active_phase_bonus > 0)) {
           upgdbf_active_iter_eff2 = std::max(0, upgdbf_active_iter_eff2 - upgdbf_active_phase_bonus);
         }
@@ -3323,11 +3605,11 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
             (stall_count_w2 >= std::min(stall_w2_esc_iters, ppbf_esc_iters));
         const bool upgdbf_rand_enable2 = (iteration >= upgdbf_active_iter_eff2) || upgdbf_stall_trigger2;
 
-        const bool col_esc_active =
-            col_global_esc && upgdbf_rand_enable2 && (phase > 0) && (j == col_esc_target_col) &&
-            (stall_count_w2 >= col_global_esc_iters) &&
-            hamming_weight_lt_circ_thr &&
-            (iteration >= std::max(col_global_esc_min_iter, ldpc_decoder_input.post_iteration));
+	        const bool col_esc_active =
+	            col_global_esc && upgdbf_rand_enable2 && (phase >= col_global_esc_min_phase) && (j == col_esc_target_col) &&
+	            (stall_count_w2 >= col_global_esc_iters) &&
+	            hamming_weight_lt_circ_thr &&
+	            (iteration >= std::max(col_global_esc_min_iter, ldpc_decoder_input.post_iteration));
         if (col_esc_active) {
           const int sw_before_escape = f_check_node_weight(h_matrix, cn);
 
@@ -3363,12 +3645,15 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
           }
 
           if (max_w_in_col >= 2) {
+            const bool col_mode_win_hot = mode_win_active && mode_win_col_esc_boost;
+            const int col_esc_max_toggles_eff =
+                col_mode_win_hot ? std::min(8, col_global_esc_max_toggles + 1) : col_global_esc_max_toggles;
             int esc_k[8] = {};
             int16_t esc_like[8] = {};
             uint8_t esc_flip[8] = {};
             int esc_cnt = 0;
 
-            for (int kk2 = 0; (kk2 < h_matrix.bits) && (esc_cnt < col_global_esc_max_toggles); kk2++) {
+            for (int kk2 = 0; (kk2 < h_matrix.bits) && (esc_cnt < col_esc_max_toggles_eff); kk2++) {
               const int k2 = kk2;
               bool dnu = false;
               dnu |= ((h_matrix.extra_bits_of_parity > 0) && (j == (h_matrix.cols - h_matrix.rows)) &&
@@ -3425,7 +3710,7 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
               if (max_w_in_col >= 3) {
                 accept = r7;
               } else if (max_w_in_col == 2) {
-                accept = r7 && r8 && r9; // ~1/8
+                accept = col_mode_win_hot ? (r7 && r8) : (r7 && r8 && r9); // ~1/4 vs ~1/8
               }
               if (!accept)
                 continue;
@@ -3521,15 +3806,19 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
 
 		    syndrome_weight = f_check_node_weight(h_matrix, cn);
 		    finished = (syndrome_weight == 0);
-		    syndrome_weight_r[4] = syndrome_weight_r[3];
-		    syndrome_weight_r[3] = syndrome_weight_r[2];
-		    syndrome_weight_r[2] = syndrome_weight_r[1];
-		    syndrome_weight_r[1] = syndrome_weight_r[0];
-		    syndrome_weight_r[0] = syndrome_weight;
+			    syndrome_weight_r[4] = syndrome_weight_r[3];
+			    syndrome_weight_r[3] = syndrome_weight_r[2];
+			    syndrome_weight_r[2] = syndrome_weight_r[1];
+			    syndrome_weight_r[1] = syndrome_weight_r[0];
+			    syndrome_weight_r[0] = syndrome_weight;
 
-			    if (smooth_fail && (finished == 0) && (iteration >= smooth_start_iter)) {
-			      if (smooth_sum.empty())
-			        smooth_sum.assign(h_matrix.cols * h_matrix.bits, 0);
+			    if (col_esc_target_hot && (phase >= col_esc_target_hot_min_phase)) {
+			      hot_col_prev = hot_col_next;
+			    }
+
+				    if (smooth_fail && (finished == 0) && (iteration >= smooth_start_iter)) {
+				      if (smooth_sum.empty())
+				        smooth_sum.assign(h_matrix.cols * h_matrix.bits, 0);
 			      for (int jj = 0; jj < h_matrix.cols; jj++) {
 			        for (int kk = 0; kk < h_matrix.bits; kk++) {
 			          const int vn_idx = jj * h_matrix.bits + kk;
@@ -3539,6 +3828,8 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
 			      }
 			    }
 
+					    if (mode_win_rem > 0)
+					      mode_win_rem--;
 					    clock_cycles++;
 					    iteration++;
 						    if ((finished == 0) && (give_up == 0) && (iteration >= stall_min_iter)) {
@@ -3549,11 +3840,12 @@ void ldpc_packet::ldpc_dec_bf_ibex(s_ldpc_decoder_input ldpc_decoder_input,
 						        stall_count++;
 						      }
 						    }
-						    if ((stall_w2_esc || ppbf_esc) && (finished == 0) && (give_up == 0)) {
-						      if (syndrome_weight < best_sw_phase_w2) {
-						        best_sw_phase_w2 = syndrome_weight;
-						        if (iteration >= stall_count_w2_min_iter)
-						          stall_count_w2 = 0;
+							    if ((stall_w2_esc || ppbf_esc || col_global_esc || mode_win || ngdbf_noise) && (finished == 0) &&
+							        (give_up == 0)) {
+							      if (syndrome_weight < best_sw_phase_w2) {
+							        best_sw_phase_w2 = syndrome_weight;
+							        if (iteration >= stall_count_w2_min_iter)
+							          stall_count_w2 = 0;
 						      } else if (iteration >= stall_count_w2_min_iter) {
 						        stall_count_w2++;
 						      }

@@ -342,26 +342,29 @@ void ch_packet::ch_llr_gen(float hd0_llr, float hd1_llr, int llr_tot_bit, int ll
             
             for (int i = 0; i <= rd_num; i++)
             {
-                sd_asc_ord[i] = nand_read[i][sd_num - 1];
+                int hard_bit = nand_read[i][sd_num - 1];
+                int soft_bits = 0;
 
                 for (int j = 0; j < sd_num - 1; j++)
                 {
-                    sd_asc_ord[i] = sd_asc_ord[i] * 2;
+                    soft_bits = soft_bits * 2;
 
                     if (nand_read[i][j] == nand_read[i][rd_num -1 -j])
                     {
                         if (sd_type == VENDOR1)
                         {
-                            sd_asc_ord[i] += 1;
+                            soft_bits += 1;
                         }
                     }
                     else {
                         if (sd_type == VENDOR0)
                         {
-                            sd_asc_ord[i] += 1;
+                            soft_bits += 1;
                         }
                     }
                 }
+
+                sd_asc_ord[i] = soft_bits * 2 + hard_bit;
                 bin_asc_ord[i] = sd_asc_ord[i];
             }
         }

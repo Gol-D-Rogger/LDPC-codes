@@ -214,8 +214,7 @@ int main (int argc, char **argv)
 #endif
         sim_pckt->ch_detector();        
 
-        // TRUNC_AWGN(TAWGN) 模式本身已固定每帧 FBC（k），不需要再做逐帧筛选。
-        if (ch_mode != TRUNC_AWGN &&
+        if (ch_mode == TRUNC_AWGN && target_fbc == 0 &&
             sim_pckt->raw_err_num < (int)(dsp_blk_len * sim_pckt->rber))
         {
             sim_cnt--;

@@ -888,6 +888,458 @@ void ldpc_packet::print_hm() {
   fclose(fp1);
 }
 
+void ldpc_packet::print_hm_192() {
+  if ((cir_sz != 192) || (h_matrix.bits != 192)) {
+    printf("[LDPC Warning] print_hm_192() requires cir_sz=192 and h_matrix.bits=192 (got cir_sz=%d, bits=%d)\n",
+           cir_sz, h_matrix.bits);
+    return;
+  }
+
+  FILE *fp = NULL, *fp1 = NULL;
+  FILE *fp_bm = NULL;
+  mod2entry *e, *e_pre;
+  int tmp;
+  int tmp_val;
+  char LLDS[64];
+  char BMR[64];
+  char LRS[64];
+  char BMS[64];
+  const int payload_cols_total = bm_n - bm_m;
+  // Built-in dump-view switch: when enabled, treat QC-192 max K=178 as K=172 in generated dumps only.
+  // 1-based removed payload columns: [173..178] => 0-based [172..177].
+  const int clip_k178_to_k172_en = 0;
+  const int max_k_1b = 178;
+  const int clip_to_k_1b = 172;
+  const int clip_begin_col_0b = clip_to_k_1b;
+  const int clip_end_col_0b = max_k_1b; // exclusive
+  const bool clip_payload_view =
+      (clip_k178_to_k172_en != 0) && (payload_cols_total >= max_k_1b) && (clip_to_k_1b < max_k_1b);
+  const int clip_cols = clip_payload_view ? (clip_end_col_0b - clip_begin_col_0b) : 0;
+  const int payload_cols_effective = payload_cols_total - clip_cols;
+  const int bm_n_effective = bm_n - clip_cols;
+  auto src_col_to_view = [&](int src_col) -> int {
+    if (!clip_payload_view)
+      return src_col;
+    if (src_col < clip_begin_col_0b)
+      return src_col;
+    if (src_col < clip_end_col_0b)
+      return -1;
+    return src_col - clip_cols;
+  };
+  auto view_col_to_src = [&](int view_col) -> int {
+    if (!clip_payload_view)
+      return view_col;
+    if (view_col < clip_begin_col_0b)
+      return view_col;
+    return view_col + clip_cols;
+  };
+  if ((clip_k178_to_k172_en != 0) && (payload_cols_total < max_k_1b)) {
+    printf("[LDPC Warning] print_hm_192 clip requested but payload_cols_total=%d < %d; clip disabled\n",
+           payload_cols_total, max_k_1b);
+  }
+
+  snprintf(LLDS, sizeof(LLDS), "./output/lldec_sched_%dx%dex%d_w%d.txt", bm_m, bm_n_effective, cir_sz, col_wt);
+  snprintf(BMR, sizeof(BMR), "./output/HM_ROW_order_192v_%dx%dex%d_w%d.txt", bm_m, bm_n_effective, cir_sz, col_wt);
+  snprintf(LRS, sizeof(LRS), "./output/rdec_sched_192v_%dx%dex%d_w%d.txt", bm_m, bm_n_effective, cir_sz, col_wt);
+  snprintf(BMS, sizeof(BMS), "./output/bm_schematic_192v_%dx%dex%d_w%d.txt", bm_m, bm_n_effective, cir_sz, col_wt);
+
+  printf("[LDPC] Dump LLDEC scheduler (192v) to file %s\n", LLDS);
+  printf("[LDPC] Dump layer decoder scheduler (192v) to file %s\n", LRS);
+  printf("[LDPC] Dump base-matrix schematic (192v) to file %s\n", BMS);
+
+  fp = fopen(LLDS, "w");
+  if (!fp) {
+    printf("[LDPC Warning] Failed to open %s for write\n", LLDS);
+  } else {
+    for (int view_col = 0; view_col < bm_n_effective; view_col++) {
+      const int col = view_col_to_src(view_col);
+      int occ_shift[4], occ_row[4];
+      int occ_cnt = 0;
+      int fade_row_val = 0x3F;
+      int fade_shift_val = 0xFF;
+
+      for (int row = 0; row < bm_m; row++) {
+        if (h_matrix.occupied[row][col]) {
+          if (occ_cnt < 4) {
+            occ_shift[occ_cnt] = h_matrix.element[row][col];
+            occ_row[occ_cnt] = row;
+            occ_cnt++;
+          } else {
+            printf("[LDPC Warning] LLDEC: col %d has >4 occupied entries, skipping row %d\n", col, row);
+          }
+        }
+        if (h_matrix.fade[row][col]) {
+          fade_row_val = row;
+          fade_shift_val = h_matrix.element[row][col];
+        }
+      }
+
+      for (int s = occ_cnt; s < 4; s++) {
+        occ_shift[s] = 0xFF;
+        occ_row[s] = 0x3F;
+      }
+
+      // Pack 70 bits:
+      // [7:0]   shift0     (8b)
+      // [15:8]  shift1     (8b)
+      // [23:16] shift2     (8b)
+      // [31:24] shift3     (8b)
+      // [39:32] fade_shift (8b)
+      // [45:40] CPM0       (6b)
+      // [51:46] CPM1       (6b)
+      // [57:52] CPM2       (6b)
+      // [63:58] CPM3       (6b)
+      // [69:64] fade_row   (6b)
+      unsigned __int128 word = 0;
+      word |= (unsigned __int128)(occ_shift[0] & 0xFF);
+      word |= (unsigned __int128)(occ_shift[1] & 0xFF) << 8;
+      word |= (unsigned __int128)(occ_shift[2] & 0xFF) << 16;
+      word |= (unsigned __int128)(occ_shift[3] & 0xFF) << 24;
+      word |= (unsigned __int128)(fade_shift_val & 0xFF) << 32;
+      word |= (unsigned __int128)(occ_row[0] & 0x3F) << 40;
+      word |= (unsigned __int128)(occ_row[1] & 0x3F) << 46;
+      word |= (unsigned __int128)(occ_row[2] & 0x3F) << 52;
+      word |= (unsigned __int128)(occ_row[3] & 0x3F) << 58;
+      word |= (unsigned __int128)(fade_row_val & 0x3F) << 64;
+
+      const unsigned long long word_hi = (unsigned long long)(word >> 64);
+      const unsigned long long word_lo = (unsigned long long)word;
+      fprintf(fp, "8'd%-4d:mmem_rdt=72'h%02llX%016llX;\n", view_col, word_hi, word_lo);
+    }
+    fclose(fp);
+    fp = NULL;
+    printf("[LDPC] LLDEC (192v) done: %d columns (clip_k178_to_k172=%d)\n", bm_n_effective, clip_payload_view ? 1 : 0);
+  }
+
+  fp_bm = fopen(BMS, "w");
+  if (fp_bm != NULL) {
+    const int base_payload_cols = payload_cols_effective;
+    const int extra_payload_cols = 0;
+
+    fprintf(fp_bm, "# Base-matrix schematic (bm_m=%d, bm_n=%d, Z=%d)\n", bm_m, bm_n_effective, cir_sz);
+    fprintf(fp_bm, "# Legend: 1=non-zero CPM, 0=zero CPM, X=zero CPM in extra-userdata col (placeholder/skip)\n");
+    fprintf(fp_bm, "# Groups: base_userdata_cols|extra_userdata_cols|parity_cols\n");
+    fprintf(fp_bm, "# base_userdata_cols=%d, extra_userdata_cols=%d, parity_cols=%d\n", base_payload_cols,
+            extra_payload_cols, bm_m);
+    fprintf(fp_bm, "# clip_k178_to_k172=%d, removed_payload_cols_1based=[%d..%d]\n", clip_payload_view ? 1 : 0,
+            clip_begin_col_0b + 1, clip_end_col_0b);
+    fprintf(fp_bm, "# NOTE: extra_bits_of_userdata=%d (lane-level skip in last payload column, not shown per-CPM)\n\n",
+            h_matrix.extra_bits_of_userdata);
+
+    for (int r = 0; r < bm_m; r++) {
+      fprintf(fp_bm, "ROW %2d: ", r);
+
+      for (int c_view = 0; c_view < payload_cols_effective; c_view++) {
+        const int c = view_col_to_src(c_view);
+        const bool nz =
+            (h_matrix.extra_bits_of_parity > 0) ? (h_matrix.element[r][c] >= 0) : (h_matrix.occupied[r][c] == 1);
+        fputc(nz ? '1' : '0', fp_bm);
+      }
+      fputc('|', fp_bm);
+
+      fputc('|', fp_bm);
+
+      for (int c_view = payload_cols_effective; c_view < bm_n_effective; c_view++) {
+        const int c = view_col_to_src(c_view);
+        const bool nz =
+            (h_matrix.extra_bits_of_parity > 0) ? (h_matrix.element[r][c] >= 0) : (h_matrix.occupied[r][c] == 1);
+        fputc(nz ? '1' : '0', fp_bm);
+      }
+      fputc('\n', fp_bm);
+    }
+
+    fprintf(fp_bm, "\n# Fade matrix (bm_m=%d, bm_n=%d, Z=%d)\n", bm_m, bm_n_effective, cir_sz);
+    fprintf(fp_bm, "# Legend: 1=fade CPM, .=non-fade\n");
+    fprintf(fp_bm, "# Groups: base_userdata_cols|extra_userdata_cols|parity_cols\n\n");
+    for (int r = 0; r < bm_m; r++) {
+      fprintf(fp_bm, "ROW %2d: ", r);
+      for (int c_view = 0; c_view < payload_cols_effective; c_view++) {
+        const int c = view_col_to_src(c_view);
+        fputc(h_matrix.fade[r][c] ? '1' : '.', fp_bm);
+      }
+      fputc('|', fp_bm);
+      fputc('|', fp_bm);
+      for (int c_view = payload_cols_effective; c_view < bm_n_effective; c_view++) {
+        const int c = view_col_to_src(c_view);
+        fputc(h_matrix.fade[r][c] ? '1' : '.', fp_bm);
+      }
+      fputc('\n', fp_bm);
+    }
+
+    fprintf(fp_bm, "\n# Base-matrix schematic (fade shown as '*')\n");
+    fprintf(fp_bm,
+            "# Legend: 1=non-zero CPM, 0=zero CPM, X=zero CPM in extra-userdata col (placeholder/skip), *=fade CPM\n");
+    fprintf(fp_bm, "# Groups: base_userdata_cols|extra_userdata_cols|parity_cols\n\n");
+    for (int r = 0; r < bm_m; r++) {
+      fprintf(fp_bm, "ROW %2d: ", r);
+
+      for (int c_view = 0; c_view < payload_cols_effective; c_view++) {
+        const int c = view_col_to_src(c_view);
+        const bool nz =
+            (h_matrix.extra_bits_of_parity > 0) ? (h_matrix.element[r][c] >= 0) : (h_matrix.occupied[r][c] == 1);
+        if (h_matrix.fade[r][c])
+          fputc('*', fp_bm);
+        else
+          fputc(nz ? '1' : '0', fp_bm);
+      }
+      fputc('|', fp_bm);
+
+      fputc('|', fp_bm);
+
+      for (int c_view = payload_cols_effective; c_view < bm_n_effective; c_view++) {
+        const int c = view_col_to_src(c_view);
+        const bool nz =
+            (h_matrix.extra_bits_of_parity > 0) ? (h_matrix.element[r][c] >= 0) : (h_matrix.occupied[r][c] == 1);
+        if (h_matrix.fade[r][c])
+          fputc('*', fp_bm);
+        else
+          fputc(nz ? '1' : '0', fp_bm);
+      }
+      fputc('\n', fp_bm);
+    }
+    fclose(fp_bm);
+  } else {
+    printf("[LDPC Warning] Failed to open %s for write\n", BMS);
+  }
+
+  fp = fopen(BMR, "w");
+  if (fp == NULL) {
+    printf("[LDPC Warning] Failed to open %s for write\n", BMR);
+    return;
+  }
+  fp1 = fopen(LRS, "w");
+  if (fp1 == NULL) {
+    printf("[LDPC Warning] Failed to open %s for write\n", LRS);
+    fclose(fp);
+    return;
+  }
+
+  int *sch_col;
+  int last_in_row;
+  int row_wt, row_dis;
+  int cir_cnt = 0;
+  int sch_out_cnt = 0;
+  const int base_userdata_cols = 64;
+  const int extra_userdata_col_start = base_userdata_cols;
+  const int extra_userdata_col_end = payload_cols_effective;
+  const int extra_userdata_col_cnt = 0;
+  constexpr int rdec_sched_word_bits = 41;
+  const unsigned long long rdec_sched_placeholder_word = 0x1FFFFFFFFFFULL;
+
+  auto get_rdec_mask_meta_192 = [&](int row, int col, uint64_t &mask_flag, int &msk_shift) {
+    mask_flag = 0;
+    msk_shift = 0;
+
+    if ((h_matrix.extra_bits_of_parity <= 0) || (row < 0) || (row >= h_matrix.rows) || (col < 0) ||
+        (col >= h_matrix.cols)) {
+      return;
+    }
+
+    const bool is_fade = h_matrix.fade[row][col];
+    const bool is_last_row_occupied = h_matrix.occupied[row][col] && (row == (h_matrix.rows - 1));
+    if (!is_fade && !is_last_row_occupied)
+      return;
+
+    mask_flag = 1;
+    const int last_row = h_matrix.rows - 1;
+    const int last_row_shift = h_matrix.element[last_row][col];
+    if (last_row_shift >= 0)
+      msk_shift = last_row_shift;
+  };
+
+  int qc_bm_nnz = 0;
+  for (int r = 0; r < bm_m; r++) {
+    for (e = mod2sparse_first_in_row(qc_bm, r); !mod2sparse_at_end(e); e = mod2sparse_next_in_row(e)) {
+      if (src_col_to_view(e->col) < 0)
+        continue;
+      qc_bm_nnz++;
+    }
+  }
+  if (qc_bm_nnz <= 0) {
+    qc_bm_nnz = bm_n * col_wt;
+    printf("[LDPC Warning] qc_bm_nnz not detected, fallback to bm_n*col_wt=%d\n", qc_bm_nnz);
+  }
+  sch_col = (int *)calloc(qc_bm_nnz, sizeof(*sch_col));
+  if (sch_col == NULL) {
+    printf("[LDPC Warning] Failed to allocate RDEC scheduler column log\n");
+    fclose(fp);
+    fclose(fp1);
+    return;
+  }
+
+  for (int i = 0; i < bm_m; i++) {
+    fprintf(fp, "ROW %3d: ", i);
+
+    tmp = 0;
+    row_wt = 0;
+    last_in_row = 0;
+    row_dis = -1;
+
+    const int cmem_hazard_pre_row = (i + bm_m - 1) % bm_m;
+    std::vector<mod2entry *> extra_entry_by_col;
+    if (extra_userdata_col_cnt > 0)
+      extra_entry_by_col.assign(static_cast<size_t>(extra_userdata_col_cnt), (mod2entry *)0);
+
+    for (e = mod2sparse_first_in_row(qc_bm, i); !mod2sparse_at_end(e); e = mod2sparse_next_in_row(e)) {
+      if (src_col_to_view(e->col) < 0)
+        continue;
+      row_wt++;
+      const int e_view_col = src_col_to_view(e->col);
+      if ((extra_userdata_col_cnt > 0) && (e_view_col >= extra_userdata_col_start) && (e_view_col < extra_userdata_col_end))
+        extra_entry_by_col[static_cast<size_t>(e_view_col - extra_userdata_col_start)] = e;
+    }
+
+    auto prev_in_col = [&](mod2entry *cur) -> mod2entry * {
+      mod2entry *p = mod2sparse_prev_in_col(cur);
+      if (mod2sparse_at_end(p))
+        p = mod2sparse_last_in_col(qc_bm, cur->col);
+      return p;
+    };
+
+    std::vector<mod2entry *> non_extra_entries;
+    non_extra_entries.reserve(static_cast<size_t>(row_wt));
+    for (int j = 1; j < bm_m; j++) {
+      for (e = mod2sparse_first_in_row(qc_bm, i); !mod2sparse_at_end(e); e = mod2sparse_next_in_row(e)) {
+        const int e_view_col = src_col_to_view(e->col);
+        if (e_view_col < 0)
+          continue;
+        e_pre = prev_in_col(e);
+        if (e_pre->row == (i + j) % bm_m) {
+          const bool is_extra =
+              (extra_userdata_col_cnt > 0) && (e_view_col >= extra_userdata_col_start) && (e_view_col < extra_userdata_col_end);
+          if (!is_extra)
+            non_extra_entries.push_back(e);
+        }
+      }
+    }
+
+    int extra_insert_pos = 0;
+    if (extra_userdata_col_cnt > 0) {
+      const int non_extra_cnt = static_cast<int>(non_extra_entries.size());
+      if (non_extra_cnt >= 3) {
+        extra_insert_pos = non_extra_cnt - 2;
+      } else if (non_extra_cnt >= 1) {
+        extra_insert_pos = 1;
+      } else {
+        extra_insert_pos = 0;
+      }
+    }
+
+    bool extra_block_emitted = false;
+
+#define RDEC_EMIT_REAL_ENTRY_192(EE)                                                                                   \
+  do {                                                                                                                 \
+    const int ee_view_col = src_col_to_view((EE)->col);                                                               \
+    if (ee_view_col < 0)                                                                                               \
+      break;                                                                                                           \
+    e_pre = prev_in_col((EE));                                                                                         \
+                                                                                                                       \
+    if ((row_dis < 0) && (e_pre->row == cmem_hazard_pre_row))                                                          \
+      row_dis = tmp;                                                                                                   \
+                                                                                                                       \
+    fprintf(fp, "%3d(%3d/%2d) ", ee_view_col, (EE)->shift, e_pre->row);                                                \
+    tmp++;                                                                                                             \
+                                                                                                                       \
+    if (cir_cnt < qc_bm_nnz) {                                                                                         \
+      sch_col[cir_cnt] = ee_view_col;                                                                                  \
+      cir_cnt++;                                                                                                       \
+    } else {                                                                                                           \
+      printf("[LDPC Error] RDEC-scheduler overflow: cir_cnt=%d >= qc_bm_nnz=%d\n", cir_cnt, qc_bm_nnz);                \
+    }                                                                                                                  \
+                                                                                                                       \
+    tmp_val = ((EE)->shift - e_pre->shift + cir_sz) % cir_sz;                                                          \
+                                                                                                                       \
+    if (tmp == (row_wt - 1))                                                                                           \
+      last_in_row = 1;                                                                                                 \
+    else                                                                                                               \
+      last_in_row = 0;                                                                                                 \
+                                                                                                                       \
+    if ((ee_view_col >= (1 << 8)) || ((EE)->shift >= (1 << 8)) || (e_pre->row >= (1 << 6)) || (tmp_val >= (1 << 8))) {   \
+      printf("[LDPC Warning] RDEC-192 scheduler field overflow: row=%d col=%d shift=%d pre_row=%d shift_delta=%d\n", i, \
+             ee_view_col, (EE)->shift, e_pre->row, tmp_val);                                                          \
+    }                                                                                                                  \
+                                                                                                                       \
+    uint64_t mask_flag = 0;                                                                                            \
+    int msk_shift = 0;                                                                                                 \
+    const uint64_t flag_64_extra_userdata =                                                                            \
+        ((extra_userdata_col_cnt > 0) && (ee_view_col >= extra_userdata_col_start) &&                                  \
+         (ee_view_col < extra_userdata_col_end))                                                                       \
+            ? 1u                                                                                                       \
+            : 0u;                                                                                                      \
+    get_rdec_mask_meta_192(i, (EE)->col, mask_flag, msk_shift);                                                       \
+                                                                                                                       \
+    uint64_t sch64 = 0;                                                                                                \
+    sch64 |= (uint64_t(ee_view_col) & 0xFFu);                                                                          \
+    sch64 |= (uint64_t((EE)->shift) & 0xFFu) << 8;                                                                     \
+    sch64 |= (uint64_t(e_pre->row) & 0x3Fu) << 16;                                                                     \
+    sch64 |= (uint64_t(tmp_val) & 0xFFu) << 22;                                                                        \
+    sch64 |= (uint64_t(last_in_row) & 0x1u) << 30;                                                                     \
+    sch64 |= (flag_64_extra_userdata & 0x1u) << 31;                                                                    \
+    sch64 |= (mask_flag & 0x1u) << 32;                                                                                 \
+    sch64 |= (uint64_t(uint32_t(msk_shift) & 0xFFu)) << 33;                                                           \
+                                                                                                                       \
+    const unsigned long long mmem_word = (unsigned long long)(sch64 & ((1ull << rdec_sched_word_bits) - 1));          \
+    const int sch_idx = sch_out_cnt++;                                                                                 \
+    if (sch_idx >= (1 << 10)) {                                                                                        \
+      printf("[LDPC Warning] RDEC-192 scheduler address overflow: sch_idx=%d (needs >10 bits)\n", sch_idx);            \
+    }                                                                                                                  \
+    fprintf(fp1, "10'd%-6d:mmem_rdt=41'h%011llX;\n", sch_idx, mmem_word);                                             \
+  } while (0)
+
+    auto emit_extra_block = [&]() {
+      for (int c = extra_userdata_col_start; c < extra_userdata_col_end; c++) {
+        mod2entry *e_extra = extra_entry_by_col[static_cast<size_t>(c - extra_userdata_col_start)];
+        if (e_extra) {
+          RDEC_EMIT_REAL_ENTRY_192(e_extra);
+        } else {
+          const int sch_idx = sch_out_cnt++;
+          const unsigned long long mmem_word = rdec_sched_placeholder_word;
+          if (sch_idx >= (1 << 10))
+            printf("[LDPC Warning] RDEC-192 scheduler address overflow: sch_idx=%d (needs >10 bits)\n", sch_idx);
+          fprintf(fp1, "10'd%-6d:mmem_rdt=41'h%011llX;\n", sch_idx, mmem_word);
+        }
+      }
+    };
+
+    for (int idx = 0; idx <= static_cast<int>(non_extra_entries.size()); idx++) {
+      if (!extra_block_emitted && (extra_userdata_col_cnt > 0) && (idx == extra_insert_pos)) {
+        emit_extra_block();
+        extra_block_emitted = true;
+      }
+
+      if (idx < static_cast<int>(non_extra_entries.size()))
+        RDEC_EMIT_REAL_ENTRY_192(non_extra_entries[static_cast<size_t>(idx)]);
+    }
+
+    if (!extra_block_emitted && (extra_userdata_col_cnt > 0)) {
+      emit_extra_block();
+      extra_block_emitted = true;
+    }
+
+    if (row_dis < 0)
+      row_dis = row_wt;
+    if (row_dis <= rdec_cmem_cont_thrshd)
+      printf("[LDPC Error] RDEC-192 scheduler violation of C-MEM constraint!\n");
+
+    fprintf(fp, "(row_wt = %d, row distance = %d)\n", row_wt, row_dis);
+
+#undef RDEC_EMIT_REAL_ENTRY_192
+  }
+
+  if (cir_cnt > 0) {
+    for (int i = 0; i < cir_cnt; i++) {
+      for (int j = 1; j <= rdec_hdmem_cont_thrshd; j++) {
+        if (sch_col[i] == sch_col[(i + cir_cnt - j) % cir_cnt])
+          printf("[LDPC Error] RDEC-192 scheduler violation of HD-MEM constraint!\n");
+      }
+    }
+  }
+
+  free(sch_col);
+  fclose(fp);
+  fclose(fp1);
+}
+
 /*
 void ldpc_packet::print_hm()
 {

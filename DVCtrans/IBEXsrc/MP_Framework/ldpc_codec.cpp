@@ -181,6 +181,44 @@ static char dvc_hex_digit(unsigned int val) {
   static const char kHex[] = "0123456789ABCDEF";
   return kHex[val & 0xF];
 }
+
+static void dvc_dump_hard_bits_hex128(const char *path, const char *bits,
+                                      int nbits) {
+  if (!path || !bits || nbits <= 0)
+    return;
+
+  dvc_ensure_output_c_code_dir();
+  FILE *fp = fopen(path, "w");
+  if (!fp) {
+    printf("[LDPC WARN] failed to open hard-decision dump: %s\n", path);
+    return;
+  }
+
+  const int bits_per_line = 128;
+  for (int base = 0; base < nbits; base += bits_per_line) {
+    const int line_bits = std::min(bits_per_line, nbits - base);
+    unsigned int nibble = 0;
+    int nibble_bits = 0;
+
+    for (int i = 0; i < line_bits; i++) {
+      nibble = (nibble << 1) | (unsigned int)(bits[base + i] & 1);
+      nibble_bits++;
+      if (nibble_bits == 4) {
+        fputc(dvc_hex_digit(nibble), fp);
+        nibble = 0;
+        nibble_bits = 0;
+      }
+    }
+
+    if (nibble_bits != 0) {
+      nibble <<= (4 - nibble_bits);
+      fputc(dvc_hex_digit(nibble), fp);
+    }
+    fputc('\n', fp);
+  }
+
+  fclose(fp);
+}
 #endif
 
 #ifdef _LDPC_DBG_DUMP
@@ -2486,6 +2524,9 @@ void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt) {
     char occupied_path[512] = "";
     char fade_path[512] = "";
     char source_desc[512] = "";
+    char source_occupied_desc[512] = "";
+    char source_fade_desc[512] = "";
+    char source_root_desc[512] = "";
     FILE *fp_h = NULL;
     FILE *fp_occupied = NULL;
     FILE *fp_fade = NULL;
@@ -2648,6 +2689,10 @@ void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt) {
 
         source_cols = read_cols;
         snprintf(source_desc, sizeof(source_desc), "%s", matrix_path);
+        snprintf(source_occupied_desc, sizeof(source_occupied_desc), "%s",
+                 occupied_path);
+        snprintf(source_fade_desc, sizeof(source_fade_desc), "%s", fade_path);
+        snprintf(source_root_desc, sizeof(source_root_desc), "%s", root);
         source_ok = 1;
         break;
       }
@@ -2667,6 +2712,10 @@ void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt) {
       printf("[LDPC] Matrix trimming: read %dx%d, trim to %dx%d (K %d->%d)\n",
              h_matrix.rows, source_cols, h_matrix.rows, h_matrix.cols,
              source_cols - h_matrix.rows, h_matrix.cols - h_matrix.rows);
+    printf("[LDPC] Matrix source root: %s\n", source_root_desc);
+    printf("[LDPC] Matrix path: %s\n", source_desc);
+    printf("[LDPC] Occupied path: %s\n", source_occupied_desc);
+    printf("[LDPC] Fade path: %s\n", source_fade_desc);
 
     for (i = 0; i < h_matrix.rows; i++) {
       for (j = 0; j < h_matrix.cols; j++) {
@@ -2995,10 +3044,14 @@ void ldpc_packet::ldpc_ibex_parameters(
 // LDPC decoder config
 void ldpc_packet::ldpc_dec_config(int max_fdec_itr, int fdec_col_skip,
                                   int max_ldec_itr, float dec_alpha,
-                                  int fin_mode, int fin_q_num, int fin_r_num,
-                                  int fin_f_num, int sdlite_llr_config,
-                                  int sdlite_llr0, int sdlite_llr1,
-                                  int sdlite_llr2, int sdlite_llr3) {
+                                  const float *dec_alpha_pms,
+                                  const float *dec_beta_pms,
+                                  float dec_point1, float dec_point2,
+                                  int dec_pms_lut_len, int fin_mode,
+                                  int fin_q_num, int fin_r_num, int fin_f_num,
+                                  int sdlite_llr_config, int sdlite_llr0,
+                                  int sdlite_llr1, int sdlite_llr2,
+                                  int sdlite_llr3) {
   // syndrome weight
   init_synd_wt_min = hm_m;
   init_synd_wt_max = 0;
@@ -3019,6 +3072,26 @@ void ldpc_packet::ldpc_dec_config(int max_fdec_itr, int fdec_col_skip,
   }
 
   alpha = dec_alpha;
+  for (int i = 0; i < LDPC_PMS_LUT_SIZE; i++) {
+    alpha_pms[i] = dec_alpha;
+    beta_pms[i] = 0.0f;
+  }
+  if ((dec_alpha_pms != nullptr) && (dec_pms_lut_len > 0)) {
+    int valid_cnt = dec_pms_lut_len;
+    if (valid_cnt > LDPC_PMS_LUT_SIZE)
+      valid_cnt = LDPC_PMS_LUT_SIZE;
+    for (int i = 0; i < valid_cnt; i++)
+      alpha_pms[i] = dec_alpha_pms[i];
+  }
+  if ((dec_beta_pms != nullptr) && (dec_pms_lut_len > 0)) {
+    int valid_cnt = dec_pms_lut_len;
+    if (valid_cnt > LDPC_PMS_LUT_SIZE)
+      valid_cnt = LDPC_PMS_LUT_SIZE;
+    for (int i = 0; i < valid_cnt; i++)
+      beta_pms[i] = dec_beta_pms[i];
+  }
+  point1 = dec_point1;
+  point2 = dec_point2;
 
   // initialize quantization
   finite_mode = fin_mode;
@@ -3569,6 +3642,59 @@ s_hard_codeword ldpc_packet::f_ldpc_encode(s_hard_codeword ldpc_encoder_input,
   return vn;
 }
 
+// [DVC IBEX PROOF] Dump a bit buffer (`bits[0..len-1]`, each char !=0 treated as 1)
+// matching DV SV `$displayh(logic[N-1:0] data)` big-integer convention:
+//   - bits[i] goes to logical bit `i` of the integer (LSB-first: word bit(i&31))
+//   - The full row is printed MSB → LSB, so word0 ends up RIGHTMOST, word15 LEFTMOST.
+//     Example: bits[0..3]=1,1,1,0 and the rest = 0 → row = "00000000...00000007".
+// One row = 16 words = 512 bits = one cir_sz=512 circulant column.
+static void dvc_proof_dump_bits_hex_rows(const char *tag, const char *bits,
+                                         int len) {
+  if (!bits || len <= 0) {
+    printf("[DVC IBEX PROOF] %s: <empty> len=%d\n", tag ? tag : "?", len);
+    return;
+  }
+  unsigned int words[16] = {0};
+  int word_idx = 0;
+  int row_idx = 0;
+  int start_bit = 0;
+  int i;
+  for (i = 0; i < len; i++) {
+    if (bits[i] & 1)
+      words[word_idx] |= (1u << (i & 31));
+    if (((i + 1) & 31) == 0) {
+      word_idx++;
+      if (word_idx == 16) {
+        char row[16 * 8 + 1];
+        int pos = 0;
+        // word0 is rightmost in the big-integer view → emit in reverse.
+        for (int w = 15; w >= 0; w--)
+          pos += snprintf(row + pos, sizeof(row) - pos, "%08x", words[w]);
+        row[pos] = '\0';
+        printf("[DVC IBEX PROOF] %s row%03d [bit %05d..%05d]: %s\n", tag,
+               row_idx, start_bit, i, row);
+        row_idx++;
+        for (int w = 0; w < 16; w++)
+          words[w] = 0;
+        word_idx = 0;
+        start_bit += 512;
+      }
+    }
+  }
+  // Tail: include any partial word, then flush remaining words in reverse order.
+  if ((i & 31) != 0)
+    word_idx++;
+  if (word_idx > 0) {
+    char row[16 * 8 + 1];
+    int pos = 0;
+    for (int w = word_idx - 1; w >= 0; w--)
+      pos += snprintf(row + pos, sizeof(row) - pos, "%08x", words[w]);
+    row[pos] = '\0';
+    printf("[DVC IBEX PROOF] %s row%03d [bit %05d..%05d]: %s\n", tag, row_idx,
+           start_bit, len - 1, row);
+  }
+}
+
 void ldpc_packet::ldpc_decoder(enum dec_model dec_mode) {
   // add 0 padding
   if ((dec_mode != BF_IBEX) && (dec_mode != BF_IBEX_RTL_CN) &&
@@ -3629,6 +3755,28 @@ void ldpc_packet::ldpc_decoder(enum dec_model dec_mode) {
     }
   } else {
     vec_copy(det_blk, dec_di_blk, info_len, hm_k, hm_m);
+  }
+
+  // [DVC IBEX PROOF] Right before dispatch, dump what the decoder is actually
+  // about to see. Compare three logs end-to-end to pinpoint where data drifts:
+  //   (1) DV SV-side TX/err_data print
+  //   (2) ldpc_c_model.c ldpc_dec entry "err_data row..." dump
+  //   (3) THIS dump (det_blk + dec_di_blk right before the decoder runs)
+  // All three should be bit-identical on the payload bits; any divergence
+  // localizes the bug to the segment between consecutive prints.
+  {
+    printf("[DVC IBEX PROOF] ldpc_decoder dispatch: dec_mode=%d info_len=%d "
+           "pad_len=%d blk_len=%d hm_k=%d hm_m=%d hm_n=%d max_llr_bin=%d\n",
+           (int)dec_mode, info_len, pad_len, blk_len, hm_k, hm_m, hm_n,
+           max_llr_bin);
+    dvc_proof_dump_bits_hex_rows("det_blk", det_blk, blk_len);
+    dvc_proof_dump_bits_hex_rows("dec_di_blk", dec_di_blk, hm_n);
+    if ((dec_mode == BF_IBEX) || (dec_mode == BF_IBEX_RTL_CN)) {
+      printf("[DVC IBEX PROOF] NOTE: BF_IBEX path reads corrupted_codeword "
+             "(populated by ldpc_ibex_input from rx_blk/det_blk), not "
+             "dec_di_blk; the dec_di_blk view above is the stale "
+             "pre-dispatch content and is NOT what BF_IBEX decodes.\n");
+    }
   }
 
   if (dec_mode == SKIP)
@@ -4385,8 +4533,8 @@ void ldpc_packet::ldpc_dec_layer() {
 } // ldpc_dec_layer
 
 void ldpc_packet::ldpc_dec_layer2() {
-#ifdef _LDPC_DEBUG_DUMP
-  FILE *cfp, *sfp, *hdfp, *lfp;
+#ifdef _ldpc_debug_dump
+  file *cfp, *sfp, *hdfp, *lfp;
   int stmp, vtmp;
   dvc_ensure_output_c_code_dir();
   char cmem_dump[50] = "./output/c_code/rdec_cmem_dump.txt";
@@ -4398,26 +4546,26 @@ void ldpc_packet::ldpc_dec_layer2() {
   hdfp = fopen(hdmem_dump, "w");
   lfp = fopen(log_dump, "w");
 
-  // One-time probe to help align dump vs RTL when a specific column seems
-  // missing. Keep it short: list whether target_col exists in each layer's
+  // one-time probe to help align dump vs rtl when a specific column seems
+  // missing. keep it short: list whether target_col exists in each layer's
   // schedule.
   if (lfp) {
     const int target_col = 73;
-    fprintf(lfp, "[DVC] qc_bm col probe: target_col=%d bm_m=%d bm_n=%d\n",
+    fprintf(lfp, "[dvc] qc_bm col probe: target_col=%d bm_m=%d bm_n=%d\n",
             target_col, bm_m, bm_n);
     for (int rr = 0; rr < bm_m; rr++) {
       int found = 0;
       for (mod2entry *ee = mod2sparse_first_in_row(qc_bm, rr);
            !mod2sparse_at_end(ee); ee = mod2sparse_next_in_row(ee)) {
         if (ee->col == target_col) {
-          fprintf(lfp, "[DVC] layer=%d has col=%d shift=%d\n", rr, ee->col,
+          fprintf(lfp, "[dvc] layer=%d has col=%d shift=%d\n", rr, ee->col,
                   ee->shift);
           found = 1;
           break;
         }
       }
       if (!found)
-        fprintf(lfp, "[DVC] layer=%d missing col=%d\n", rr, target_col);
+        fprintf(lfp, "[dvc] layer=%d missing col=%d\n", rr, target_col);
     }
     fflush(lfp);
   }
@@ -4436,16 +4584,16 @@ void ldpc_packet::ldpc_dec_layer2() {
   struct cn_msg *cn_c_updt_cur; // current layer check node msg to be updt
   struct cn_msg *cn_c_sel_cur;  // current layer check node msg
   struct cn_msg *cn_c_sel_pre;  // previous layer check node msg
-  float **cn_q_mem;             // Q mem in CN order of previous layer
-  float *cn_q_sel_pre; // Q msg of the select circulant from previous layer
-  float *cn_r_new_pre; // New R msg in CN order of previous layer
-  float *cn_app_pre;   // APP = Q + R_new in CN order of previous layer
-  float *cn_app_cur;   // APP = Q + R_new in CN order of current layer
-  float *cn_q_sel_cur; // Q msg of the select circulant from current layer
-  float *cn_r_old_cur; // old R msg in CN order of previous layer
+  float **cn_q_mem;             // q mem in cn order of previous layer
+  float *cn_q_sel_pre; // q msg of the select circulant from previous layer
+  float *cn_r_new_pre; // new r msg in cn order of previous layer
+  float *cn_app_pre;   // app = q + r_new in cn order of previous layer
+  float *cn_app_cur;   // app = q + r_new in cn order of current layer
+  float *cn_q_sel_cur; // q msg of the select circulant from current layer
+  float *cn_r_old_cur; // old r msg in cn order of previous layer
   float
-      *cn_q_updt_cur; // Updated Q msg of the select circulant in current layer
-  int **cn_q_sign;    // Q sign
+      *cn_q_updt_cur; // updated q msg of the select circulant in current layer
+  int **cn_q_sign;    // q sign
 
   char *layer_synd;
   char *cn_dec_hd;
@@ -4454,7 +4602,7 @@ void ldpc_packet::ldpc_dec_layer2() {
   int layer_synd_wt;
   int synd_pass_cnt = 0;
   int hd_stable_cnt = 0;
-#ifdef _LDPC_DEBUG_DUMP
+#ifdef _ldpc_debug_dump
   int dbg_converged_printed = 0;
 #endif
 
@@ -4498,22 +4646,23 @@ void ldpc_packet::ldpc_dec_layer2() {
       llr_tbl[2] = reg_sdlite_llr2 * pow(2, -1 * finite_f_num);
       llr_tbl[3] = reg_sdlite_llr3 * pow(2, -1 * finite_f_num);
     } else {
-      printf("[LDPC WARN] SDLite LLR override ignored (llr_tbl=%p bin_num=%d, "
+      printf("[ldpc warn] sdlite llr override ignored (llr_tbl=%p bin_num=%d, "
              "need >=4)\n",
              llr_tbl, bin_num);
     }
   }
 
-  {
-    char *hard_init = (char *)calloc(hm_n, sizeof(*hard_init));
-    if (hard_init) {
-      dvc_bins_to_hard_bits(dec_di_blk, hard_init, hm_n, llr_tbl, bin_num);
-      init_synd_wt = dvc_ibex_syndrome_weight(this, hard_init);
-      init_synd_wt_min = std::min(init_synd_wt_min, init_synd_wt);
-      init_synd_wt_max = std::max(init_synd_wt_max, init_synd_wt);
-      free(hard_init);
-    }
-  }
+  // {
+  //   char *hard_init = (char *)calloc(hm_n, sizeof(*hard_init));
+  //   if (hard_init) {
+  //     dvc_bins_to_hard_bits(dec_di_blk, hard_init, hm_n, llr_tbl, bin_num);
+  //     init_synd_wt = dvc_ibex_syndrome_weight(this, hard_init);
+  //     init_synd_wt_min = std::min(init_synd_wt_min, init_synd_wt);
+  //     init_synd_wt_max = std::max(init_synd_wt_max, init_synd_wt);
+  //     free(hard_init);
+  //   }
+  // }
+
 
   for (int i = 0; i < bm_n; i++) {
     for (int j = 0; j < cir_sz; j++) {
@@ -4525,30 +4674,32 @@ void ldpc_packet::ldpc_dec_layer2() {
     }
   }
 
-  // iterative decoding
+  // iterative decoding starts from iter1 (iter0 is init syndrome only).
   for (int itr = 0;
        (itr <= ldec_max_itr) && ((ldec_early_term_en == 0) || (cw_fail == 1));
        itr++) {
-    // Q sign mem index
+    // q sign mem index
     cir_cnt = 0;
 
     // layer decoding
     for (int layer = 0;
          layer < bm_m && ((ldec_early_term_en == 0) || (cw_fail == 1));
          layer++) {
-      // initilize HD mem
+      int last_nz_col = -1;
+      int last_nz_shift = -1;
+      // initilize hd mem
       hd_init = (vec_sum(dec_init, bm_n) != 0);
 
-#ifdef _LDPC_DEBUG_DUMP
-      printf("[LDPC DEBUG] Layer decoding @ iteration %d, layer %d ...\n", itr,
+#ifdef _ldpc_debug_dump
+      printf("[ldpc debug] layer decoding @ iteration %d, layer %d ...\n", itr,
              layer);
 #endif
 
-      // init current layer C-MSG
-      // C-MSG of previous iteration
+      // init current layer c-msg
+      // c-msg of previous iteration
 
       cn_c_sel_cur = cn_c_mem[layer];
-      // C-MSG to be updt
+      // c-msg to be updt
       for (int i = 0; i < cir_sz; i++) {
         cn_c_updt_cur[i].min1_val = 100000;
         cn_c_updt_cur[i].min2_val = 100000;
@@ -4556,16 +4707,18 @@ void ldpc_packet::ldpc_dec_layer2() {
         cn_c_updt_cur[i].sign_tot = 1;
       }
 
-      // Earlier termination init
+      // earlier termination init
       hd_updated = 0;
       vec_clr(layer_synd, cir_sz);
 
-      // Per circulant of the layer
+      // per circulant of the layer
       for (e = mod2sparse_first_in_row(qc_bm, layer);
            !mod2sparse_at_end(e) &&
            ((ldec_early_term_en == 0) || (cw_fail == 1));
            e = mod2sparse_next_in_row(e)) {
-        // read Q from the previous layer of the selected column
+        last_nz_col = e->col;
+        last_nz_shift = e->shift;
+        // read q from the previous layer of the selected column
         cn_q_sel_pre = cn_q_mem[e->col];
 
         // find out the previous layer of select column
@@ -4573,14 +4726,14 @@ void ldpc_packet::ldpc_dec_layer2() {
         if (mod2sparse_at_end(e_pre))
           e_pre = mod2sparse_last_in_col(qc_bm, e->col);
 
-        cn_c_sel_pre = cn_c_mem[e_pre->row]; // read previous layer C msg
+        cn_c_sel_pre = cn_c_mem[e_pre->row]; // read previous layer c msg
 
-        // cal Rnew and APP
+        // cal rnew and app
         for (int i = 0; i < cir_sz; i++) {
-          // Qmsg sign
+          // qmsg sign
           sign_tmp = (cn_q_sel_pre[i] >= 0) ? 1 : -1;
 
-          // Rnew
+          // rnew
           if (cn_c_sel_pre[i].min1_pos == e->col)
             cn_r_new_pre[i] =
                 cn_c_sel_pre[i].min2_val * cn_c_sel_pre[i].sign_tot * sign_tmp;
@@ -4588,7 +4741,7 @@ void ldpc_packet::ldpc_dec_layer2() {
             cn_r_new_pre[i] =
                 cn_c_sel_pre[i].min1_val * cn_c_sel_pre[i].sign_tot * sign_tmp;
 
-          // APP in CN order of previous layer
+          // app in cn order of previous layer
           if (h_matrix.extra_bytes_of_parity == 0) {
             cn_app_pre[i] = cn_r_new_pre[i] + cn_q_sel_pre[i];
           } else {
@@ -4606,7 +4759,7 @@ void ldpc_packet::ldpc_dec_layer2() {
               cn_app_pre[i] = cn_q_sel_pre[i];
           }
 
-          // Quantization
+          // quantization
           if (finite_mode == 1) {
             cn_app_pre[i] =
                 (float)Sat_Quan((double)cn_app_pre[i], finite_q_max,
@@ -4614,8 +4767,8 @@ void ldpc_packet::ldpc_dec_layer2() {
           }
         }
 
-        // APP shift
-        // when decoder initilized, Q msg are in VN order
+        // app shift
+        // when decoder initilized, q msg are in vn order
         if (dec_init[e->col] == 1) {
           shift_val1 = e->shift;
           shift_val2 = 0;
@@ -4631,12 +4784,12 @@ void ldpc_packet::ldpc_dec_layer2() {
               cn_app_pre[(i + shift_val2 + cir_sz) % cir_sz] >= 0 ? 0 : 1;
         }
 
-#ifdef _LDPC_DEBUG_DUMP
+#ifdef _ldpc_debug_dump
         if (lfp) {
-          fprintf(lfp, "ITR%2d/LAYER%2d/COL%2d: \n", itr, layer, e->col);
+          fprintf(lfp, "itr%2d/layer%2d/col%2d: \n", itr, layer, e->col);
           const int dump_groups_8 = (cir_sz + 7) / 8;
           for (int gi = 0; gi < dump_groups_8; gi++) {
-            fprintf(lfp, "Q PRE MSG:");
+            fprintf(lfp, "q pre msg:");
             for (int gj = 0; gj < 8; gj++) {
               const int idx = gi * 8 + gj;
               if (idx >= cir_sz)
@@ -4644,16 +4797,16 @@ void ldpc_packet::ldpc_dec_layer2() {
               vtmp = int(cn_q_sel_pre[idx] * pow(2, finite_f_num));
               if (vtmp < 0) {
                 vtmp = -vtmp;
-                fprintf(lfp, " %3d-%2X", idx, vtmp);
+                fprintf(lfp, " %3d-%2x", idx, vtmp);
               } else {
-                fprintf(lfp, " %3d+%2X", idx, vtmp);
+                fprintf(lfp, " %3d+%2x", idx, vtmp);
               }
             }
             fprintf(lfp, "\n");
           }
 
           for (int gi = 0; gi < dump_groups_8; gi++) {
-            fprintf(lfp, "R NEW MSG:");
+            fprintf(lfp, "r new msg:");
             for (int gj = 0; gj < 8; gj++) {
               const int idx = gi * 8 + gj;
               if (idx >= cir_sz)
@@ -4661,16 +4814,16 @@ void ldpc_packet::ldpc_dec_layer2() {
               vtmp = int(cn_r_new_pre[idx] * pow(2, finite_f_num));
               if (vtmp < 0) {
                 vtmp = -vtmp;
-                fprintf(lfp, " %3d-%2X", idx, vtmp);
+                fprintf(lfp, " %3d-%2x", idx, vtmp);
               } else {
-                fprintf(lfp, " %3d+%2X", idx, vtmp);
+                fprintf(lfp, " %3d+%2x", idx, vtmp);
               }
             }
             fprintf(lfp, "\n");
           }
 
           for (int gi = 0; gi < dump_groups_8; gi++) {
-            fprintf(lfp, "APP-C MSG:");
+            fprintf(lfp, "app-c msg:");
             for (int gj = 0; gj < 8; gj++) {
               const int idx = gi * 8 + gj;
               if (idx >= cir_sz)
@@ -4678,16 +4831,16 @@ void ldpc_packet::ldpc_dec_layer2() {
               vtmp = int(cn_app_pre[idx] * pow(2, finite_f_num));
               if (vtmp < 0) {
                 vtmp = -vtmp;
-                fprintf(lfp, " %3d-%2X", idx, vtmp);
+                fprintf(lfp, " %3d-%2x", idx, vtmp);
               } else {
-                fprintf(lfp, " %3d+%2X", idx, vtmp);
+                fprintf(lfp, " %3d+%2x", idx, vtmp);
               }
             }
             fprintf(lfp, "\n");
           }
 
           for (int gi = 0; gi < dump_groups_8; gi++) {
-            fprintf(lfp, "APP-S MSG:");
+            fprintf(lfp, "app-s msg:");
             for (int gj = 0; gj < 8; gj++) {
               const int idx = gi * 8 + gj;
               if (idx >= cir_sz)
@@ -4695,9 +4848,9 @@ void ldpc_packet::ldpc_dec_layer2() {
               vtmp = int(cn_app_cur[idx] * pow(2, finite_f_num));
               if (vtmp < 0) {
                 vtmp = -vtmp;
-                fprintf(lfp, " %3d-%2X", idx, vtmp);
+                fprintf(lfp, " %3d-%2x", idx, vtmp);
               } else {
-                fprintf(lfp, " %3d+%2X", idx, vtmp);
+                fprintf(lfp, " %3d+%2x", idx, vtmp);
               }
             }
             fprintf(lfp, "\n");
@@ -4705,17 +4858,17 @@ void ldpc_packet::ldpc_dec_layer2() {
         }
 #endif
 
-        // CW converge check logic per circulant
-        // 1. check if HD updated
+        // cw converge check logic per circulant
+        // 1. check if hd updated
         if (hd_updated == 0)
           if (vec_cmp(dec_do_blk, vn_dec_hd, e->col * cir_sz, 0, cir_sz) == 1)
             hd_updated = 1;
 
-#ifdef _LDPC_DEBUG_DUMP
+#ifdef _ldpc_debug_dump
         if (lfp) {
           for (int i = 0; i < cir_sz; i++) {
             if (dec_do_blk[e->col * cir_sz + i] != vn_dec_hd[i]) {
-              fprintf(lfp, "ITR%2d/LAYER%2d/COL%2d: flip bit %d (%d-->%d)\n",
+              fprintf(lfp, "itr%2d/layer%2d/col%2d: flip bit %d (%d-->%d)\n",
                       itr, layer, e->col, i, dec_do_blk[e->col * cir_sz + i],
                       vn_dec_hd[i]);
             }
@@ -4724,9 +4877,9 @@ void ldpc_packet::ldpc_dec_layer2() {
 #endif
         vec_copy(vn_dec_hd, dec_do_blk, 0, e->col * cir_sz, cir_sz);
 
-#ifdef _LDPC_DEBUG_DUMP
+#ifdef _ldpc_debug_dump
         if (hdfp) {
-          fprintf(hdfp, "ITR%2d/LAYER%2d/COL%2d: ", itr, layer, e->col);
+          fprintf(hdfp, "itr%2d/layer%2d/col%2d: ", itr, layer, e->col);
           for (int i = cir_sz / 4 - 1; i >= 0; i--) {
             stmp = 0;
             for (int j = 3; j >= 0; j--)
@@ -4758,7 +4911,7 @@ void ldpc_packet::ldpc_dec_layer2() {
           vec_mod2_add(cn_dec_hd, layer_synd, layer_synd, cir_sz);
         }
 
-        // calculate R_old and current Q, update current layer C and Q
+        // calculate r_old and current q, update current layer c and q
         for (int i = 0; i < cir_sz; i++) {
           if (cn_c_sel_cur[i].min1_pos == e->col)
             cn_r_old_cur[i] = cn_c_sel_cur[i].min2_val *
@@ -4767,7 +4920,7 @@ void ldpc_packet::ldpc_dec_layer2() {
             cn_r_old_cur[i] = cn_c_sel_cur[i].min1_val *
                               cn_c_sel_cur[i].sign_tot * cn_q_sign[cir_cnt][i];
 
-          // Q -= Rold
+          // q -= rold
           if (h_matrix.extra_bytes_of_parity == 0) {
             cn_q_updt_cur[i] = cn_app_cur[i] - cn_r_old_cur[i];
           } else {
@@ -4783,14 +4936,14 @@ void ldpc_packet::ldpc_dec_layer2() {
             cn_q_updt_cur[i] = cn_app_cur[i] - cn_r_old_cur[i];
           }
 
-          // Quantization
+          // quantization
           if (finite_mode == 1) {
             cn_q_updt_cur[i] =
                 (float)Sat_Quan((double)cn_q_updt_cur[i], finite_q_max,
                                 finite_q_min, finite_q_num, finite_f_num);
           }
 
-          // update C
+          // update c
           if (h_matrix.extra_bytes_of_parity == 0) {
             sign_tmp = (cn_q_updt_cur[i] >= 0) ? 1 : -1;
             val_tmp = cn_q_updt_cur[i] * sign_tmp;
@@ -4824,16 +4977,16 @@ void ldpc_packet::ldpc_dec_layer2() {
           cn_q_sign[cir_cnt][i] = sign_tmp;
         }
 
-        // update Q memory
+        // update q memory
         for (int i = 0; i < cir_sz; i++) {
           cn_q_mem[e->col][i] = cn_q_updt_cur[i];
         }
 
-#ifdef _LDPC_DEBUG_DUMP
+#ifdef _ldpc_debug_dump
         if (lfp) {
           const int dump_groups_8 = (cir_sz + 7) / 8;
           for (int gi = 0; gi < dump_groups_8; gi++) {
-            fprintf(lfp, "R OLD MSG:");
+            fprintf(lfp, "r old msg:");
             for (int gj = 0; gj < 8; gj++) {
               const int idx = gi * 8 + gj;
               if (idx >= cir_sz)
@@ -4841,16 +4994,16 @@ void ldpc_packet::ldpc_dec_layer2() {
               vtmp = int(cn_r_old_cur[idx] * pow(2, finite_f_num));
               if (vtmp < 0) {
                 vtmp = -vtmp;
-                fprintf(lfp, " %3d-%2X", idx, vtmp);
+                fprintf(lfp, " %3d-%2x", idx, vtmp);
               } else {
-                fprintf(lfp, " %3d+%2X", idx, vtmp);
+                fprintf(lfp, " %3d+%2x", idx, vtmp);
               }
             }
             fprintf(lfp, "\n");
           }
 
           for (int gi = 0; gi < dump_groups_8; gi++) {
-            fprintf(lfp, "Q NEW MSG:");
+            fprintf(lfp, "q new msg:");
             for (int gj = 0; gj < 8; gj++) {
               const int idx = gi * 8 + gj;
               if (idx >= cir_sz)
@@ -4858,9 +5011,9 @@ void ldpc_packet::ldpc_dec_layer2() {
               vtmp = int(cn_q_updt_cur[idx] * pow(2, finite_f_num));
               if (vtmp < 0) {
                 vtmp = -vtmp;
-                fprintf(lfp, " %3d-%2X", idx, vtmp);
+                fprintf(lfp, " %3d-%2x", idx, vtmp);
               } else {
-                fprintf(lfp, " %3d+%2X", idx, vtmp);
+                fprintf(lfp, " %3d+%2x", idx, vtmp);
               }
             }
             fprintf(lfp, "\n");
@@ -4871,7 +5024,7 @@ void ldpc_packet::ldpc_dec_layer2() {
         cir_cnt++;
       } // per circulant
 
-      // update C_MSG per layer
+      // update c_msg per layer
       for (int i = 0; i < cir_sz; i++) {
         const float min1_pre_q = cn_c_updt_cur[i].min1_val * alpha;
         const float min2_pre_q = cn_c_updt_cur[i].min2_val * alpha;
@@ -4889,13 +5042,18 @@ void ldpc_packet::ldpc_dec_layer2() {
 
         cn_c_mem[layer][i].min1_pos = cn_c_updt_cur[i].min1_pos;
         cn_c_mem[layer][i].sign_tot = cn_c_updt_cur[i].sign_tot;
-#ifdef _LDPC_DEBUG_DUMP
-        fprintf(cfp, "ITR%d/L%d/C%d: min1 %X, min2 %X, min1 pos %d, sign_tot %d\n",
-          itr, layer, i, int(16*cn_c_mem[layer][i].min1_val), int(16*cn_c_mem[layer][i].min2_val), int(16*cn_c_mem[layer][i].min1_pos), (1-cn_c_mem[layer][i].sign_tot)/2 ); 
+#ifdef _ldpc_debug_dump
+        const int cmem_dump_scale = 1 << finite_f_num;
+        fprintf(cfp, "itr%d/l%d/c%d: min1 %x, min2 %x, min1 pos %d, sign_tot %d\n",
+          itr, layer, i,
+          int(cmem_dump_scale * cn_c_mem[layer][i].min1_val),
+          int(cmem_dump_scale * cn_c_mem[layer][i].min2_val),
+          cn_c_mem[layer][i].min1_pos,
+          (1-cn_c_mem[layer][i].sign_tot)/2 );
 #endif
       }
 
-#ifdef _LDPC_DEBUG_DUMP
+#ifdef _ldpc_debug_dump
       if (sfp) {
         for (int i = (cir_sz / 4 - 1); i >= 0; i--) {
           stmp = 0;
@@ -4909,6 +5067,12 @@ void ldpc_packet::ldpc_dec_layer2() {
 
       // check converage checking
       layer_synd_wt = vec_sum(layer_synd, cir_sz);
+      int synd_pass_cnt_old = synd_pass_cnt;
+      int hd_stable_cnt_old = hd_stable_cnt;
+      int conv_now;
+
+      if (itr == 0)
+        init_synd_wt += layer_synd_wt;
       if (hd_init == 1) {
         hd_stable_cnt = 0;
         synd_pass_cnt = 0;
@@ -4919,24 +5083,27 @@ void ldpc_packet::ldpc_dec_layer2() {
         hd_stable_cnt = 0;
         synd_pass_cnt = 0;
       }
+      conv_now = ((synd_pass_cnt >= bm_m) && (hd_stable_cnt >= bm_m - 1));
 
-#ifdef _LDPC_DEBUG_DUMP
+#ifdef _ldpc_debug_dump
       if (lfp) {
         fprintf(lfp,
-                "[DVC] layer summary: itr=%d layer=%d layer_synd_wt=%d hd_updated=%d synd_pass_cnt=%d hd_stable_cnt=%d cw_fail=%d\n",
-                itr, layer, layer_synd_wt, hd_updated, synd_pass_cnt,
-                hd_stable_cnt, cw_fail);
+                "[dvc] layer summary: itr=%d layer=%d tail_col=%d tail_shift=%d layer_synd_wt=%d hd_updated=%d synd_pass_cnt=%d->%d hd_stable_cnt=%d->%d conv_now=%d cw_fail=%d\n",
+                itr, layer, last_nz_col, last_nz_shift, layer_synd_wt,
+                hd_updated, synd_pass_cnt_old, synd_pass_cnt,
+                hd_stable_cnt_old, hd_stable_cnt, conv_now, cw_fail);
       }
 #endif
 
-      if ((synd_pass_cnt >= bm_m) && (hd_stable_cnt >= bm_m - 1)) {
+      if (conv_now) {
         cw_fail = 0;
         cnvg_itr = itr;
         cnvg_lyr = layer;
-#ifdef _LDPC_DEBUG_DUMP
+#ifdef _ldpc_debug_dump
         if (lfp && !dbg_converged_printed) {
-          fprintf(lfp, "[DVC] converged: itr=%d layer=%d (early_term=%d)\n",
-                  itr, layer, ldec_early_term_en);
+          fprintf(lfp,
+                  "[dvc] converged latch: itr=%d layer=%d synd_pass_cnt=%d hd_stable_cnt=%d (early_term=%d)\n",
+                  itr, layer, synd_pass_cnt, hd_stable_cnt, ldec_early_term_en);
           fflush(lfp);
           dbg_converged_printed = 1;
         }
@@ -4946,19 +5113,19 @@ void ldpc_packet::ldpc_dec_layer2() {
   }
 
   if ((cw_fail == 1) || (ldec_early_term_en == 0)) {
-    cnvg_itr = ldec_max_itr - 1;
+    cnvg_itr = ldec_max_itr;
     cnvg_lyr = bm_m - 1;
   }
 
   fina_synd_wt = dvc_ibex_syndrome_weight(this, dec_do_blk);
 
-#ifdef _LDPC_DEBUG_DUMP
+#ifdef _ldpc_debug_dump
   if (lfp) {
     fprintf(lfp,
-            "[DVC] cw summary: init_synd_wt=%d final_synd_wt=%d init_ok=%d final_ok=%d cw_fail=%d cnvg_itr=%d cnvg_lyr=%d\n",
+            "[dvc] cw summary: init_synd_wt=%d final_synd_wt=%d init_ok=%d final_ok=%d cw_fail=%d cnvg_itr=%d cnvg_lyr=%d\n",
             init_synd_wt, fina_synd_wt, (init_synd_wt == 0),
             (fina_synd_wt == 0), cw_fail, cnvg_itr, cnvg_lyr);
-    dvc_dump_col_major_codeword(lfp, dec_do_blk, bm_n, cir_sz, "DEC_DO");
+    dvc_dump_col_major_codeword(lfp, dec_do_blk, bm_n, cir_sz, "dec_do");
     fflush(lfp);
   }
 #endif
@@ -4985,7 +5152,7 @@ void ldpc_packet::ldpc_dec_layer2() {
   free(cn_dec_hd);
   free(vn_dec_hd);
 
-#ifdef _LDPC_DEBUG_DUMP
+#ifdef _ldpc_debug_dump
   if (cfp)
     fclose(cfp);
   if (sfp)
@@ -4996,6 +5163,668 @@ void ldpc_packet::ldpc_dec_layer2() {
     fclose(lfp);
 #endif
 } // ldpc_dec_layer2
+
+void ldpc_packet::ldpc_dec_pms() {
+#ifdef _ldpc_debug_dump
+  file *cfp, *sfp, *hdfp, *lfp;
+  int stmp, vtmp;
+  dvc_ensure_output_c_code_dir();
+  char cmem_dump[50] = "./output/c_code/rdec_cmem_dump.txt";
+  char stot_dump[50] = "./output/c_code/rdec_stot_dump.txt";
+  char hdmem_dump[50] = "./output/c_code/rdec_hdmem_dump.txt";
+  char log_dump[50] = "./output/c_code/rdec_log_dump.txt";
+  cfp = fopen(cmem_dump, "w");
+  sfp = fopen(stot_dump, "w");
+  hdfp = fopen(hdmem_dump, "w");
+  lfp = fopen(log_dump, "w");
+
+  // one-time probe to help align dump vs rtl when a specific column seems
+  // missing. keep it short: list whether target_col exists in each layer's
+  // schedule.
+  if (lfp) {
+    const int target_col = 73;
+    fprintf(lfp, "[dvc] qc_bm col probe: target_col=%d bm_m=%d bm_n=%d\n",
+            target_col, bm_m, bm_n);
+    for (int rr = 0; rr < bm_m; rr++) {
+      int found = 0;
+      for (mod2entry *ee = mod2sparse_first_in_row(qc_bm, rr);
+           !mod2sparse_at_end(ee); ee = mod2sparse_next_in_row(ee)) {
+        if (ee->col == target_col) {
+          fprintf(lfp, "[dvc] layer=%d has col=%d shift=%d\n", rr, ee->col,
+                  ee->shift);
+          found = 1;
+          break;
+        }
+      }
+      if (!found)
+        fprintf(lfp, "[dvc] layer=%d missing col=%d\n", rr, target_col);
+    }
+    fflush(lfp);
+  }
+#endif
+
+  mod2entry *e, *e_pre;
+  char *dec_init;
+  int shift_val1;
+  int shift_val2;
+  int cir_cnt;
+  int sign_tmp;
+  float val_tmp;
+  int hd_init;
+
+  struct cn_msg **cn_c_mem;
+  struct cn_msg *cn_c_updt_cur; // current layer check node msg to be updt
+  struct cn_msg *cn_c_sel_cur;  // current layer check node msg
+  struct cn_msg *cn_c_sel_pre;  // previous layer check node msg
+  float **cn_q_mem;             // q mem in cn order of previous layer
+  float *cn_q_sel_pre; // q msg of the select circulant from previous layer
+  float *cn_r_new_pre; // new r msg in cn order of previous layer
+  float *cn_app_pre;   // app = q + r_new in cn order of previous layer
+  float *cn_app_cur;   // app = q + r_new in cn order of current layer
+  float *cn_q_sel_cur; // q msg of the select circulant from current layer
+  float *cn_r_old_cur; // old r msg in cn order of previous layer
+  float *cn_q_updt_cur; // updated q msg of the select circulant in current layer
+  int **cn_q_sign;    // q sign
+  float *min3_val;
+
+  char *layer_synd;
+  char *cn_dec_hd;
+  char *vn_dec_hd;
+  int hd_updated;
+  int layer_synd_wt;
+  int synd_pass_cnt = 0;
+  int hd_stable_cnt = 0;
+  int pl1, pl2;
+#ifdef _ldpc_debug_dump
+  int dbg_converged_printed = 0;
+#endif
+
+  // allocation
+  dec_init = (char *)calloc(bm_n, sizeof(*dec_init));
+  vec_set(dec_init, bm_n);
+
+  cn_c_mem = (struct cn_msg **)calloc(bm_m, sizeof(*cn_c_mem));
+  for (int i = 0; i < bm_m; i++)
+    cn_c_mem[i] = (struct cn_msg *)calloc(cir_sz, sizeof(*cn_c_mem[i]));
+  cn_c_updt_cur = (struct cn_msg *)calloc(cir_sz, sizeof(*cn_c_updt_cur));
+
+  cn_q_mem = (float **)calloc(bm_n, sizeof(*cn_q_mem));
+  for (int i = 0; i < bm_n; i++)
+    cn_q_mem[i] = (float *)calloc(cir_sz, sizeof(*cn_q_mem[i]));
+
+  cn_r_new_pre = (float *)calloc(cir_sz, sizeof(*cn_r_new_pre));
+  cn_app_pre = (float *)calloc(cir_sz, sizeof(*cn_app_pre));
+  cn_app_cur = (float *)calloc(cir_sz, sizeof(*cn_app_cur));
+  cn_q_sel_cur = (float *)calloc(cir_sz, sizeof(*cn_q_sel_cur));
+  cn_r_old_cur = (float *)calloc(cir_sz, sizeof(*cn_r_old_cur));
+  cn_q_updt_cur = (float *)calloc(cir_sz, sizeof(*cn_q_updt_cur));
+
+  cn_q_sign = (int **)calloc(total_cir, sizeof(*cn_q_sign));
+  for (int i = 0; i < total_cir; i++)
+    cn_q_sign[i] = (int *)calloc(cir_sz, sizeof(*cn_q_sign[i]));
+
+  min3_val = (float*)calloc(cir_sz, sizeof(*min3_val));
+
+  layer_synd = (char *)calloc(cir_sz, sizeof(*layer_synd));
+  vn_dec_hd = (char *)calloc(cir_sz, sizeof(*vn_dec_hd));
+  cn_dec_hd = (char *)calloc(cir_sz, sizeof(*cn_dec_hd));
+
+  // initialize decoder
+  cw_fail = 1;
+  cw_miscorr = 0;
+  vec_copy(dec_di_blk, dec_do_blk, 0, 0, hm_n);
+
+  if (reg_sdlite_llr_config) {
+    if (llr_tbl != NULL && bin_num >= 4) {
+      llr_tbl[0] = reg_sdlite_llr0 * pow(2, -1 * finite_f_num);
+      llr_tbl[1] = reg_sdlite_llr1 * pow(2, -1 * finite_f_num);
+      llr_tbl[2] = reg_sdlite_llr2 * pow(2, -1 * finite_f_num);
+      llr_tbl[3] = reg_sdlite_llr3 * pow(2, -1 * finite_f_num);
+    } else {
+      printf("[ldpc warn] sdlite llr override ignored (llr_tbl=%p bin_num=%d, "
+             "need >=4)\n",
+             llr_tbl, bin_num);
+    }
+  }
+
+  {
+    char *hard_init = (char *)calloc(hm_n, sizeof(*hard_init));
+    if (hard_init) {
+      dvc_bins_to_hard_bits(dec_di_blk, hard_init, hm_n, llr_tbl, bin_num);
+#ifdef _LDPC_DEBUG_DUMP
+      {
+        static unsigned int pms_hard_cw_seq = 0;
+        char hard_dump_path[128];
+        snprintf(hard_dump_path, sizeof(hard_dump_path),
+                 "./output/c_code/pms_hard_init_cw%04u.txt",
+                 pms_hard_cw_seq++);
+        dvc_dump_hard_bits_hex128(hard_dump_path, hard_init, hm_n);
+      }
+#endif
+      init_synd_wt = dvc_ibex_syndrome_weight(this, hard_init);
+      init_synd_wt_min = std::min(init_synd_wt_min, init_synd_wt);
+      init_synd_wt_max = std::max(init_synd_wt_max, init_synd_wt);
+      free(hard_init);
+    }
+  }
+
+  for (int i = 0; i < bm_n; i++) {
+    for (int j = 0; j < cir_sz; j++) {
+      cn_q_mem[i][j] = (float)llr_tbl[dec_di_blk[i * cir_sz + j]];
+      if (finite_mode == 1)
+        cn_q_mem[i][j] =
+            (float)Sat_Quan((double)cn_q_mem[i][j], finite_q_max, finite_q_min,
+                            finite_q_num, finite_f_num);
+    }
+  }
+
+  // iterative decoding
+  for (int itr = 0;
+       (itr <= ldec_max_itr) && ((ldec_early_term_en == 0) || (cw_fail == 1));
+       itr++) {
+    // q sign mem index
+    cir_cnt = 0;
+
+    // layer decoding
+    for (int layer = 0;
+         layer < bm_m && ((ldec_early_term_en == 0) || (cw_fail == 1));
+         layer++) {
+      // initilize hd mem
+      hd_init = (vec_sum(dec_init, bm_n) != 0);
+
+#ifdef _ldpc_debug_dump
+      printf("[ldpc debug] layer decoding @ iteration %d, layer %d ...\n", itr,
+             layer);
+#endif
+
+      // init current layer c-msg
+      // c-msg of previous iteration
+
+      cn_c_sel_cur = cn_c_mem[layer];
+      // c-msg to be updt
+      for (int i = 0; i < cir_sz; i++) {
+        cn_c_updt_cur[i].min1_val = 100000;
+        cn_c_updt_cur[i].min2_val = 100000;
+        cn_c_updt_cur[i].min1_pos = 0;
+        cn_c_updt_cur[i].sign_tot = 1;
+        min3_val[i] = 100000;
+      }
+
+      // earlier termination init
+      hd_updated = 0;
+      vec_clr(layer_synd, cir_sz);
+
+      // per circulant of the layer
+      for (e = mod2sparse_first_in_row(qc_bm, layer);
+           !mod2sparse_at_end(e) &&
+           ((ldec_early_term_en == 0) || (cw_fail == 1));
+           e = mod2sparse_next_in_row(e)) {
+        // read q from the previous layer of the selected column
+        cn_q_sel_pre = cn_q_mem[e->col];
+
+        // find out the previous layer of select column
+        e_pre = mod2sparse_prev_in_col(e);
+        if (mod2sparse_at_end(e_pre))
+          e_pre = mod2sparse_last_in_col(qc_bm, e->col);
+
+        cn_c_sel_pre = cn_c_mem[e_pre->row]; // read previous layer c msg
+
+        // cal rnew and app
+        for (int i = 0; i < cir_sz; i++) {
+          // qmsg sign
+          sign_tmp = (cn_q_sel_pre[i] >= 0) ? 1 : -1;
+
+          // rnew
+          if (cn_c_sel_pre[i].min1_pos == e->col)
+            cn_r_new_pre[i] =
+                cn_c_sel_pre[i].min2_val * cn_c_sel_pre[i].sign_tot * sign_tmp;
+          else
+            cn_r_new_pre[i] =
+                cn_c_sel_pre[i].min1_val * cn_c_sel_pre[i].sign_tot * sign_tmp;
+
+          // app in cn order of previous layer
+          if (h_matrix.extra_bytes_of_parity == 0) {
+            cn_app_pre[i] = cn_r_new_pre[i] + cn_q_sel_pre[i];
+          } else {
+            if (h_matrix.occupied[e_pre->row][e_pre->col] &&
+                (e_pre->row < (h_matrix.rows - 1)))
+              cn_app_pre[i] = cn_r_new_pre[i] + cn_q_sel_pre[i];
+            else if (h_matrix.occupied[e_pre->row][e_pre->col] &&
+                     (e_pre->row == (h_matrix.rows - 1)) &&
+                     h_matrix.mask[e_pre->col][(i + e_pre->shift) % cir_sz])
+              cn_app_pre[i] = cn_r_new_pre[i] + cn_q_sel_pre[i];
+            else if (h_matrix.fade[e_pre->row][e_pre->col] &&
+                     !h_matrix.mask[e_pre->col][(i + e_pre->shift) % cir_sz])
+              cn_app_pre[i] = cn_r_new_pre[i] + cn_q_sel_pre[i];
+            else
+              cn_app_pre[i] = cn_q_sel_pre[i];
+          }
+
+          // quantization
+          if (finite_mode == 1) {
+            cn_app_pre[i] =
+                (float)Sat_Quan((double)cn_app_pre[i], finite_q_max,
+                                finite_q_min, finite_q_num, finite_f_num);
+          }
+        }
+
+        // app shift
+        // when decoder initilized, q msg are in vn order
+        if (dec_init[e->col] == 1) {
+          shift_val1 = e->shift;
+          shift_val2 = 0;
+          dec_init[e->col] = 0;
+        } else {
+          shift_val1 = -1 * e_pre->shift + e->shift;
+          shift_val2 = -1 * e_pre->shift;
+        }
+
+        for (int i = 0; i < cir_sz; i++) {
+          cn_app_cur[i] = cn_app_pre[(i + shift_val1 + cir_sz) % cir_sz];
+          vn_dec_hd[i] =
+              cn_app_pre[(i + shift_val2 + cir_sz) % cir_sz] >= 0 ? 0 : 1;
+        }
+
+#ifdef _ldpc_debug_dump
+        if (lfp) {
+          fprintf(lfp, "itr%2d/layer%2d/col%2d: \n", itr, layer, e->col);
+          const int dump_groups_8 = (cir_sz + 7) / 8;
+          for (int gi = 0; gi < dump_groups_8; gi++) {
+            fprintf(lfp, "q pre msg:");
+            for (int gj = 0; gj < 8; gj++) {
+              const int idx = gi * 8 + gj;
+              if (idx >= cir_sz)
+                break;
+              vtmp = int(cn_q_sel_pre[idx] * pow(2, finite_f_num));
+              if (vtmp < 0) {
+                vtmp = -vtmp;
+                fprintf(lfp, " %3d-%2x", idx, vtmp);
+              } else {
+                fprintf(lfp, " %3d+%2x", idx, vtmp);
+              }
+            }
+            fprintf(lfp, "\n");
+          }
+
+          for (int gi = 0; gi < dump_groups_8; gi++) {
+            fprintf(lfp, "r new msg:");
+            for (int gj = 0; gj < 8; gj++) {
+              const int idx = gi * 8 + gj;
+              if (idx >= cir_sz)
+                break;
+              vtmp = int(cn_r_new_pre[idx] * pow(2, finite_f_num));
+              if (vtmp < 0) {
+                vtmp = -vtmp;
+                fprintf(lfp, " %3d-%2x", idx, vtmp);
+              } else {
+                fprintf(lfp, " %3d+%2x", idx, vtmp);
+              }
+            }
+            fprintf(lfp, "\n");
+          }
+
+          for (int gi = 0; gi < dump_groups_8; gi++) {
+            fprintf(lfp, "app-c msg:");
+            for (int gj = 0; gj < 8; gj++) {
+              const int idx = gi * 8 + gj;
+              if (idx >= cir_sz)
+                break;
+              vtmp = int(cn_app_pre[idx] * pow(2, finite_f_num));
+              if (vtmp < 0) {
+                vtmp = -vtmp;
+                fprintf(lfp, " %3d-%2x", idx, vtmp);
+              } else {
+                fprintf(lfp, " %3d+%2x", idx, vtmp);
+              }
+            }
+            fprintf(lfp, "\n");
+          }
+
+          for (int gi = 0; gi < dump_groups_8; gi++) {
+            fprintf(lfp, "app-s msg:");
+            for (int gj = 0; gj < 8; gj++) {
+              const int idx = gi * 8 + gj;
+              if (idx >= cir_sz)
+                break;
+              vtmp = int(cn_app_cur[idx] * pow(2, finite_f_num));
+              if (vtmp < 0) {
+                vtmp = -vtmp;
+                fprintf(lfp, " %3d-%2x", idx, vtmp);
+              } else {
+                fprintf(lfp, " %3d+%2x", idx, vtmp);
+              }
+            }
+            fprintf(lfp, "\n");
+          }
+        }
+#endif
+
+        // cw converge check logic per circulant
+        // 1. check if hd updated
+        if (hd_updated == 0)
+          if (vec_cmp(dec_do_blk, vn_dec_hd, e->col * cir_sz, 0, cir_sz) == 1)
+            hd_updated = 1;
+
+#ifdef _ldpc_debug_dump
+        if (lfp) {
+          for (int i = 0; i < cir_sz; i++) {
+            if (dec_do_blk[e->col * cir_sz + i] != vn_dec_hd[i]) {
+              fprintf(lfp, "itr%2d/layer%2d/col%2d: flip bit %d (%d-->%d)\n",
+                      itr, layer, e->col, i, dec_do_blk[e->col * cir_sz + i],
+                      vn_dec_hd[i]);
+            }
+          }
+        }
+#endif
+        vec_copy(vn_dec_hd, dec_do_blk, 0, e->col * cir_sz, cir_sz);
+
+#ifdef _ldpc_debug_dump
+        if (hdfp) {
+          fprintf(hdfp, "itr%2d/layer%2d/col%2d: ", itr, layer, e->col);
+          for (int i = cir_sz / 4 - 1; i >= 0; i--) {
+            stmp = 0;
+            for (int j = 3; j >= 0; j--)
+              stmp = stmp * 2 + vn_dec_hd[i * 4 + j];
+            fprintf(hdfp, "%lx", stmp);
+          }
+          fprintf(hdfp, "\n");
+        }
+#endif
+
+        // 2. accumulate syndrome
+        vec_shift(vn_dec_hd, cn_dec_hd, cir_sz, -1 * e->shift);
+        if (h_matrix.extra_bytes_of_parity == 0) {
+          vec_mod2_add(cn_dec_hd, layer_synd, layer_synd, cir_sz);
+        } else {
+          if (h_matrix.occupied[e->row][e->col] &&
+              (e->row == (h_matrix.rows - 1))) {
+            for (int i = 0; i < cir_sz; i++) {
+              if (!h_matrix.mask[e->col][(i + e->shift) % cir_sz])
+                cn_dec_hd[i] = 0;
+            }
+          }
+          if (h_matrix.fade[e->row][e->col]) {
+            for (int i = 0; i < cir_sz; i++) {
+              if (h_matrix.mask[e->col][(i + e->shift) % cir_sz])
+                cn_dec_hd[i] = 0;
+            }
+          }
+          vec_mod2_add(cn_dec_hd, layer_synd, layer_synd, cir_sz);
+        }
+
+        // calculate r_old and current q, update current layer c and q
+        for (int i = 0; i < cir_sz; i++) {
+          if (cn_c_sel_cur[i].min1_pos == e->col)
+            cn_r_old_cur[i] = cn_c_sel_cur[i].min2_val *
+                              cn_c_sel_cur[i].sign_tot * cn_q_sign[cir_cnt][i];
+          else
+            cn_r_old_cur[i] = cn_c_sel_cur[i].min1_val *
+                              cn_c_sel_cur[i].sign_tot * cn_q_sign[cir_cnt][i];
+
+          // q -= rold
+          if (h_matrix.extra_bytes_of_parity == 0) {
+            cn_q_updt_cur[i] = cn_app_cur[i] - cn_r_old_cur[i];
+          } else {
+            if (h_matrix.occupied[e->row][e->col] &&
+                (e->row == (h_matrix.rows - 1)) &&
+                (!h_matrix.mask[e->col][(i + e->shift) % cir_sz])) {
+              cn_r_old_cur[i] = 0;
+            }
+            if (h_matrix.fade[e->row][e->col] &&
+                (h_matrix.mask[e->col][(i + e->shift) % cir_sz])) {
+              cn_r_old_cur[i] = 0;
+            }
+            cn_q_updt_cur[i] = cn_app_cur[i] - cn_r_old_cur[i];
+          }
+
+          // quantization
+          if (finite_mode == 1) {
+            cn_q_updt_cur[i] =
+                (float)Sat_Quan((double)cn_q_updt_cur[i], finite_q_max,
+                                finite_q_min, finite_q_num, finite_f_num);
+          }
+
+          // update c
+          if (h_matrix.extra_bytes_of_parity == 0) {
+            sign_tmp = (cn_q_updt_cur[i] >= 0) ? 1 : -1;
+            val_tmp = cn_q_updt_cur[i] * sign_tmp;
+          } else {
+            if (h_matrix.occupied[e->row][e->col] &&
+                (e->row == (h_matrix.rows - 1)) &&
+                (!h_matrix.mask[e->col][(i + e->shift) % cir_sz])) {
+              sign_tmp = 1;
+              val_tmp = 100000;
+            }
+            if (h_matrix.fade[e->row][e->col] &&
+                (h_matrix.mask[e->col][(i + e->shift) % cir_sz])) {
+              sign_tmp = 1;
+              val_tmp = 100000;
+            } else {
+              sign_tmp = (cn_q_updt_cur[i] >= 0) ? 1 : -1;
+              val_tmp = cn_q_updt_cur[i] * sign_tmp;
+            }
+          }
+
+          cn_c_updt_cur[i].sign_tot *= sign_tmp;
+
+          if (val_tmp < cn_c_updt_cur[i].min1_val) {
+            min3_val[i] = cn_c_updt_cur[i].min2_val;
+            cn_c_updt_cur[i].min2_val = cn_c_updt_cur[i].min1_val;
+            cn_c_updt_cur[i].min1_val = val_tmp;
+            cn_c_updt_cur[i].min1_pos = e->col;
+          } else if (val_tmp < cn_c_updt_cur[i].min2_val) {
+            min3_val[i] = cn_c_updt_cur[i].min2_val;
+            cn_c_updt_cur[i].min2_val = val_tmp;
+          } else if (val_tmp < min3_val[i]) {
+            min3_val[i] = val_tmp;
+          }
+
+          cn_q_sign[cir_cnt][i] = sign_tmp;
+        }
+
+        // update q memory
+        for (int i = 0; i < cir_sz; i++) {
+          cn_q_mem[e->col][i] = cn_q_updt_cur[i];
+        }
+
+#ifdef _ldpc_debug_dump
+        if (lfp) {
+          const int dump_groups_8 = (cir_sz + 7) / 8;
+          for (int gi = 0; gi < dump_groups_8; gi++) {
+            fprintf(lfp, "r old msg:");
+            for (int gj = 0; gj < 8; gj++) {
+              const int idx = gi * 8 + gj;
+              if (idx >= cir_sz)
+                break;
+              vtmp = int(cn_r_old_cur[idx] * pow(2, finite_f_num));
+              if (vtmp < 0) {
+                vtmp = -vtmp;
+                fprintf(lfp, " %3d-%2x", idx, vtmp);
+              } else {
+                fprintf(lfp, " %3d+%2x", idx, vtmp);
+              }
+            }
+            fprintf(lfp, "\n");
+          }
+
+          for (int gi = 0; gi < dump_groups_8; gi++) {
+            fprintf(lfp, "q new msg:");
+            for (int gj = 0; gj < 8; gj++) {
+              const int idx = gi * 8 + gj;
+              if (idx >= cir_sz)
+                break;
+              vtmp = int(cn_q_updt_cur[idx] * pow(2, finite_f_num));
+              if (vtmp < 0) {
+                vtmp = -vtmp;
+                fprintf(lfp, " %3d-%2x", idx, vtmp);
+              } else {
+                fprintf(lfp, " %3d+%2x", idx, vtmp);
+              }
+            }
+            fprintf(lfp, "\n");
+          }
+        }
+#endif
+
+        cir_cnt++;
+      } // per circulant
+
+      // update c_msg per layer
+      for (int i = 0; i < cir_sz; i++) {
+        pl1 = ldpc_pms_ind(cn_c_updt_cur[i].min1_val, cn_c_updt_cur[i].min2_val);
+        pl2 = ldpc_pms_ind(cn_c_updt_cur[i].min2_val, cn_c_updt_cur[i].min2_val);
+
+        cn_c_mem[layer][i].min1_val = cn_c_updt_cur[i].min1_val * alpha_pms[pl1] - beta_pms[pl1];
+        cn_c_mem[layer][i].min2_val = cn_c_updt_cur[i].min1_val * alpha_pms[pl2] - beta_pms[pl2];
+
+        if (cn_c_mem[layer][i].min1_val < 0)
+          cn_c_mem[layer][i].min1_val = 0;
+        if (cn_c_mem[layer][i].min2_val < 0)
+          cn_c_mem[layer][i].min2_val = 0;
+
+        if (finite_mode == 1) {
+          cn_c_mem[layer][i].min1_val =
+              (float)Sat_Quan((double)cn_c_mem[layer][i].min1_val, finite_c_max,
+                              finite_c_min, finite_c_num, finite_f_num);
+          cn_c_mem[layer][i].min2_val =
+              (float)Sat_Quan((double)cn_c_mem[layer][i].min2_val, finite_c_max,
+                              finite_c_min, finite_c_num, finite_f_num);
+        }
+
+        cn_c_mem[layer][i].min1_pos = cn_c_updt_cur[i].min1_pos;
+        cn_c_mem[layer][i].sign_tot = cn_c_updt_cur[i].sign_tot;
+#ifdef _ldpc_debug_dump
+        const int cmem_dump_scale = 1 << finite_f_num;
+        fprintf(cfp, "itr%d/l%d/c%d: min1 %x, min2 %x, min1 pos %d, sign_tot %d\n",
+          itr, layer, i,
+          int(cmem_dump_scale * cn_c_mem[layer][i].min1_val),
+          int(cmem_dump_scale * cn_c_mem[layer][i].min2_val),
+          cn_c_mem[layer][i].min1_pos,
+          (1-cn_c_mem[layer][i].sign_tot)/2 );
+#endif
+      }
+
+#ifdef _ldpc_debug_dump
+      if (sfp) {
+        for (int i = (cir_sz / 4 - 1); i >= 0; i--) {
+          stmp = 0;
+          for (int j = 3; j >= 0; j--)
+            stmp = stmp * 2 + (1 - cn_c_mem[layer][i * 4 + j].sign_tot) / 2;
+          fprintf(sfp, "%lx", stmp);
+        }
+        fprintf(sfp, "\n");
+      }
+#endif
+
+      // check converage checking
+      layer_synd_wt = vec_sum(layer_synd, cir_sz);
+      if (hd_init == 1) {
+        hd_stable_cnt = 0;
+        synd_pass_cnt = 0;
+      } else if ((hd_updated == 0) && (layer_synd_wt == 0)) {
+        hd_stable_cnt++;
+        synd_pass_cnt++;
+      } else {
+        hd_stable_cnt = 0;
+        synd_pass_cnt = 0;
+      }
+
+#ifdef _ldpc_debug_dump
+      if (lfp) {
+        fprintf(lfp,
+                "[dvc] layer summary: itr=%d layer=%d layer_synd_wt=%d hd_updated=%d synd_pass_cnt=%d hd_stable_cnt=%d cw_fail=%d\n",
+                itr, layer, layer_synd_wt, hd_updated, synd_pass_cnt,
+                hd_stable_cnt, cw_fail);
+      }
+#endif
+
+      if ((synd_pass_cnt >= bm_m) && (hd_stable_cnt >= bm_m - 1)) {
+        cw_fail = 0;
+        cnvg_itr = itr;
+        cnvg_lyr = layer;
+#ifdef _ldpc_debug_dump
+        if (lfp && !dbg_converged_printed) {
+          fprintf(lfp, "[dvc] converged: itr=%d layer=%d (early_term=%d)\n",
+                  itr, layer, ldec_early_term_en);
+          fflush(lfp);
+          dbg_converged_printed = 1;
+        }
+#endif
+      }
+    }
+  }
+
+  if ((cw_fail == 1) || (ldec_early_term_en == 0)) {
+    cnvg_itr = ldec_max_itr - 1;
+    cnvg_lyr = bm_m - 1;
+  }
+
+  fina_synd_wt = dvc_ibex_syndrome_weight(this, dec_do_blk);
+
+#ifdef _ldpc_debug_dump
+  if (lfp) {
+    fprintf(lfp,
+            "[dvc] cw summary: init_synd_wt=%d final_synd_wt=%d init_ok=%d final_ok=%d cw_fail=%d cnvg_itr=%d cnvg_lyr=%d\n",
+            init_synd_wt, fina_synd_wt, (init_synd_wt == 0),
+            (fina_synd_wt == 0), cw_fail, cnvg_itr, cnvg_lyr);
+    dvc_dump_col_major_codeword(lfp, dec_do_blk, bm_n, cir_sz, "dec_do");
+    fflush(lfp);
+  }
+#endif
+
+  // free all
+  free(dec_init);
+  for (int i = 0; i < bm_m; i++)
+    free(cn_c_mem[i]);
+  free(cn_c_mem);
+  free(cn_c_updt_cur);
+  for (int i = 0; i < bm_n; i++)
+    free(cn_q_mem[i]);
+  free(cn_q_mem);
+  free(cn_r_new_pre);
+  free(cn_app_pre);
+  free(cn_app_cur);
+  free(cn_q_sel_cur);
+  free(cn_r_old_cur);
+  free(cn_q_updt_cur);
+  for (int i = 0; i < total_cir; i++)
+    free(cn_q_sign[i]);
+  free(cn_q_sign);
+  free(layer_synd);
+  free(cn_dec_hd);
+  free(vn_dec_hd);
+  free(min3_val);
+
+#ifdef _ldpc_debug_dump
+  if (cfp)
+    fclose(cfp);
+  if (sfp)
+    fclose(sfp);
+  if (hdfp)
+    fclose(hdfp);
+  if (lfp)
+    fclose(lfp);
+#endif
+} // ldpc_dec_layer2
+
+int ldpc_packet::ldpc_pms_ind(float min1, float min2) {
+  int ind;
+  if ((min1 <= point1) && (min2 <= point2))
+    ind = 0;
+  else if ((min1 <= point1) && (min2 > point1) && (min2 <= point2))
+    ind = 1;
+  else if ((min1 <= point1) && (min2 > point2))
+    ind = 2;
+  else if ((min1 > point1) && (min1 < point2) && (min2 > point1) && (min2 <= point2))
+    ind = 3;
+  else if ((min1 > point1) && (min1 < point2) && (min2 >= point2))
+    ind = 4;
+  else if ((min1 >= point2) && (min2 >= point2))
+    ind = 5;
+
+  return ind;
+}
+
 
 void ldpc_packet::ldpc_dec_skip() {
   for (int i = 0; i < hm_n; i++)
@@ -5074,6 +5903,8 @@ void ldpc_packet::ldpc_dec_bf_ibex(
   s_hard_codeword soft_codeword;
   s_variable_nodes vn;
   s_check_nodes cn;
+  s_check_nodes cn_delay1;
+  s_check_nodes cn_delay2;
   s_check_nodes cn_shifted;
   s_likelihood_levels likelihood_levels;
   s_256_bits prng_256;
@@ -5149,6 +5980,8 @@ void ldpc_packet::ldpc_dec_bf_ibex(
   }
 
   cn = f_check_nodes(h_matrix, hard_codeword);
+  cn_delay1 = cn;
+  cn_delay2 = cn;
   if (VERBOSITY > 0) {
     printf("[LDPC DEBUG] Starting BF decoding with max %d iterations.\n",
            fdec_max_itr);
@@ -5169,13 +6002,14 @@ void ldpc_packet::ldpc_dec_bf_ibex(
     finished = 1;
   ldpc_decoder_output.syndrome_weight_before = syndrome_weight;
   syndrome_weight_delayed = syndrome_weight;
+  for (i = 0; i < 5; i++)
+    syndrome_weight_r[i] = syndrome_weight;
 
   int prev_sw =
       (iteration == 0) ? syndrome_weight_delayed : syndrome_weight_r[3];
   bool pushing = (syndrome_weight_delayed >= prev_sw);
 
   ldpc_decoder_output.early_termination = 0;
-  ldpc_decoder_output.col_cnt = -1;
 
   if (ldpc_decoder_parameters.early_terminate_dis == 0) {
     int early_term_thr;
@@ -5226,6 +6060,11 @@ void ldpc_packet::ldpc_dec_bf_ibex(
   likelihood_levels = f_likelihood_levels(ldpc_decoder_input.nand_strobes,
                                           ldpc_decoder_parameters,
                                           syndrome_weight, h_matrix.rows);
+  if (!finished)
+    iteration = 1;
+  const int post_start_iteration =
+      (ldpc_decoder_input.post_iteration < 1) ? 1
+                                              : ldpc_decoder_input.post_iteration;
 
   // soft_data -> likelihood_level
   bool soft_data[2];
@@ -5277,6 +6116,10 @@ void ldpc_packet::ldpc_dec_bf_ibex(
 
   while ((iteration < ldpc_decoder_input.iteration_limit) && (finished == 0) &&
          (give_up == 0)) {
+    // Treat syndrome calculation as the standalone iteration before this pass:
+    // col0/col1 read this snapshot, and col2 first sees col0's live update.
+    cn_delay1 = cn;
+    cn_delay2 = cn;
     dvc_log_bf_ibex_sw(sw_delta_fp, iteration, "iter_pre", -1, syndrome_weight);
     dvc_log_bf_ibex_row_sw(row_sw_fp, iteration, "iter_pre", -1, h_matrix, cn);
 #ifdef _LDPC_DBG_DUMP
@@ -5292,14 +6135,14 @@ void ldpc_packet::ldpc_dec_bf_ibex(
 #endif
     for (j = 0; j < h_matrix.cols; j++) {
       clock_cycles++;
-      if ((iteration == (ldpc_decoder_input.post_iteration + 0)) && (j == 0)) {
+      if ((iteration == post_start_iteration) && (j == 0)) {
         for (i = 0; i < 256; i++)
           prng_256.b[i] = (prng_init[int(i / 16)] >> (i % 16)) & 1;
         for (i = 0; i < 512; i++)
           prng_512.b[i] = (prng_init[int(i / 16)] >> (i % 16)) & 1;
         for (i = 0; i < 512; i++)
           prng_512.b[i] = (0x1fe0 >> (i % 16)) & 1; // to match verilog
-      } else if (iteration >= ldpc_decoder_input.post_iteration) {
+      } else if (iteration >= post_start_iteration) {
         prng_256 = f_256_bit_lfsr(prng_256);
         prng_512 = f_512_bit_lfsr(prng_512);
       }
@@ -5309,7 +6152,7 @@ void ldpc_packet::ldpc_dec_bf_ibex(
       syndrome_weight_r[2] = syndrome_weight_r[1];
       syndrome_weight_r[1] = syndrome_weight_r[0];
       syndrome_weight_r[0] = syndrome_weight;
-      if (iteration == 0)
+      if (iteration == 1)
         syndrome_weight_delayed =
             (j <= 3) ? syndrome_weight_r[0] : syndrome_weight_r[4];
       else
@@ -5367,6 +6210,7 @@ void ldpc_packet::ldpc_dec_bf_ibex(
       // (ldpc_decoder_input.post_iteration + 100)); be_aggressive =
       // (ldpc_decoder_input.soft_bits > 0) && (likelihood_levels.min <
       // ldpc_decoder_parameters.likelihood_thr);
+      const s_check_nodes &cn_for_weight = cn_delay2;
       for (k = 0; k < h_matrix.bits; k++) {
         look = 0;
         do_not_use_this_bit = 0;
@@ -5392,21 +6236,22 @@ void ldpc_packet::ldpc_dec_bf_ibex(
           for (i = 0; i < h_matrix.rows; i++) {
             m = (k + h_matrix.bits - h_matrix.element[i][j]) % h_matrix.bits;
             if (h_matrix.extra_bytes_of_parity == 0) {
-              if (h_matrix.occupied[i][j] && (cn.r[i].b[m] == 1))
+              if (h_matrix.occupied[i][j] &&
+                  (cn_for_weight.r[i].b[m] == 1))
                 weight++;
             } else {
               if (h_matrix.occupied[i][j] && (i < (h_matrix.rows - 1)) &&
-                  (cn.r[i].b[m] == 1))
+                  (cn_for_weight.r[i].b[m] == 1))
                 weight++;
               if (h_matrix.occupied[i][j] && (i == (h_matrix.rows - 1)) &&
-                  (cn.r[i].b[m] == 1) && h_matrix.mask[j][k])
+                  (cn_for_weight.r[i].b[m] == 1) && h_matrix.mask[j][k])
                 weight++;
-              if (h_matrix.fade[i][j] && (cn.r[i].b[m] == 1) &&
+              if (h_matrix.fade[i][j] && (cn_for_weight.r[i].b[m] == 1) &&
                   !h_matrix.mask[j][k])
                 weight++;
             }
           }
-          if (iteration == 0) {
+          if (iteration == 1) {
             if (ldpc_decoder_input.corrupted_codeword.c[j].b[k].bit_is_error)
               hard_codeword.errors_at_level_and_weight
                   [ldpc_decoder_input.corrupted_codeword.c[j].b[k].level]
@@ -5592,6 +6437,8 @@ void ldpc_packet::ldpc_dec_bf_ibex(
                            syndrome_weight);
       }
       dvc_log_bf_ibex_row_sw(row_sw_fp, iteration, "col_post", j, h_matrix, cn);
+      cn_delay2 = cn_delay1;
+      cn_delay1 = cn;
       if (syndrome_weight == 0) {
         ldpc_decoder_output.col_cnt = j;
         finished = 1;
@@ -5723,10 +6570,16 @@ void ldpc_packet::ldpc_dec_bf_ibex(
   // Align DV status semantics with ldpc_dec_layer2():
   // - cnvg_itr is a 0-based "last iteration index" (not a count).
   // - on failure, cnvg_col is forced to 0 per DV expectation.
+  /*
   if (ldpc_decoder_output.failure)
     cnvg_itr = ldpc_decoder_input.iteration_limit - 1;
   else
     cnvg_itr = ldpc_decoder_output.iterations - 1;
+  */
+  if (iteration == 0)
+    cnvg_itr = 1;
+  else
+    cnvg_itr = ldpc_decoder_output.iterations;
 
   // `cnvg_lyr` is reported to DV as `cnvg_col` for BF-style decoders.
   // ldpc_dec_bf_ibex tracks the convergence column in `ldpc_decoder_output.col_cnt`.

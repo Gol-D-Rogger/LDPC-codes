@@ -63,11 +63,13 @@ class RunnerConfig:
     # Log flush grace window (seconds) after LSF/local reports DONE/EXIT.
     # Shared filesystems (NFS) can delay creation/flush of bsub -o logs.
     timeout_log_grace_sec: float = 10.0
+    max_retries: int = 3
 
 
 @dataclass(frozen=True)
 class LsfConfig:
     queue: str = ""
+    use_cwd: bool = True
     log_base_dir: str = ""
     bsub_extra: list[str] = field(default_factory=list)
     bjobs_extra: list[str] = field(default_factory=list)
@@ -164,20 +166,43 @@ def _parse_runner(raw: Any) -> RunnerConfig:
         poll_sec=float(raw.get("poll_sec", 2.0)),
         fail_fast=fail_fast,
         timeout_log_grace_sec=float(raw.get("timeout_log_grace_sec", 10.0)),
+        max_retries=int(raw.get("max_retries", 3)),
     )
 
 
 def _parse_lsf(raw: Any) -> LsfConfig:
     if not raw:
-        return LsfConfig(queue="", log_base_dir="", bsub_extra=[], bjobs_extra=[], bkill_extra=[])
+        return LsfConfig(queue="", use_cwd=True, log_base_dir="", bsub_extra=[], bjobs_extra=[], bkill_extra=[])
     if not isinstance(raw, dict):
         raise ValueError("Config [lsf] must be a table.")
     queue = str(raw.get("queue", "")).strip()
+    use_cwd_raw = raw.get("use_cwd", True)
+    if isinstance(use_cwd_raw, bool):
+        use_cwd = use_cwd_raw
+    elif isinstance(use_cwd_raw, (int, float)) and use_cwd_raw in (0, 1):
+        use_cwd = bool(use_cwd_raw)
+    elif isinstance(use_cwd_raw, str):
+        s = use_cwd_raw.strip().lower()
+        if s in {"true", "1", "yes", "y"}:
+            use_cwd = True
+        elif s in {"false", "0", "no", "n"}:
+            use_cwd = False
+        else:
+            raise ValueError("lsf.use_cwd must be a boolean true/false (or 1/0).")
+    else:
+        raise ValueError("lsf.use_cwd must be a boolean true/false (or 1/0).")
     log_base_dir = str(raw.get("log_base_dir", "")).strip()
     bsub_extra = [str(x) for x in raw.get("bsub_extra", [])]
     bjobs_extra = [str(x) for x in raw.get("bjobs_extra", [])]
     bkill_extra = [str(x) for x in raw.get("bkill_extra", [])]
-    return LsfConfig(queue=queue, log_base_dir=log_base_dir, bsub_extra=bsub_extra, bjobs_extra=bjobs_extra, bkill_extra=bkill_extra)
+    return LsfConfig(
+        queue=queue,
+        use_cwd=use_cwd,
+        log_base_dir=log_base_dir,
+        bsub_extra=bsub_extra,
+        bjobs_extra=bjobs_extra,
+        bkill_extra=bkill_extra,
+    )
 
 
 def _parse_case(d: dict[str, Any]) -> CaseConfig:
@@ -310,12 +335,22 @@ def run_case_local(c: CaseConfig, *, runner: RunnerConfig, dry_run: bool) -> Non
         if todo:
             patch_config_max_sim_num(cfg_abs, runtime_cfg, c.max_sim_num, max_error_num=c.max_err_num)
 
+        submit_attempts: dict[float, int] = {}
         while todo or in_flight:
             while todo and len(in_flight) < max_in_flight:
                 xv, log_path, cmd = todo.pop(0)
+                if log_path.exists():
+                    try:
+                        log_path.unlink()
+                    except Exception:
+                        pass
                 job = ex.submit(cmd, cwd=c.workdir, log_path=log_path)
                 in_flight[xv] = {"job": job, "log_path": log_path, "cmd": cmd}
-                print(f"[auto_throughput_eval] submit axis={c.axis_type} x={xv} -> {log_path.name}")
+                submit_attempts[xv] = int(submit_attempts.get(xv, 0)) + 1
+                print(
+                    f"[auto_throughput_eval] submit axis={c.axis_type} x={xv} "
+                    f"attempt={submit_attempts[xv]} -> {log_path.name}"
+                )
 
             if not in_flight:
                 break
@@ -327,14 +362,6 @@ def run_case_local(c: CaseConfig, *, runner: RunnerConfig, dry_run: bool) -> Non
                     continue
 
                 in_flight.pop(xv, None)
-                if not st.ok:
-                    msg = f"job EXIT: axis={c.axis_type} x={xv} log={info['log_path']}"
-                    print(f"[auto_throughput_eval] {msg}")
-                    if runner.fail_fast:
-                        cancel_all(reason=msg)
-                        save_manifest(manifest_path, manifest)
-                        raise SystemExit(msg)
-                    continue
 
                 rec = parse_done_log_with_grace(
                     axis_type=c.axis_type,
@@ -343,13 +370,31 @@ def run_case_local(c: CaseConfig, *, runner: RunnerConfig, dry_run: bool) -> Non
                     cmd=list(info["cmd"]),
                     grace_sec=float(runner.timeout_log_grace_sec),
                 )
-                if rec is None:
-                    msg = f"parse failed: axis={c.axis_type} x={xv} log={info['log_path']}"
-                    print(f"[auto_throughput_eval] {msg}")
+
+                retry_reason: Optional[str] = None
+                if not st.ok:
+                    retry_reason = f"job EXIT: axis={c.axis_type} x={xv} log={info['log_path']}"
+                elif rec is None:
+                    retry_reason = f"log incomplete: axis={c.axis_type} x={xv} log={info['log_path']}"
+
+                if retry_reason is not None:
+                    print(f"[auto_throughput_eval] {retry_reason}")
                     if runner.fail_fast:
-                        cancel_all(reason=msg)
+                        cancel_all(reason=retry_reason)
                         save_manifest(manifest_path, manifest)
-                        raise SystemExit(msg)
+                        raise SystemExit(retry_reason)
+                    next_attempt = int(submit_attempts.get(xv, 0)) + 1
+                    if next_attempt > runner.max_retries:
+                        print(
+                            f"[auto_throughput_eval] SKIP axis={c.axis_type} x={xv}: "
+                            f"exceeded max_retries={runner.max_retries}"
+                        )
+                    else:
+                        todo.append((float(xv), Path(info["log_path"]).resolve(), list(info["cmd"])))
+                        print(
+                            f"[auto_throughput_eval] retry axis={c.axis_type} x={xv} "
+                            f"next_attempt={next_attempt}"
+                        )
                     continue
 
                 upsert_run(manifest, rec)
@@ -421,6 +466,7 @@ def run_case_lsf(c: CaseConfig, *, runner: RunnerConfig, lsf: LsfConfig, dry_run
                 job_name=job_name,
                 queue=lsf.queue,
                 bsub_extra=lsf.bsub_extra,
+                include_cwd=lsf.use_cwd,
             )
             print(f"[dry-run] axis={c.axis_type} x={xv}")
             print(f"          {bsub_cmd}")
@@ -431,6 +477,7 @@ def run_case_lsf(c: CaseConfig, *, runner: RunnerConfig, lsf: LsfConfig, dry_run
         bsub_extra=lsf.bsub_extra,
         bjobs_extra=lsf.bjobs_extra,
         bkill_extra=lsf.bkill_extra,
+        include_cwd=lsf.use_cwd,
         log_base_dir="",  # log path mapping is handled by log_path_for_submission()
     )
     job_db = JobDB(job_db_path)
@@ -558,9 +605,15 @@ def run_case_lsf(c: CaseConfig, *, runner: RunnerConfig, lsf: LsfConfig, dry_run
             in_flight.pop(xv, None)
         job_db.flush()
     try:
+        submit_attempts: dict[float, int] = {}
         while todo or in_flight:
             while todo and len(in_flight) < max_in_flight:
                 xv, log_path, cmd, job_name, point_key = todo.pop(0)
+                if Path(log_path).exists():
+                    try:
+                        Path(log_path).unlink()
+                    except Exception:
+                        pass
                 job = ex.submit(cmd, cwd=c.workdir, log_path=Path(log_path), job_name=job_name, queue=lsf.queue)
                 backend, jid = _job_identity(job)
                 job_key = f"{backend}:{jid}"
@@ -590,10 +643,15 @@ def run_case_lsf(c: CaseConfig, *, runner: RunnerConfig, lsf: LsfConfig, dry_run
                     "log_path": Path(log_path).resolve(),
                     "cmd": list(cmd),
                     "job_name": job_name,
+                    "point_key": point_key,
                     "adopted": False,
                 }
                 jid = getattr(job, "job_id", "?")
-                print(f"[auto_throughput_eval] bsub axis={c.axis_type} x={xv} job_id={jid} job_name={job_name}")
+                submit_attempts[xv] = int(submit_attempts.get(xv, 0)) + 1
+                print(
+                    f"[auto_throughput_eval] bsub axis={c.axis_type} x={xv} "
+                    f"attempt={submit_attempts[xv]} job_id={jid} job_name={job_name}"
+                )
 
             if not in_flight:
                 break
@@ -630,23 +688,43 @@ def run_case_lsf(c: CaseConfig, *, runner: RunnerConfig, lsf: LsfConfig, dry_run
                     job_db.upsert({"key": job_key, "finished_at": now})
                     job_db.flush()
 
+                retry_reason: Optional[str] = None
                 if not st.ok:
-                    msg = f"job EXIT: axis={c.axis_type} x={xv} log={info['log_path']} job_name={info.get('job_name')}"
-                    print(f"[auto_throughput_eval] {msg}")
-                    if runner.fail_fast:
-                        cancel_all(reason=msg)
-                        save_manifest(manifest_path, manifest)
-                        raise SystemExit(msg)
-                    continue
+                    retry_reason = (
+                        f"job EXIT: axis={c.axis_type} x={xv} "
+                        f"log={info['log_path']} job_name={info.get('job_name')}"
+                    )
+                else:
+                    retry_reason = (
+                        f"log incomplete: axis={c.axis_type} x={xv} "
+                        f"log={info['log_path']} job_name={info.get('job_name')}"
+                    )
 
-                if rec is None:
-                    msg = f"parse failed: axis={c.axis_type} x={xv} log={info['log_path']} job_name={info.get('job_name')}"
-                    print(f"[auto_throughput_eval] {msg}")
-                    if runner.fail_fast:
-                        cancel_all(reason=msg)
-                        save_manifest(manifest_path, manifest)
-                        raise SystemExit(msg)
-                    continue
+                print(f"[auto_throughput_eval] {retry_reason}")
+                if runner.fail_fast:
+                    cancel_all(reason=retry_reason)
+                    save_manifest(manifest_path, manifest)
+                    raise SystemExit(retry_reason)
+
+                next_attempt = int(submit_attempts.get(xv, 0)) + 1
+                if next_attempt > runner.max_retries:
+                    print(
+                        f"[auto_throughput_eval] SKIP axis={c.axis_type} x={xv}: "
+                        f"exceeded max_retries={runner.max_retries}"
+                    )
+                else:
+                    point_key = str(info.get("point_key") or _throughput_point_key(c.axis_type, float(xv)))
+                    todo.append(
+                        (
+                            float(xv),
+                            Path(info["log_path"]).resolve(),
+                            list(info["cmd"]),
+                            str(info.get("job_name") or build_job_name(c, matrix_size=matrix_size, axis_value=float(xv))),
+                            point_key,
+                        )
+                    )
+                    print(f"[auto_throughput_eval] retry axis={c.axis_type} x={xv} next_attempt={next_attempt}")
+                continue
 
     finally:
         job_db.flush()
@@ -1037,13 +1115,16 @@ def build_bsub_command_line(
     job_name: str,
     queue: str,
     bsub_extra: list[str],
+    include_cwd: bool = True,
 ) -> str:
     parts: list[str] = ["bsub"]
     if queue:
         parts.extend(["-q", quote_shell(queue)])
     if job_name:
         parts.extend(["-J", quote_shell(job_name)])
-    parts.extend(["-o", quote_shell(log_path), "-cwd", quote_shell(cwd_abs)])
+    parts.extend(["-o", quote_shell(log_path)])
+    if include_cwd:
+        parts.extend(["-cwd", quote_shell(cwd_abs)])
     parts.extend([quote_shell(x) for x in bsub_extra])
     # The simulation command is shown as a single field (one pair of double quotes)
     # for readability and to match the user's preferred bsub CLI style.

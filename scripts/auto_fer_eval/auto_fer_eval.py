@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import math
 import re
@@ -34,6 +35,48 @@ except ImportError:  # pragma: no cover
     from .executors import DryRunExecutor, LocalExecutor, LsfExecutor  # type: ignore
     from .job_db import JobDB  # type: ignore
     from .xlsx_min import write_xlsx  # type: ignore
+
+
+_MANIFEST_SAVE_INTERVAL_SEC = 30.0
+_last_manifest_save_t: float = 0.0
+
+
+def _periodic_save_manifest(c: "CaseConfig", manifest: dict[str, Any]) -> None:
+    """Save manifest at most once per _MANIFEST_SAVE_INTERVAL_SEC seconds."""
+    global _last_manifest_save_t
+    now = time.time()
+    if now - _last_manifest_save_t < _MANIFEST_SAVE_INTERVAL_SEC:
+        return
+    path = Path(c.out_dir) / c.name / "manifest.json"
+    save_manifest(path, manifest)
+    _last_manifest_save_t = now
+
+
+def _job_identity(job: Any) -> tuple[str, str]:
+    """Duck-typed job identity: LsfJob has job_id; LocalJob has proc.pid."""
+    if hasattr(job, "job_id"):
+        return ("lsf", str(getattr(job, "job_id")))
+    if hasattr(job, "proc") and hasattr(getattr(job, "proc"), "pid"):
+        return ("local", str(getattr(getattr(job, "proc"), "pid")))
+    return ("unknown", str(id(job)))
+
+
+class _AdaptiveBackoff:
+    """Exponential backoff that resets on progress."""
+
+    __slots__ = ("_min", "_max", "_cur")
+
+    def __init__(self, min_sec: float, max_sec: float) -> None:
+        self._min = max(0.2, min_sec)
+        self._max = max(self._min, max_sec)
+        self._cur = self._min
+
+    def sleep(self) -> None:
+        time.sleep(self._cur)
+        self._cur = min(self._cur * 2, self._max)
+
+    def reset(self) -> None:
+        self._cur = self._min
 
 
 def _abs_time_str() -> str:
@@ -146,6 +189,7 @@ class LsfConfig:
     queue: str = ""
     queue_slow: str = ""  # For pilot/main/backfill (fallback to queue)
     queue_fast: str = ""  # For deep scan (fallback to queue)
+    use_cwd: bool = True  # Whether to include "-cwd <workdir>" in bsub command.
     log_base_dir: str = ""  # LSF log output base directory (preserves case structure)
     bsub_extra: list[str] = field(default_factory=list)
     bjobs_extra: list[str] = field(default_factory=list)
@@ -342,6 +386,20 @@ def _parse_adaptive(raw: Any) -> AdaptiveConfig:
     )
 
 
+def _parse_bool_field(value: Any, *, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in {"true", "1", "yes", "y"}:
+            return True
+        if s in {"false", "0", "no", "n"}:
+            return False
+    raise ValueError(f"{field_name} must be a boolean true/false (or 1/0).")
+
+
 def _parse_lsf(raw: Any) -> LsfConfig:
     if not raw:
         return LsfConfig()
@@ -350,6 +408,7 @@ def _parse_lsf(raw: Any) -> LsfConfig:
     queue = str(raw.get("queue", "")).strip()
     queue_slow = str(raw.get("queue_slow", "")).strip()
     queue_fast = str(raw.get("queue_fast", "")).strip()
+    use_cwd = _parse_bool_field(raw.get("use_cwd", True), field_name="lsf.use_cwd")
     log_base_dir = str(raw.get("log_base_dir", "")).strip()
     bsub_extra = [str(x) for x in raw.get("bsub_extra", [])]
     bjobs_extra = [str(x) for x in raw.get("bjobs_extra", [])]
@@ -358,6 +417,7 @@ def _parse_lsf(raw: Any) -> LsfConfig:
         queue=queue,
         queue_slow=queue_slow,
         queue_fast=queue_fast,
+        use_cwd=use_cwd,
         log_base_dir=log_base_dir,
         bsub_extra=bsub_extra,
         bjobs_extra=bjobs_extra,
@@ -467,7 +527,7 @@ def _parse_case(d: dict[str, Any]) -> CaseConfig:
     fit_target_fer = float(d.get("fit_target_fer", fer_lo))
     fit_stop_margin = float(d.get("fit_stop_margin", 0.05))
     fit_min_points = int(d.get("fit_min_points", 3))
-    fit_max_extend = float(d.get("fit_max_extend", 1.0))
+    fit_max_extend = float(d.get("fit_max_extend", 0.5))
     gate_enable = bool(d.get("gate_enable", True))
     gate_zero_k = int(d.get("gate_zero_k", 2))
 
@@ -602,8 +662,6 @@ def patch_config_max_sim_num(src: Path, dst: Path, max_sim_num: int, max_error_n
     else:
         left, comment = line, ""
     left = left.rstrip("\n")
-
-    import re
 
     new_left = re.sub(r"^\s*\d+", str(int(max_sim_num)), left)
     lines[idx_sim] = (new_left.rstrip() + (" " + comment if comment else "")).rstrip()
@@ -783,6 +841,7 @@ def _run_adaptive_all_cases(
             queue_fast=lsf.queue_fast or lsf.queue,
             log_base_dir=lsf.log_base_dir,
             bsub_extra=lsf.bsub_extra,
+            include_cwd=lsf.use_cwd,
         )
     elif adaptive.executor == "lsf":
         ex = LsfExecutor(
@@ -793,6 +852,7 @@ def _run_adaptive_all_cases(
             bsub_extra=lsf.bsub_extra,
             bjobs_extra=lsf.bjobs_extra,
             bkill_extra=lsf.bkill_extra,
+            include_cwd=lsf.use_cwd,
         )
     else:
         ex = LocalExecutor()
@@ -911,6 +971,8 @@ def _run_adaptive_case(
             startup_ok_required=adaptive.startup_ok_required,
             fail_fast=adaptive.fail_fast,
             min_fail_cw_for_decision=adaptive.min_fail_cw_for_decision,
+            backfill_step=backfill_step,
+            backfill_decade_threshold=adaptive.backfill_decade_threshold,
             max_job_runtime_sec=adaptive.max_job_runtime_sec,
             timeout_log_grace_sec=adaptive.timeout_log_grace_sec,
             queue=lsf.queue_slow,  # main scan uses slow queue
@@ -929,6 +991,7 @@ def _run_adaptive_case(
                 queue=lsf.queue_slow,  # complete coarse points in the slow queue
                 stages={"main"},
                 export_xlsx_sec=adaptive.export_xlsx_sec,
+                axis_limit=snr_trigger,
             )
             if completed_main > 0:
                 _status(
@@ -968,6 +1031,7 @@ def _run_adaptive_case(
         # Deep scan can start from:
         #   a) snr_trigger (if trigger was hit), or
         #   b) the lowest FER point in manifest (if no trigger but we have data)
+        deep_stop: Optional[float] = None
         deep_start = snr_trigger
         if deep_start is None and main_case.fit_enable:
             # Find the point with lowest FER as starting point for deep scan
@@ -984,12 +1048,32 @@ def _run_adaptive_case(
                 manifest,
                 min_fail_cw_for_decision=adaptive.min_fail_cw_for_decision,
             )
-            if est_stop is not None:
+            if est_stop is None:
+                fit_pts = _count_fit_points(main_case, manifest, adaptive.min_fail_cw_for_decision)
+                if main_case.axis_type == "snr":
+                    deep_stop = float(deep_start)
+                    _status(
+                        f"[auto_fer_eval][adaptive] deep fit unavailable: "
+                        f"only {fit_pts} points in [{main_case.fit_fer_lo:g},{main_case.fit_fer_hi:g}], "
+                        f"need {main_case.fit_min_points}; probing forward from axis={main_case.axis_type} x={deep_start}"
+                    )
+                else:
+                    _status(
+                        f"[auto_fer_eval][adaptive] skip deep scan: fit failed "
+                        f"(only {fit_pts} points in [{main_case.fit_fer_lo:g},{main_case.fit_fer_hi:g}], need {main_case.fit_min_points})"
+                    )
+            else:
                 # Clamp to the configured range end in the "better" direction.
                 if main_case.direction > 0:
                     deep_stop = min(float(main_case.x_stop), float(est_stop))
+                    if main_case.axis_type == "snr" and main_case.fit_max_extend > 0 and deep_start is not None:
+                        deep_stop = min(deep_stop, float(deep_start) + main_case.fit_max_extend)
                 else:
                     deep_stop = max(float(main_case.x_stop), float(est_stop))
+                    if main_case.axis_type == "snr" and main_case.fit_max_extend > 0 and deep_start is not None:
+                        deep_stop = max(deep_stop, float(deep_start) - main_case.fit_max_extend)
+
+            if deep_stop is not None:
                 adaptive_deep_scan(
                     main_case,
                     manifest,
@@ -1006,13 +1090,6 @@ def _run_adaptive_case(
                     max_in_flight=adaptive.max_in_flight,
                     queue=lsf.queue_fast,  # deep scan uses fast queue
                     export_xlsx_sec=adaptive.export_xlsx_sec,
-                )
-            else:
-                # Print reason for skipping deep scan
-                fit_pts = _count_fit_points(main_case, manifest, adaptive.min_fail_cw_for_decision)
-                _status(
-                    f"[auto_fer_eval][adaptive] skip deep scan: fit failed "
-                    f"(only {fit_pts} points in [{main_case.fit_fer_lo:g},{main_case.fit_fer_hi:g}], need {main_case.fit_min_points})"
                 )
 
         # ---- Stage 4.5: finalize fit-window points (re-run incomplete logs to get [STATISTICS])
@@ -1036,6 +1113,9 @@ def _run_adaptive_case(
                 _status(f"[auto_fer_eval][adaptive] finalize done: {finalized} point(s) re-run to completion")
 
         if not dry_run:
+            # Only complete main/backfill points up to trigger.
+            # Deep scan points are excluded: their purpose is fit extrapolation,
+            # not precise fail_cw — re-running them wastes resources.
             completed_all = adaptive_finalize_incomplete_logs(
                 main_case,
                 manifest,
@@ -1047,6 +1127,8 @@ def _run_adaptive_case(
                 max_in_flight=adaptive.max_in_flight,
                 queue=lsf.queue_fast or lsf.queue_slow,
                 export_xlsx_sec=adaptive.export_xlsx_sec,
+                axis_limit=snr_trigger,
+                stages={"main", "backfill"},
             )
             if completed_all > 0:
                 _status(
@@ -1240,7 +1322,17 @@ def _parse_done_log(c: CaseConfig, axis_value: float, log_path: Path, cmd: list[
     if not log_path.exists():
         return None
     txt = log_path.read_text(encoding="utf-8", errors="replace")
-    m = parse_log_text(txt)
+    return _parse_done_text(c, axis_value, log_path, cmd, txt)
+
+
+def _parse_done_text(
+    c: CaseConfig,
+    axis_value: float,
+    log_path: Path,
+    cmd: list[str],
+    text: str,
+) -> Optional[RunRecord]:
+    m = parse_log_text(text)
     if m.ldpc_fer is None:
         return None
     return RunRecord(
@@ -1255,6 +1347,54 @@ def _parse_done_log(c: CaseConfig, axis_value: float, log_path: Path, cmd: list[
         total_packets=m.total_packets,
         retry_dec_avg_iter=m.retry_dec_avg_iter,
     )
+
+
+def _parse_done_log_or_peek(
+    c: CaseConfig,
+    axis_value: float,
+    log_path: Path,
+    cmd: list[str],
+    *,
+    executor: Any,
+    job: Any,
+    peek_timeout_sec: float = 5.0,
+) -> Optional[RunRecord]:
+    rec = _parse_done_log(c, axis_value, log_path, cmd)
+    if rec is not None:
+        return rec
+
+    peek = getattr(executor, "peek_text", None)
+    if not callable(peek):
+        return None
+
+    try:
+        txt = peek(job, timeout_sec=max(0.1, float(peek_timeout_sec)))
+    except Exception:
+        return None
+    if not txt:
+        return None
+    return _parse_done_text(c, axis_value, log_path, cmd, txt)
+
+
+def _mark_done_unparsed(
+    job_db: JobDB,
+    job_key: str,
+    *,
+    now: float,
+    reason: str,
+    state: str = "DONE_UNPARSED",
+) -> None:
+    if not job_key:
+        return
+    job_db.upsert(
+        {
+            "key": job_key,
+            "finished_at": now,
+            "parse_error": str(reason),
+        }
+    )
+    job_db.set_state(job_key, str(state), t=now)
+    job_db.flush()
 
 
 def _normalized_fail_cw(
@@ -1308,6 +1448,165 @@ def _run_record_is_complete(log_path: Path, rec: Optional[RunRecord], *, require
     )
 
 
+def _decision_points_for_trigger(
+    c: CaseConfig,
+    manifest: dict[str, Any],
+    *,
+    min_fail_cw_for_decision: int,
+) -> list[tuple[float, float]]:
+    """Return reliable (axis, FER_eff) points sorted in scan order for trigger decisions."""
+    min_fail = max(0, int(min_fail_cw_for_decision))
+    pts: list[tuple[float, float]] = []
+    for r in manifest.get("runs", []):
+        if r.get("axis_type") != c.axis_type:
+            continue
+        xv = r.get("axis_value")
+        fer = r.get("ldpc_fer")
+        tp = r.get("total_packets")
+        if xv is None or fer is None:
+            continue
+        try:
+            x_f = float(xv)
+            fer_f = float(fer)
+            tp_i = int(tp) if tp is not None else None
+        except (TypeError, ValueError):
+            continue
+        fer_eff = fer_effective(fer_f, tp_i)
+        if fer_eff is None or fer_eff <= 0.0 or not math.isfinite(fer_eff):
+            continue
+        got_fail_cw = _normalized_fail_cw(r.get("fail_cw"), fer, tp)
+        if min_fail > 0 and (got_fail_cw is None or got_fail_cw < min_fail):
+            continue
+        pts.append((x_f, float(fer_eff)))
+    pts.sort(key=lambda t: t[0], reverse=(c.direction < 0))
+    return pts
+
+
+def _backfill_points_between(
+    c: CaseConfig,
+    manifest: dict[str, Any],
+    *,
+    x_worse: float,
+    x_better: float,
+    backfill_step: float,
+    min_fail_cw_for_decision: int,
+) -> list[float]:
+    """Return missing backfill points strictly between two reliable points."""
+    step = float(backfill_step)
+    if c.axis_type == "k":
+        step = float(max(1, int(round(step))))
+    if step <= 0:
+        return []
+
+    min_fail = max(0, int(min_fail_cw_for_decision))
+    pts: list[float] = []
+    x = float(x_worse) + float(c.direction) * step
+    origin = float(x_worse)
+    while True:
+        xq = _quantize_axis(x, step, axis_type=c.axis_type, origin=origin)
+        if c.direction > 0:
+            if xq >= x_better - 1e-12:
+                break
+        else:
+            if xq <= x_better + 1e-12:
+                break
+
+        cached = find_run(manifest, c.axis_type, xq)
+        if cached and cached.get("ldpc_fer") is not None:
+            got_fail_cw = _normalized_fail_cw(
+                cached.get("fail_cw"),
+                cached.get("ldpc_fer"),
+                cached.get("total_packets"),
+            )
+            if min_fail <= 0 or (got_fail_cw is not None and got_fail_cw >= min_fail):
+                x = float(xq) + float(c.direction) * step
+                continue
+
+        pts.append(float(xq))
+        x = float(xq) + float(c.direction) * step
+    return pts
+
+
+def _find_trigger_backfill_points(
+    c: CaseConfig,
+    manifest: dict[str, Any],
+    *,
+    trigger_x: float,
+    trigger_fer: float,
+    min_fail_cw_for_decision: int,
+    backfill_step: float,
+    backfill_decade_threshold: float,
+) -> Optional[tuple[float, float, list[float]]]:
+    """
+    Return the coarse gap that must be backfilled before confirming a trigger point.
+
+    The trigger is delayed when the candidate point is the first reliable point with
+    FER_eff <= trigger_fer, its worse-side neighbor is still above trigger_fer, and
+    the FER jump across the pair exceeds backfill_decade_threshold.
+    """
+    if backfill_step <= 0 or backfill_decade_threshold <= 0:
+        return None
+
+    pts = _decision_points_for_trigger(
+        c,
+        manifest,
+        min_fail_cw_for_decision=min_fail_cw_for_decision,
+    )
+    if len(pts) < 2:
+        return None
+
+    idx = None
+    eps = 0.5 if c.axis_type == "k" else 1e-9
+    for i, (x_f, _fer_eff) in enumerate(pts):
+        if abs(float(x_f) - float(trigger_x)) <= eps:
+            idx = i
+            break
+    if idx is None or idx <= 0:
+        return None
+
+    cur_x, cur_fer_eff = pts[idx]
+    if cur_fer_eff > trigger_fer:
+        return None
+    prev_x, prev_fer_eff = pts[idx - 1]
+    if prev_fer_eff <= trigger_fer:
+        return None
+
+    decade_jump = abs(math.log10(prev_fer_eff) - math.log10(cur_fer_eff))
+    if decade_jump <= float(backfill_decade_threshold):
+        return None
+
+    backfill_points = _backfill_points_between(
+        c,
+        manifest,
+        x_worse=prev_x,
+        x_better=cur_x,
+        backfill_step=backfill_step,
+        min_fail_cw_for_decision=min_fail_cw_for_decision,
+    )
+    if not backfill_points:
+        return None
+    return (float(prev_x), float(cur_x), backfill_points)
+
+
+def _select_trigger_from_manifest(
+    c: CaseConfig,
+    manifest: dict[str, Any],
+    *,
+    trigger_fer: float,
+    min_fail_cw_for_decision: int,
+) -> Optional[float]:
+    """Pick the earliest reliable trigger point currently present in the manifest."""
+    pts = _decision_points_for_trigger(
+        c,
+        manifest,
+        min_fail_cw_for_decision=min_fail_cw_for_decision,
+    )
+    for x_f, fer_eff in pts:
+        if fer_eff <= trigger_fer:
+            return float(x_f)
+    return None
+
+
 def _axis_value_from_log_name(c: CaseConfig, log_name: str) -> Optional[float]:
     prefix = re.escape(c.log_prefix)
     if c.axis_type == "snr":
@@ -1342,6 +1641,8 @@ def adaptive_main_scan(
     startup_ok_required: int,
     fail_fast: bool,
     min_fail_cw_for_decision: int,
+    backfill_step: float,
+    backfill_decade_threshold: float,
     max_job_runtime_sec: float,
     timeout_log_grace_sec: float,
     queue: str = "",
@@ -1367,6 +1668,7 @@ def adaptive_main_scan(
     first_submitted_job_key: Optional[str] = None  # Skip coarse-timeout for the first submitted job (warm-up).
     ok_count = 0
     min_fail = min_fail_cw_for_decision
+    trigger_backfill_seen: set[tuple[float, float]] = set()
 
     job_db = JobDB((Path(c.out_dir) / c.name / "jobs.json").resolve())
     required_fail_cw = read_config_max_error_num(_resolve_cfg_path(c)) or 0
@@ -1380,13 +1682,6 @@ def adaptive_main_scan(
         stage_label="main",
     )
 
-    def _job_identity(job: Any) -> tuple[str, str]:
-        # LsfJob has job_id; LocalJob has proc.pid. Duck-typed to avoid imports here.
-        if hasattr(job, "job_id"):
-            return ("lsf", str(getattr(job, "job_id")))
-        if hasattr(job, "proc") and hasattr(getattr(job, "proc"), "pid"):
-            return ("local", str(getattr(getattr(job, "proc"), "pid")))
-        return ("unknown", str(id(job)))
 
     def _is_reliable_for_decision(fail_cw: Optional[int]) -> bool:
         if min_fail <= 0:
@@ -1418,6 +1713,90 @@ def adaptive_main_scan(
             return xv > trigger + margin + 1e-12
         return xv < trigger - margin - 1e-12
 
+    def _trigger_msg_suffix(source: str) -> str:
+        return f"({source})" if source else ""
+
+    def _maybe_confirm_trigger(
+        *,
+        xv: float,
+        fer_eff: Optional[float],
+        fail_cw: Optional[int],
+        source: str,
+    ) -> None:
+        nonlocal snr_trigger
+        if fer_eff is None or fer_eff > trigger_fer:
+            return
+        if not _is_reliable_for_trigger(fail_cw, fer_eff):
+            _status(
+                f"[auto_fer_eval][adaptive] skip trigger{_trigger_msg_suffix(source)}: "
+                f"axis={c.axis_type} x={xv} FAIL_CW={fail_cw} < {min_fail}"
+            )
+            return
+
+        confirmed_x = float(xv)
+        gap = _find_trigger_backfill_points(
+            c,
+            manifest,
+            trigger_x=float(xv),
+            trigger_fer=trigger_fer,
+            min_fail_cw_for_decision=min_fail,
+            backfill_step=backfill_step,
+            backfill_decade_threshold=backfill_decade_threshold,
+        )
+        if gap is not None:
+            prev_x, cur_x, backfill_points = gap
+            gap_key = (round(prev_x, 9), round(cur_x, 9))
+            if gap_key not in trigger_backfill_seen:
+                trigger_backfill_seen.add(gap_key)
+                _status(
+                    f"[auto_fer_eval][adaptive] delay trigger{_trigger_msg_suffix(source)}: "
+                    f"axis={c.axis_type} x={xv} gap=[{prev_x},{cur_x}] "
+                    f"needs backfill {backfill_points} before truncation"
+                )
+                added = adaptive_backfill_gaps(
+                    c,
+                    manifest,
+                    executor=executor,
+                    backfill_step=backfill_step,
+                    decade_threshold=backfill_decade_threshold,
+                    poll_sec=poll_sec,
+                    fail_fast=fail_fast,
+                    timeout_log_grace_sec=timeout_log_grace_sec,
+                    max_in_flight=1,
+                    queue=queue,
+                )
+                if added > 0:
+                    _status(
+                        f"[auto_fer_eval][adaptive] trigger backfill{_trigger_msg_suffix(source)}: "
+                        f"{added} point(s) completed before confirmation"
+                    )
+            selected = _select_trigger_from_manifest(
+                c,
+                manifest,
+                trigger_fer=trigger_fer,
+                min_fail_cw_for_decision=min_fail,
+            )
+            if selected is not None:
+                confirmed_x = float(selected)
+            if abs(confirmed_x - float(xv)) > (0.5 if c.axis_type == "k" else 1e-9):
+                _status(
+                    f"[auto_fer_eval][adaptive] trigger confirmed{_trigger_msg_suffix(source)} "
+                    f"after backfill: axis={c.axis_type} x={confirmed_x}"
+                )
+
+        if _prefer_trigger_candidate(float(confirmed_x), snr_trigger):
+            snr_trigger = float(confirmed_x)
+            if abs(confirmed_x - float(xv)) <= (0.5 if c.axis_type == "k" else 1e-9):
+                _status(
+                    f"[auto_fer_eval][adaptive] trigger{_trigger_msg_suffix(source)}: "
+                    f"axis={c.axis_type} x={snr_trigger} fer_eff={fer_eff:g} <= {trigger_fer:g}"
+                )
+            else:
+                _status(
+                    f"[auto_fer_eval][adaptive] trigger{_trigger_msg_suffix(source)}: "
+                    f"axis={c.axis_type} x={snr_trigger} (confirmed after backfill)"
+                )
+
     def submit_one(xv: float) -> None:
         nonlocal in_flight, snr_trigger, ok_count, first_submitted_job_key
         log_path = _log_path_for(c, xv)
@@ -1437,18 +1816,12 @@ def adaptive_main_scan(
             tp_s = str(cached.get("total_packets")) if cached.get("total_packets") is not None else "?"
             fer_s = f"{cached['ldpc_fer']:.6g}"
             _status(f"[auto_fer_eval][adaptive] cached: axis={c.axis_type} x={xv} FER={fer_s} FAIL_CW={fcw_s} N={tp_s}")
-            if fer_eff is not None and fer_eff <= trigger_fer:
-                if _is_reliable_for_trigger(cached.get("fail_cw"), fer_eff):
-                    if _prefer_trigger_candidate(float(xv), snr_trigger):
-                        snr_trigger = float(xv)
-                        _status(
-                            f"[auto_fer_eval][adaptive] trigger(from cache): axis={c.axis_type} x={snr_trigger} fer_eff={fer_eff:g} <= {trigger_fer:g}"
-                        )
-                else:
-                    fcw = cached.get("fail_cw")
-                    _status(
-                        f"[auto_fer_eval][adaptive] skip trigger(from cache): axis={c.axis_type} x={xv} FAIL_CW={fcw} < {min_fail}"
-                    )
+            _maybe_confirm_trigger(
+                xv=float(xv),
+                fer_eff=fer_eff,
+                fail_cw=_normalized_fail_cw(cached.get("fail_cw"), cached.get("ldpc_fer"), cached.get("total_packets")),
+                source="from cache",
+            )
             return
 
         # Fallback: try to parse log file if manifest has no record.
@@ -1462,18 +1835,12 @@ def adaptive_main_scan(
             tp_s = str(rec_done.total_packets) if rec_done.total_packets is not None else "?"
             fer_s = f"{rec_done.ldpc_fer:.6g}" if rec_done.ldpc_fer is not None else "?"
             _status(f"[auto_fer_eval][adaptive] cached(log): axis={c.axis_type} x={xv} FER={fer_s} FAIL_CW={fcw_s} N={tp_s}")
-            if fer_eff is not None and fer_eff <= trigger_fer:
-                if _is_reliable_for_trigger(rec_done.fail_cw, fer_eff):
-                    if _prefer_trigger_candidate(float(xv), snr_trigger):
-                        snr_trigger = float(xv)
-                        _status(
-                            f"[auto_fer_eval][adaptive] trigger(from log): axis={c.axis_type} x={snr_trigger} fer_eff={fer_eff:g} <= {trigger_fer:g}"
-                        )
-                else:
-                    fcw = rec_done.fail_cw
-                    _status(
-                        f"[auto_fer_eval][adaptive] skip trigger(from log): axis={c.axis_type} x={xv} FAIL_CW={fcw} < {min_fail}"
-                    )
+            _maybe_confirm_trigger(
+                xv=float(xv),
+                fer_eff=fer_eff,
+                fail_cw=_normalized_fail_cw(rec_done.fail_cw, rec_done.ldpc_fer, rec_done.total_packets),
+                source="from log",
+            )
             return
 
         job_name = f"{Path(c.name).name}_{c.log_prefix}_{_format_axis(xv, c.axis_type)}"
@@ -1533,6 +1900,7 @@ def adaptive_main_scan(
         return max_in_flight
 
     # Submit/poll loop.
+    _backoff = _AdaptiveBackoff(min_sec=5.0, max_sec=poll_sec)
     while True:
         # Fill the pipeline.
         while len(in_flight) < current_capacity() and _in_range(x_next, x_stop_coarse, c.direction):
@@ -1671,17 +2039,12 @@ def adaptive_main_scan(
                     _status(
                         f"[auto_fer_eval][adaptive] timeout parsed: axis={c.axis_type} x={xv} FAIL_CW={fcw_s} N={tp_s} FER={rec_done.ldpc_fer:g}"
                     )
-                    if fer_eff is not None and fer_eff <= trigger_fer:
-                        if _is_reliable_for_trigger(rec_done.fail_cw, fer_eff):
-                            if _prefer_trigger_candidate(float(xv), snr_trigger):
-                                snr_trigger = float(xv)
-                                _status(
-                                    f"[auto_fer_eval][adaptive] trigger(from timeout): axis={c.axis_type} x={snr_trigger} fer_eff={fer_eff:g} <= {trigger_fer:g}"
-                                )
-                        else:
-                            _status(
-                                f"[auto_fer_eval][adaptive] skip trigger(from timeout): axis={c.axis_type} x={xv} FAIL_CW={rec_done.fail_cw} < {min_fail}"
-                            )
+                    _maybe_confirm_trigger(
+                        xv=float(xv),
+                        fer_eff=fer_eff,
+                        fail_cw=_normalized_fail_cw(rec_done.fail_cw, rec_done.ldpc_fer, rec_done.total_packets),
+                        source="from timeout",
+                    )
                     # Coarse-only watchdog: do not schedule even deeper points in the better direction.
                     if c.direction > 0:
                         x_stop_coarse = min(x_stop_coarse, float(xv))
@@ -1733,11 +2096,33 @@ def adaptive_main_scan(
                 sleep_s = min(2.0, sleep_s * 1.5)
 
             if rec_done is None:
-                msg = f"[auto_fer_eval][adaptive] ERROR: job done but log not parsable (missing LDPC FER): {log_path}"
+                rec_done = _parse_done_log_or_peek(
+                    c,
+                    xv,
+                    log_path,
+                    cmd,
+                    executor=executor,
+                    job=job,
+                    peek_timeout_sec=min(5.0, grace_sec),
+                )
+
+            if rec_done is None:
+                msg = f"[auto_fer_eval][adaptive] warn: job done but log not parsable (missing LDPC FER): {log_path}"
                 _status(msg)
-                if fail_fast:
-                    cancel_all_in_flight(reason="log_not_parsable")
-                    raise RuntimeError(msg)
+                _status(
+                    f"[auto_fer_eval][adaptive] warn: axis={c.axis_type} x={xv} will be left for recovery "
+                    "by completion pass or restart"
+                )
+                if job_key:
+                    job_db.upsert(
+                        {
+                            "key": job_key,
+                            "finished_at": now,
+                            "parse_error": "missing_ldpc_fer",
+                        }
+                    )
+                    job_db.set_state(job_key, "DONE_UNPARSED", t=now)
+                    job_db.flush()
                 done_any = True
             else:
                 upsert_run(manifest, rec_done)
@@ -1748,17 +2133,12 @@ def adaptive_main_scan(
                 tp_s = str(rec_done.total_packets) if rec_done.total_packets is not None else "?"
                 fer_s = f"{rec_done.ldpc_fer:.6g}" if rec_done.ldpc_fer is not None else "?"
                 _status(f"[auto_fer_eval][adaptive] done: axis={c.axis_type} x={xv} FER={fer_s} FAIL_CW={fcw_s} N={tp_s}")
-                if fer_eff is not None and fer_eff <= trigger_fer:
-                    if _is_reliable_for_trigger(rec_done.fail_cw, fer_eff):
-                        if _prefer_trigger_candidate(float(xv), snr_trigger):
-                            snr_trigger = float(xv)
-                            _status(
-                                f"[auto_fer_eval][adaptive] trigger: axis={c.axis_type} x={snr_trigger} fer_eff={fer_eff:g} <= {trigger_fer:g}"
-                            )
-                    else:
-                        _status(
-                            f"[auto_fer_eval][adaptive] skip trigger: axis={c.axis_type} x={xv} FAIL_CW={rec_done.fail_cw} < {min_fail}"
-                        )
+                _maybe_confirm_trigger(
+                    xv=float(xv),
+                    fer_eff=fer_eff,
+                    fail_cw=_normalized_fail_cw(rec_done.fail_cw, rec_done.ldpc_fer, rec_done.total_packets),
+                    source="",
+                )
                 done_any = True
             if job_key:
                 job_db.upsert({"key": job_key, "finished_at": now})
@@ -1815,8 +2195,11 @@ def adaptive_main_scan(
                     in_flight.pop(xv, None)
             job_db.flush()
 
-        if not done_any:
-            time.sleep(poll_sec)
+        if done_any:
+            _periodic_save_manifest(c, manifest)
+            _backoff.reset()
+        else:
+            _backoff.sleep()
 
     if snr_trigger is not None:
         _status(f"[auto_fer_eval][adaptive] main scan done. axis={c.axis_type} trigger={snr_trigger}")
@@ -1874,12 +2257,41 @@ def adaptive_deep_scan(
         xlsx_path = _progress_xlsx_path_for_case(c)
         next_export_at = time.time()
 
-    def _job_identity(job: Any) -> tuple[str, str]:
-        if hasattr(job, "job_id"):
-            return ("lsf", str(getattr(job, "job_id")))
-        if hasattr(job, "proc") and hasattr(getattr(job, "proc"), "pid"):
-            return ("local", str(getattr(getattr(job, "proc"), "pid")))
-        return ("unknown", str(id(job)))
+
+    def _deep_point_has_coverage(xv: float) -> bool:
+        if _in_flight_has_axis(in_flight, xv):
+            return True
+        cached = find_run(manifest, c.axis_type, xv)
+        if not cached or cached.get("ldpc_fer") is None:
+            return False
+        fcw = _normalized_fail_cw(
+            cached.get("fail_cw"),
+            cached.get("ldpc_fer"),
+            cached.get("total_packets"),
+        )
+        if min_fail <= 0:
+            return True
+        return fcw is not None and int(fcw) >= min_fail
+
+    def _ensure_min_future_probe_points(points: list[float], *, start_axis: float, min_points: int) -> list[float]:
+        if c.axis_type != "snr" or min_points <= 0:
+            return []
+
+        planned = {_axis_key(v) for v in points}
+        added: list[float] = []
+        x_probe = _quantize_axis(start_axis + c.direction * step, step, axis_type=c.axis_type, origin=origin)
+        covered = 0
+        while covered < min_points and _in_range(x_probe, float(c.x_stop), c.direction):
+            x_key = _axis_key(x_probe)
+            if x_key in planned or _deep_point_has_coverage(x_probe):
+                covered += 1
+            else:
+                points.append(float(x_probe))
+                planned.add(x_key)
+                added.append(float(x_probe))
+                covered += 1
+            x_probe = _quantize_axis(x_probe + c.direction * step, step, axis_type=c.axis_type, origin=origin)
+        return added
 
     # Generate all deep scan points.
     deep_points: list[float] = []
@@ -1914,6 +2326,19 @@ def adaptive_deep_scan(
         deep_points.append(x)
         x = _quantize_axis(x + c.direction * step, step, axis_type=c.axis_type, origin=origin)
 
+    min_probe_points = 2 if c.axis_type == "snr" else 0
+    forced_probe_points = _ensure_min_future_probe_points(
+        deep_points,
+        start_axis=float(start_snr),
+        min_points=min_probe_points,
+    )
+    if forced_probe_points:
+        deep_points = sorted(deep_points, reverse=(c.direction < 0))
+        _status(
+            f"[auto_fer_eval][adaptive] deep scan: extend minimum probe "
+            f"axis={c.axis_type} start={start_snr} -> {forced_probe_points}"
+        )
+
     if not deep_points:
         _status(f"[auto_fer_eval][adaptive] deep scan: no new points needed (start={start_snr} stop={stop_snr})")
         next_export_at = _maybe_export_live_progress_xlsx(
@@ -1935,8 +2360,9 @@ def adaptive_deep_scan(
     _status(f"[auto_fer_eval][adaptive] deep scan: axis={c.axis_type} start={start_snr} stop={stop_snr} ({len(deep_points)} points)")
 
     # Submit and poll in parallel.
-    pending = list(deep_points)
+    pending = collections.deque(deep_points)
     completed = 0
+    _backoff = _AdaptiveBackoff(min_sec=5.0, max_sec=poll_sec)
 
     next_export_at = _maybe_export_live_progress_xlsx(
         c,
@@ -1971,7 +2397,7 @@ def adaptive_deep_scan(
         # Fill pipeline.
         submitted_any = False
         while pending and len(in_flight) < max_in_flight:
-            xv = pending.pop(0)
+            xv = pending.popleft()
             log_path = _log_path_for(c, xv)
             cmd = build_cmd(c, xv)
             job_name = f"{Path(c.name).name}_{c.log_prefix}_{_format_axis(xv, c.axis_type)}"
@@ -2064,11 +2490,20 @@ def adaptive_deep_scan(
                 sleep_s = min(2.0, sleep_s * 1.5)
 
             if rec_done is None:
+                rec_done = _parse_done_log_or_peek(
+                    c,
+                    xv,
+                    log_path,
+                    cmd,
+                    executor=executor,
+                    job=job,
+                    peek_timeout_sec=min(5.0, grace_sec),
+                )
+
+            if rec_done is None:
                 msg = f"[auto_fer_eval][adaptive] warn: deep job done but log not parsable (missing LDPC FER): {log_path}"
                 _status(msg)
-                if st.state == "EXIT" and fail_fast:
-                    # Best-effort diagnostics: print the tail of the log to help users
-                    # distinguish LSF kill (runlimit/memlimit) vs simulator crash/config issues.
+                if st.state == "EXIT":
                     try:
                         if log_path.exists():
                             tail_lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-80:]
@@ -2079,24 +2514,21 @@ def adaptive_deep_scan(
                                 print(f"[auto_fer_eval][adaptive] | {ln}")
                     except Exception:
                         pass
-
-                    # Cancel remaining in-flight jobs to avoid leaving a large tail running in the cluster.
-                    for xv2, info2 in list(in_flight.items()):
-                        if xv2 == xv:
-                            continue
-                        try:
-                            executor.cancel(info2["job"])
-                        except Exception:
-                            pass
-                        job_db.mark_cancel(str(info2["job_key"]), reason="deep_exit")
-                        in_flight.pop(xv2, None)
-                    job_db.flush()
-                    jid = getattr(job, "job_id", None)
-                    jid_s = f" job_id={jid}" if jid is not None else ""
-                    raise RuntimeError(
-                        f"[auto_fer_eval][adaptive] ERROR: deep job exited abnormally and log not parsable: "
-                        f"axis={c.axis_type} x={xv}{jid_s} log={log_path}"
+                    _status(
+                        f"[auto_fer_eval][adaptive] warn: deep job exited without parsable FER; "
+                        f"axis={c.axis_type} x={xv} will be skipped for this run"
                     )
+                _status(
+                    f"[auto_fer_eval][adaptive] warn: deep axis={c.axis_type} x={xv} will be left "
+                    "out of manifest until a later rerun/restart recovers it"
+                )
+                _mark_done_unparsed(
+                    job_db,
+                    job_key,
+                    now=time.time(),
+                    reason="missing_ldpc_fer",
+                    state="EXIT_UNPARSED" if st.state == "EXIT" else "DONE_UNPARSED",
+                )
             else:
                 if st.state == "EXIT":
                     _status(
@@ -2149,8 +2581,11 @@ def adaptive_deep_scan(
             in_flight.pop(xv, None)
             done_any = True
 
-        if not done_any:
-            time.sleep(poll_sec)
+        if done_any:
+            _periodic_save_manifest(c, manifest)
+            _backoff.reset()
+        else:
+            _backoff.sleep()
 
     # Final export after deep scan completes normally.
     _maybe_export_live_progress_xlsx(
@@ -2435,10 +2870,38 @@ def _refresh_in_flight_live_metrics(
         job_db.flush()
 
 
-def _log_has_required_fail_cw(log_path: Path, required_fail_cw: int) -> bool:
+_STATISTICS_FER_RE = re.compile(
+    r"^\s*\[STATISTICS\]\s+LDPC\s+FER\s*:\s*[0-9eE+\-\.]+\s*$", re.M
+)
+
+
+def _read_log_text(log_path: Path) -> Optional[str]:
+    if not log_path.exists():
+        return None
+    try:
+        return log_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+
+
+def _log_has_complete_statistics(log_path: Path) -> bool:
+    """A 'complete' log means it reached the final [STATISTICS] section."""
+    txt = _read_log_text(log_path)
+    if txt is None:
+        return False
+    return bool(_STATISTICS_FER_RE.search(txt))
+
+
+def _log_is_complete_for_required_fail_cw(log_path: Path, required_fail_cw: int) -> bool:
+    """Single-read check: has [STATISTICS] AND meets fail_cw threshold."""
+    txt = _read_log_text(log_path)
+    if txt is None:
+        return False
+    if not _STATISTICS_FER_RE.search(txt):
+        return False
     if required_fail_cw <= 0:
         return True
-    m = _read_log_metrics(log_path)
+    m = parse_log_text(txt)
     if m is None:
         return False
     return _record_meets_required_fail_cw(
@@ -2447,36 +2910,6 @@ def _log_has_required_fail_cw(log_path: Path, required_fail_cw: int) -> bool:
         total_packets=m.total_packets,
         required_fail_cw=required_fail_cw,
     )
-
-
-def _log_is_complete_for_required_fail_cw(log_path: Path, required_fail_cw: int) -> bool:
-    if not _log_has_complete_statistics(log_path):
-        return False
-    return _log_has_required_fail_cw(log_path, required_fail_cw)
-
-
-def _log_has_complete_statistics(log_path: Path) -> bool:
-    """
-    A "complete" log means it reached the final [STATISTICS] section.
-
-    We intentionally key off statistics lines (not SIM blocks), so that partial logs
-    from timeout/kill can still be used for decisions temporarily, but later we can
-    re-run selected points to produce a complete, comparable dataset.
-    """
-    if not log_path.exists():
-        return False
-    try:
-        txt = log_path.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return False
-    import re
-
-    has_fer = re.search(
-        r"^\s*\[STATISTICS\]\s+LDPC\s+FER\s*:\s*[0-9eE+\-\.]+\s*$",
-        txt,
-        flags=re.M,
-    )
-    return bool(has_fer)
 
 
 def adaptive_finalize_fit_logs(
@@ -2581,15 +3014,10 @@ def adaptive_finalize_fit_logs(
     xlsx_path: Optional[Path] = _progress_xlsx_path_for_case(c) if export_sec > 0 else None
     next_export_at: Optional[float] = time.time() if xlsx_path is not None else None
 
-    def _job_identity(job: Any) -> tuple[str, str]:
-        if hasattr(job, "job_id"):
-            return ("lsf", str(getattr(job, "job_id")))
-        if hasattr(job, "proc") and hasattr(getattr(job, "proc"), "pid"):
-            return ("local", str(getattr(getattr(job, "proc"), "pid")))
-        return ("unknown", str(id(job)))
 
-    pending = [x for x in xs if not _in_flight_has_axis(in_flight, x)]
+    pending = collections.deque(x for x in xs if not _in_flight_has_axis(in_flight, x))
     completed = 0
+    _backoff = _AdaptiveBackoff(min_sec=5.0, max_sec=poll_sec)
     next_export_at = _maybe_export_live_progress_xlsx(
         c,
         manifest,
@@ -2622,7 +3050,7 @@ def adaptive_finalize_fit_logs(
 
         submitted_any = False
         while pending and len(in_flight) < max_in_flight:
-            xv = pending.pop(0)
+            xv = pending.popleft()
             info = cand[xv]
             log_path = Path(info["log_path"])
             cmd = list(info["cmd"])
@@ -2698,11 +3126,6 @@ def adaptive_finalize_fit_logs(
             log_path = Path(info["log_path"])
             cmd = list(info["cmd"])
 
-            if st.state == "EXIT" and fail_fast:
-                raise RuntimeError(
-                    f"[auto_fer_eval][adaptive] ERROR: finalize job exited abnormally: axis={c.axis_type} x={xv} log={log_path}"
-                )
-
             rec_done = None
             t_end = time.time() + grace_sec
             while time.time() < t_end:
@@ -2712,7 +3135,25 @@ def adaptive_finalize_fit_logs(
                 time.sleep(1.0)
 
             if rec_done is None:
+                rec_done = _parse_done_log_or_peek(
+                    c,
+                    xv,
+                    log_path,
+                    cmd,
+                    executor=executor,
+                    job=job,
+                    peek_timeout_sec=min(5.0, grace_sec),
+                )
+
+            if rec_done is None:
                 _status(f"[auto_fer_eval][adaptive] warn: finalize log not parsable: {log_path}")
+                _mark_done_unparsed(
+                    job_db,
+                    job_key,
+                    now=time.time(),
+                    reason="missing_ldpc_fer",
+                    state="EXIT_UNPARSED" if st.state == "EXIT" else "DONE_UNPARSED",
+                )
             elif not _run_record_is_complete(log_path, rec_done, required_fail_cw=required_fail_cw):
                 got_fail_cw = _normalized_fail_cw(rec_done.fail_cw, rec_done.ldpc_fer, rec_done.total_packets)
                 _status(
@@ -2740,8 +3181,11 @@ def adaptive_finalize_fit_logs(
             in_flight.pop(xv, None)
             done_any = True
 
-        if not done_any:
-            time.sleep(poll_sec)
+        if done_any:
+            _periodic_save_manifest(c, manifest)
+            _backoff.reset()
+        else:
+            _backoff.sleep()
 
     _maybe_export_live_progress_xlsx(
         c,
@@ -2825,8 +3269,7 @@ def _axis_key(x: float) -> float:
 
 
 def _in_flight_has_axis(in_flight: dict[float, dict[str, Any]], xv: float) -> bool:
-    key = _axis_key(xv)
-    return any(_axis_key(k) == key for k in in_flight.keys())
+    return _axis_key(xv) in in_flight
 
 
 def _job_point_key(stage: str, axis_type: str, axis_value: float) -> str:
@@ -3022,6 +3465,7 @@ def adaptive_finalize_incomplete_logs(
     queue: str = "",
     stages: Optional[set[str]] = None,
     export_xlsx_sec: float = 0.0,
+    axis_limit: Optional[float] = None,
 ) -> int:
     """
     Re-run retained adaptive points whose logs are still incomplete.
@@ -3032,6 +3476,10 @@ def adaptive_finalize_incomplete_logs(
 
     We collect candidates from both manifest.json and jobs.json so points killed
     before being written to manifest can still be recovered.
+
+    If axis_limit is set, only points within [x_start, axis_limit] (direction>0)
+    or [axis_limit, x_start] (direction<0) are considered.  Points beyond the
+    limit (e.g. killed by trigger) are skipped to avoid wasting resources.
     """
     poll_sec = max(0.2, float(poll_sec))
     max_in_flight = max(1, int(max_in_flight))
@@ -3040,6 +3488,13 @@ def adaptive_finalize_incomplete_logs(
 
     job_db_path = (Path(c.out_dir) / c.name / "jobs.json").resolve()
     latest_jobs = _load_latest_jobs_by_snr(job_db_path, axis_type=c.axis_type, stages=stages)
+
+    def _within_limit(x_f: float) -> bool:
+        if axis_limit is None:
+            return True
+        if c.direction > 0:
+            return x_f <= axis_limit + 1e-12
+        return x_f >= axis_limit - 1e-12
 
     cand: dict[float, dict[str, Any]] = {}
 
@@ -3059,6 +3514,8 @@ def adaptive_finalize_incomplete_logs(
             x_f = float(xv)
         except (TypeError, ValueError):
             continue
+        if not _within_limit(x_f):
+            continue
         log_path = Path(r.get("log_path") or _log_path_for(c, x_f)).resolve()
         if _log_is_complete_for_required_fail_cw(log_path, required_fail):
             continue
@@ -3067,6 +3524,8 @@ def adaptive_finalize_incomplete_logs(
         _add_candidate(x_f, log_path=log_path, cmd=cmd)
 
     for x_f, job in latest_jobs.items():
+        if not _within_limit(x_f):
+            continue
         log_path = Path(job.get("log_path") or _log_path_for(c, x_f)).resolve()
         if _log_is_complete_for_required_fail_cw(log_path, required_fail):
             continue
@@ -3099,15 +3558,10 @@ def adaptive_finalize_incomplete_logs(
     xlsx_path: Optional[Path] = _progress_xlsx_path_for_case(c) if export_sec > 0 else None
     next_export_at: Optional[float] = time.time() if xlsx_path is not None else None
 
-    def _job_identity(job: Any) -> tuple[str, str]:
-        if hasattr(job, "job_id"):
-            return ("lsf", str(getattr(job, "job_id")))
-        if hasattr(job, "proc") and hasattr(getattr(job, "proc"), "pid"):
-            return ("local", str(getattr(getattr(job, "proc"), "pid")))
-        return ("unknown", str(id(job)))
 
-    pending = [x for x in xs if not _in_flight_has_axis(in_flight, x)]
+    pending = collections.deque(x for x in xs if not _in_flight_has_axis(in_flight, x))
     completed = 0
+    _backoff = _AdaptiveBackoff(min_sec=5.0, max_sec=poll_sec)
     next_export_at = _maybe_export_live_progress_xlsx(
         c,
         manifest,
@@ -3140,7 +3594,7 @@ def adaptive_finalize_incomplete_logs(
 
         submitted_any = False
         while pending and len(in_flight) < max_in_flight:
-            xv = pending.pop(0)
+            xv = pending.popleft()
             info = cand[xv]
             log_path = Path(info["log_path"])
             cmd = list(info["cmd"])
@@ -3219,12 +3673,6 @@ def adaptive_finalize_incomplete_logs(
             log_path = Path(info["log_path"])
             cmd = list(info["cmd"])
 
-            if st.state == "EXIT" and fail_fast:
-                raise RuntimeError(
-                    f"[auto_fer_eval][adaptive] ERROR: completion job exited abnormally: "
-                    f"axis={c.axis_type} x={xv} log={log_path}"
-                )
-
             rec_done = None
             t_end = time.time() + grace_sec
             while time.time() < t_end:
@@ -3234,10 +3682,26 @@ def adaptive_finalize_incomplete_logs(
                 time.sleep(1.0)
 
             if rec_done is None:
+                rec_done = _parse_done_log_or_peek(
+                    c,
+                    xv,
+                    log_path,
+                    cmd,
+                    executor=executor,
+                    job=job,
+                    peek_timeout_sec=min(5.0, grace_sec),
+                )
+
+            if rec_done is None:
                 msg = f"[auto_fer_eval][adaptive] warn: completion log not parsable: {log_path}"
                 _status(msg)
-                if fail_fast:
-                    raise RuntimeError(msg)
+                _mark_done_unparsed(
+                    job_db,
+                    job_key,
+                    now=time.time(),
+                    reason="missing_ldpc_fer",
+                    state="EXIT_UNPARSED" if st.state == "EXIT" else "DONE_UNPARSED",
+                )
             elif not _log_is_complete_for_required_fail_cw(log_path, required_fail):
                 parsed = _read_log_metrics(log_path)
                 fcw = parsed.fail_cw if parsed is not None else None
@@ -3265,8 +3729,11 @@ def adaptive_finalize_incomplete_logs(
             in_flight.pop(xv, None)
             done_any = True
 
-        if not done_any:
-            time.sleep(poll_sec)
+        if done_any:
+            _periodic_save_manifest(c, manifest)
+            _backoff.reset()
+        else:
+            _backoff.sleep()
 
     _maybe_export_live_progress_xlsx(
         c,
@@ -3517,12 +3984,6 @@ def adaptive_backfill_gaps(
         stage_label="backfill",
     )
 
-    def _job_identity(job: Any) -> tuple[str, str]:
-        if hasattr(job, "job_id"):
-            return ("lsf", str(getattr(job, "job_id")))
-        if hasattr(job, "proc") and hasattr(getattr(job, "proc"), "pid"):
-            return ("local", str(getattr(getattr(job, "proc"), "pid")))
-        return ("unknown", str(id(job)))
 
     # Collect all completed points with valid FER.
     pts: list[tuple[float, float]] = []
@@ -3614,13 +4075,14 @@ def adaptive_backfill_gaps(
         return 0
 
     # Submit and poll in parallel.
-    pending = list(backfill_points)
+    pending = collections.deque(backfill_points)
     added = 0
+    _backoff = _AdaptiveBackoff(min_sec=5.0, max_sec=poll_sec)
 
     while pending or in_flight:
         # Fill pipeline.
         while pending and len(in_flight) < max_in_flight:
-            xv = pending.pop(0)
+            xv = pending.popleft()
             log_path = _log_path_for(c, xv)
             cmd = build_cmd(c, xv)
             job_name = f"{Path(c.name).name}_{c.log_prefix}_{_format_axis(xv, c.axis_type)}"
@@ -3672,14 +4134,27 @@ def adaptive_backfill_gaps(
             log_path = Path(info["log_path"])
             cmd = list(info["cmd"])
 
-            if st.state == "EXIT" and fail_fast:
-                raise RuntimeError(
-                    f"[auto_fer_eval][adaptive] ERROR: backfill job exited abnormally: axis={c.axis_type} x={xv} log={log_path}"
-                )
-
             rec_done = _parse_done_log(c, xv, log_path, cmd)
             if rec_done is None:
+                rec_done = _parse_done_log_or_peek(
+                    c,
+                    xv,
+                    log_path,
+                    cmd,
+                    executor=executor,
+                    job=job,
+                    peek_timeout_sec=min(5.0, float(timeout_log_grace_sec)),
+                )
+
+            if rec_done is None:
                 _status(f"[auto_fer_eval][adaptive] warn: backfill log incomplete: {log_path}")
+                _mark_done_unparsed(
+                    job_db,
+                    job_key,
+                    now=time.time(),
+                    reason="missing_ldpc_fer",
+                    state="EXIT_UNPARSED" if st.state == "EXIT" else "DONE_UNPARSED",
+                )
             else:
                 upsert_run(manifest, rec_done)
                 added += 1
@@ -3693,8 +4168,11 @@ def adaptive_backfill_gaps(
             in_flight.pop(xv, None)
             done_any = True
 
-        if not done_any:
-            time.sleep(poll_sec)
+        if done_any:
+            _periodic_save_manifest(c, manifest)
+            _backoff.reset()
+        else:
+            _backoff.sleep()
 
     return added
 
@@ -3978,7 +4456,27 @@ def predict_stop_axis_from_manifest(
     if abs(a) < 1e-12:
         return None
 
+    # Guard: waterfall slope must be positive (FER rises with RAW_BER)
+    if a <= 0:
+        return None
+
+    # Guard: R² check -- reject poor fits before extrapolating
+    _FIT_R_SQ_MIN = 0.90
+    ss_res = sum((y - (a * x + b)) ** 2 for x, y in zip(xs, ys))
+    y_mean = sum(ys) / len(ys)
+    ss_tot = sum((y - y_mean) ** 2 for y in ys)
+    r_sq = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    if r_sq < _FIT_R_SQ_MIN:
+        return None
+
+    # Guard: extrapolation distance must not exceed N× the fit window span
+    _FIT_EXTRAP_RATIO_MAX = 3.0
+    fit_span = max(ys) - min(ys)
     y_target = math.log10(c.fit_target_fer)
+    extrap_dist = abs(y_target - min(ys))
+    if fit_span > 0 and extrap_dist / fit_span > _FIT_EXTRAP_RATIO_MAX:
+        return None
+
     x_target = (y_target - b) / a
     if not math.isfinite(x_target):
         return None

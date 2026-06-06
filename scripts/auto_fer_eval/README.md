@@ -420,13 +420,14 @@ deep scan 的步长策略（adaptive 会用到）：
 - `timeout_log_grace_sec`：日志刷盘等待时间（秒；默认 10）。用于两类场景：1) coarse watchdog 超时 kill 后重试解析；2) LSF 下 bjobs 已显示 DONE 但 `-o` 日志尚未完全落盘时的重试解析（LSF 下会强制至少等待 30 秒）。
 - `backfill_step`：回填步长（可选；不填则用 `step_mid`，默认 0.05）。当相邻点 FER 跳变超过 `backfill_decade_threshold` 时，用此步长回填中间点。设为 0 禁用回填。
 - `backfill_decade_threshold`：触发回填的 FER 跳变阈值（默认 2.0，即 100 倍）。
-- `export_xlsx_sec`：deep scan 阶段周期导出 xlsx 的时间间隔（秒；默认 3600；设为 0 禁用）。xlsx 文件名为 `out_dir/<case.name>/adaptive/<log_prefix>_progress.xlsx`，字段包含：`SNR,RAW_BER,LDPC_FER,FAIL_CW,PACKETS,AvgIter,IsComplete,JobState,Stage,LogPath`。其中 `IsComplete=1` 的判据为日志中出现 `[STATISTICS] LDPC FER` 且 `FAIL CW` 达到 cnfg 中的 `maximum error number`。若点位仍在运行，导出会优先读取当前日志内容；LSF 下若共享盘日志暂未及时刷新，会额外尝试 `bpeek` 获取最新 stdout 统计。
+- `export_xlsx_sec`：`deep/finalize/completion` 阶段周期导出 xlsx 的时间间隔（秒；默认 3600；设为 0 禁用）。xlsx 文件名为 `out_dir/<case.name>/adaptive/<log_prefix>_progress.xlsx`，字段包含：`SNR,RAW_BER,LDPC_FER,FAIL_CW,PACKETS,AvgIter,IsComplete,JobState,Stage,LogPath`。其中 `IsComplete=1` 的判据为日志中出现 `[STATISTICS] LDPC FER` 且 `FAIL CW` 达到 cnfg 中的 `maximum error number`。若点位仍在运行，导出会优先读取当前日志内容；LSF 下若共享盘日志暂未及时刷新，会额外尝试 `bpeek` 获取最新 stdout 统计。
 
 ### 5.3 `[lsf]`：只在 `executor="lsf"` 时生效
 
 - `queue`：默认队列（`bsub -q <queue>`）
 - `queue_slow`：pilot/main/backfill 阶段使用的队列（不填则用 `queue`）
 - `queue_fast`：deep scan 阶段使用的队列（不填则用 `queue`）
+- `use_cwd`：是否在 `bsub` 命令里附带 `-cwd <workdir>`（默认 `true`）。若你的集群策略不允许或不需要 `-cwd`，可设为 `false`。
 - `log_base_dir`：LSF 日志输出基础目录（可选）。若设置，日志会输出到 `log_base_dir/<case_name>/adaptive/main/*.log`，保持 case 目录结构。不设置则使用 `out_dir`。
 - `bsub_extra`：额外 bsub 参数数组（例如资源申请）
 - `bjobs_extra`：额外 bjobs 参数数组
