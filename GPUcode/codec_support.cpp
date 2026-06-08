@@ -75,7 +75,7 @@ check_nodes codec_support::config_check_nodes(const h_matrix &h_matrix_ref, cons
                         if (h_matrix_ref.occupied[row_idx][col_idx] && (row_idx == (h_matrix_ref.rows - 1)) && h_matrix_ref.last_row_active_bits[col_idx][bit_idx])
                             cn.rows[row_idx][rotated_word_idx] ^= (UNIT << rotated_bit_idx_in_word);
                         
-                        if (h_matrix_ref.occupied[row_idx][col_idx] && !h_matrix_ref.last_row_active_bits[col_idx][bit_idx])
+                        if (h_matrix_ref.fade[row_idx][col_idx] && !h_matrix_ref.last_row_active_bits[col_idx][bit_idx])
                             cn.rows[row_idx][rotated_word_idx] ^= (UNIT << rotated_bit_idx_in_word);
                     }
                 }

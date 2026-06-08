@@ -1,14 +1,20 @@
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <vector>
+
 #include "decoder.h"
-#include "codec_support.h"
-#include "codeword.h"
-#include "h_matrix.h"
-uint64_t logger::ITER_LIMIT = logger::MAX_ITER;
+#include "finite_lib.h"
+#include "vec_op.h"
+
+#define COMPARE_GPU
+
 uint16_t decoder::prng_init[] = {0x9365, 0x49f9, 0xda8f, 0xf7b2, 0x30ee, 0xef08, 0x1b73, 0x8c9a, 0xc646, 0xb550, 0x2edb, 0x71cc, 0x5d27, 0xa8a1, 0x6214, 0x043d, 0x9375, 0x89f9, 0xd98f, 0xf2b2, 0x31ee, 0xef18, 0x0b73, 0x4c9a, 0xc946, 0xba50, 0x3edb, 0x71bc, 0x5327, 0xa8a1, 0x3214, 0x083d};
+
+uint64_t logger::ITER_LIMIT = logger::MAX_ITER;
 
 ldpc_decoder_input::ldpc_decoder_input() {
     return;
@@ -19,8 +25,6 @@ ldpc_decoder_input::ldpc_decoder_input(uint64_t nand_strobes, uint64_t soft_bits
     this->soft_bits = soft_bits;
     this->iteration_limit = iteration_limit;
     this->post_iteration = post_iteration;
-
-    return;
 }
 
 void ldpc_decoder_input::clear_cw(void) {
@@ -34,359 +38,377 @@ void ldpc_decoder_output::print_stats(void) {
     std::cout << "clock_cycles: " << clock_cycles << "\n";
     std::cout << "syndrome_weight_before: " << syndrome_weight_before << "\n";
     std::cout << "syndrome_weight_after: " << syndrome_weight_after << "\n";
-
-    return;
 }
 
-void decoder_output_acc::print_stats(void) {
-    std::cout << "===== Accumulated Decoding Stats =====\n";
-    std::cout << "failure: " << failure << "\n";
-    std::cout << "iterations: " << iterations << "\n";
-    std::cout << "clock_cycles: " << clock_cycles << "\n";
-    std::cout << "syndrome_weight_before: " << syndrome_weight_before << "\n";
-    std::cout << "syndrome_weight_after: " << syndrome_weight_after << "\n";
-    std::cout << "total_errors: " << total_errors << "\n";
-    std::cout << "net_acc: " << net_acc << "\n";
+inline void print_512float(float *a) {
+    for (int i = 0; i < 32; i++) {
+        for (int j = 0; j < 16; j++)
+            printf("%f ", a[i * 16 + j]);
+        printf("\n");
+    }
+}
 
-    return;
+inline void print_512bit(char *a) {
+    for (int i = 0; i < 16; i++) {
+        uint32_t tmp = 0;
+        for (int j = 0; j < 32; j++)
+            tmp |= (a[i * 32 + j] << j);
+        printf("%08x ", tmp);
+    }
+    printf("\n");
+}
+
+inline void print_512cn_msg(cn_msg_cpu *a) {
+    printf("print min1_val\n");
+    for (int i = 0; i < 32; i++) {
+        for (int j = 0; j < 16; j++)
+            printf("%f ", a[i * 16 + j].min1_val);
+        printf("\n");
+    }
+
+    printf("print min2_val\n");
+    for (int i = 0; i < 32; i++) {
+        for (int j = 0; j < 16; j++)
+            printf("%f ", a[i * 16 + j].min2_val);
+        printf("\n");
+    }
+
+    printf("print min1_pos\n");
+    for (int i = 0; i < 32; i++) {
+        for (int j = 0; j < 16; j++)
+            printf("%2d ", a[i * 16 + j].min1_pos);
+        printf("\n");
+    }
+
+    printf("print tot_sign\n");
+    for (int i = 0; i < 32; i++) {
+        for (int j = 0; j < 16; j++)
+            printf("%2d ", a[i * 16 + j].sign_tot);
+        printf("\n");
+    }
 }
 
 decoder::decoder(h_matrix &h_matrix_ref, int nand_strobes, int post_ratio) : h_matrix_ref(h_matrix_ref) {
-    ldpc_decoder_parameters.post_ratio = post_ratio;
-    ldpc_decoder_parameters.likelihood_init_fraction[0] = 0;
-    ldpc_decoder_parameters.likelihood_init_fraction[1] = 0;
-    ldpc_decoder_parameters.likelihood_init_fraction[2] = 0;
+    return;
+}
 
-    if (nand_strobes == 7) {
-        ldpc_decoder_parameters.likelihood_init_fraction[1] = 9;
-        ldpc_decoder_parameters.likelihood_init_fraction[2] = 3;
+void decoder::update_node(float *cn_q_sel_pre, cn_msg_cpu *cn_c_sel_pre, float *cn_r_new_pre, float *cn_app_pre, int layer_pre, int col) {
+    for (int i = 0; i < h_matrix_ref.bits; i++) {
+        const int sign_tmp = (cn_q_sel_pre[i] >= 0) ? 1 : -1;
+
+        if (cn_c_sel_pre[i].min1_pos == col)
+            cn_r_new_pre[i] = cn_c_sel_pre[i].min2_val * cn_c_sel_pre[i].sign_tot * sign_tmp;
+        else
+            cn_r_new_pre[i] = cn_c_sel_pre[i].min1_val * cn_c_sel_pre[i].sign_tot * sign_tmp;
+
+        if (h_matrix_ref.extra_bytes_of_parity == 0) {
+            cn_app_pre[i] = cn_r_new_pre[i] + cn_q_sel_pre[i];
+        } else if (h_matrix_ref.occupied[layer_pre][col] && (layer_pre < (h_matrix_ref.rows - 1))) {
+            cn_app_pre[i] = cn_r_new_pre[i] + cn_q_sel_pre[i];
+        } else if (h_matrix_ref.occupied[layer_pre][col] && (layer_pre == (h_matrix_ref.rows - 1)) && h_matrix_ref.mask[col][(i + h_matrix_ref.element[layer_pre][col]) % h_matrix_ref.bits]) {
+            cn_app_pre[i] = cn_r_new_pre[i] + cn_q_sel_pre[i];
+        } else if (h_matrix_ref.fade[layer_pre][col] && !h_matrix_ref.mask[col][(i + h_matrix_ref.element[layer_pre][col]) % h_matrix_ref.bits]) {
+            cn_app_pre[i] = cn_r_new_pre[i] + cn_q_sel_pre[i];
+        } else {
+            cn_app_pre[i] = cn_q_sel_pre[i];
+        }
+
+        if (ldpc_decoder_parameters.finite_mode == 1)
+            cn_app_pre[i] = (float)Sat_Quan((double)cn_app_pre[i], ldpc_decoder_parameters.finite_q_max, ldpc_decoder_parameters.finite_q_min, ldpc_decoder_parameters.finite_q_num, ldpc_decoder_parameters.finite_f_num);
+    }
+}
+
+void decoder::update_hd(char *dec_init, int col, int layer, int layer_pre, float *cn_app_pre, float *cn_app_cur, 
+                        char *vn_dec_hd, int &hd_updated, char *dec_do_blk, char *cn_dec_hd, char *layer_synd) {
+    int shift_val1;
+    int shift_val2;
+
+    if (dec_init[col] == 1) {
+        shift_val1 = h_matrix_ref.element[layer][col];
+        shift_val2 = 0;
+        dec_init[col] = 0;
     } else {
-        ldpc_decoder_parameters.likelihood_init_fraction[1] = 6;
-        ldpc_decoder_parameters.likelihood_init_fraction[2] = 6;
+        shift_val1 = -1 * h_matrix_ref.element[layer_pre][col] + h_matrix_ref.element[layer][col];
+        shift_val2 = -1 * h_matrix_ref.element[layer_pre][col];
+    }
+
+    for (int i = 0; i < h_matrix_ref.bits; i++) {
+        cn_app_cur[i] = cn_app_pre[(i + shift_val1 + h_matrix_ref.bits) % h_matrix_ref.bits];
+        vn_dec_hd[i] = (cn_app_pre[(i + shift_val2 + h_matrix_ref.bits) % h_matrix_ref.bits] >= 0) ? 0 : 1;
+    }
+
+    if (hd_updated == 0) {
+        if (vec_cmp(dec_do_blk, vn_dec_hd, col * h_matrix_ref.bits, 0, h_matrix_ref.bits) == 1)
+            hd_updated = 1;
+    }
+
+    vec_copy(vn_dec_hd, dec_do_blk, 0, col * h_matrix_ref.bits, h_matrix_ref.bits);
+    vec_shift(vn_dec_hd, cn_dec_hd, h_matrix_ref.bits, -1 * h_matrix_ref.element[layer][col]);
+
+    if (h_matrix_ref.extra_bytes_of_parity == 0) {
+        vec_mod2_add(cn_dec_hd, layer_synd, layer_synd, h_matrix_ref.bits);
+    } else {
+        if (h_matrix_ref.occupied[layer][col] && (layer == (h_matrix_ref.rows - 1))) {
+            for (int i = 0; i < h_matrix_ref.bits; i++) {
+                if (!h_matrix_ref.mask[col][(i + h_matrix_ref.element[layer][col]) % h_matrix_ref.bits])
+                    cn_dec_hd[i] = 0;
+            }
+        }
+
+        if (h_matrix_ref.fade[layer][col]) {
+            for (int i = 0; i < h_matrix_ref.bits; i++) {
+                if (h_matrix_ref.mask[col][(i + h_matrix_ref.element[layer][col]) % h_matrix_ref.bits])
+                    cn_dec_hd[i] = 0;
+            }
+        }
+
+        vec_mod2_add(cn_dec_hd, layer_synd, layer_synd, h_matrix_ref.bits);
+    }
+}
+
+void decoder::update_node_next(float *cn_r_old_cur, cn_msg_cpu *cn_c_sel_cur, float *cn_q_updt_cur, float *cn_app_pre, float *cn_app_cur, int finite_mode, int cir_cnt, int layer, int col, int **cn_q_sign, float **cn_q_mem, cn_msg_cpu *cn_c_updt_cur) {
+    (void)cn_app_pre;
+
+    for (int i = 0; i < h_matrix_ref.bits; i++) {
+        if (cn_c_sel_cur[i].min1_pos == col)
+            cn_r_old_cur[i] = cn_c_sel_cur[i].min2_val * cn_c_sel_cur[i].sign_tot * cn_q_sign[cir_cnt][i];
+        else
+            cn_r_old_cur[i] = cn_c_sel_cur[i].min1_val * cn_c_sel_cur[i].sign_tot * cn_q_sign[cir_cnt][i];
+
+        if (h_matrix_ref.extra_bytes_of_parity == 0) {
+            cn_q_updt_cur[i] = cn_app_cur[i] - cn_r_old_cur[i];
+        } else {
+            if (h_matrix_ref.occupied[layer][col] && (layer == (h_matrix_ref.rows - 1)) && (!h_matrix_ref.mask[col][(i + h_matrix_ref.element[layer][col]) % h_matrix_ref.bits]))
+                cn_r_old_cur[i] = 0;
+
+            if (h_matrix_ref.fade[layer][col] && h_matrix_ref.mask[col][(i + h_matrix_ref.element[layer][col]) % h_matrix_ref.bits])
+                cn_r_old_cur[i] = 0;
+
+            cn_q_updt_cur[i] = cn_app_cur[i] - cn_r_old_cur[i];
+        }
+
+        if (finite_mode == 1)
+            cn_q_updt_cur[i] = (float)Sat_Quan((double)cn_q_updt_cur[i], ldpc_decoder_parameters.finite_q_max, ldpc_decoder_parameters.finite_q_min, ldpc_decoder_parameters.finite_q_num, ldpc_decoder_parameters.finite_f_num);
+
+        int sign_tmp;
+        float val_tmp;
+        if (h_matrix_ref.extra_bits_of_parity == 0) {
+            sign_tmp = (cn_q_updt_cur[i] >= 0) ? 1 : -1;
+            val_tmp = cn_q_updt_cur[i] * sign_tmp;
+        } else if (h_matrix_ref.occupied[layer][col] && (layer == (h_matrix_ref.rows - 1)) && (!h_matrix_ref.mask[col][(i + h_matrix_ref.element[layer][col]) % h_matrix_ref.bits])) {
+            sign_tmp = 1;
+            val_tmp = 100000;
+        } else if (h_matrix_ref.fade[layer][col] && h_matrix_ref.mask[col][(i + h_matrix_ref.element[layer][col]) % h_matrix_ref.bits]) {
+            sign_tmp = 1;
+            val_tmp = 100000;
+        } else {
+            sign_tmp = (cn_q_updt_cur[i] >= 0) ? 1 : -1;
+            val_tmp = cn_q_updt_cur[i] * sign_tmp;
+        }
+
+        cn_c_updt_cur[i].sign_tot *= sign_tmp;
+        if (val_tmp < cn_c_updt_cur[i].min1_val) {
+            cn_c_updt_cur[i].min2_val = cn_c_updt_cur[i].min1_val;
+            cn_c_updt_cur[i].min1_val = val_tmp;
+            cn_c_updt_cur[i].min1_pos = col;
+        } else if (val_tmp < cn_c_updt_cur[i].min2_val) {
+            cn_c_updt_cur[i].min2_val = val_tmp;
+        }
+
+        cn_q_sign[cir_cnt][i] = sign_tmp;
+    }
+
+    for (int i = 0; i < h_matrix_ref.bits; i++) {
+        cn_q_mem[col][i] = cn_q_updt_cur[i];
     }
 }
 
 ldpc_decoder_output decoder::decode_planar(const ldpc_decoder_input &decoder_input) {
-    uint64_t iteration = 0;
-
-    uint64_t i, j, k;
+    int col;
+    int layer_pre;
+    int cir_cnt;
+    int hd_init;
+    int hd_updated;
+    int layer_synd_wt = 0;
+    int synd_pass_cnt = 0;
+    int hd_stable_cnt = 0;
+    int cw_fail = 1;
+    int ldec_early_term_en = 1;
     int clock_cycles = 0;
-    uint64_t syndrome_weight;
-    bool finished = 0;
-    bool hamming_weight_lt_circ_thr, hamming_weight_lt_post_thr;
-    bool post_trigger1, post_trigger2;
 
-    codeword hard_codeword = decoder_input.corrupted_codeword.hard;
+    char *dec_init = (char *)calloc(h_matrix_ref.cols, sizeof(*dec_init));
+    char *layer_synd = (char *)calloc(h_matrix_ref.bits, sizeof(*layer_synd));
+    char *cn_dec_hd = (char *)calloc(h_matrix_ref.bits, sizeof(*cn_dec_hd));
+    char *vn_dec_hd = (char *)calloc(h_matrix_ref.bits, sizeof(*vn_dec_hd));
+    char *dec_di_blk = (char *)calloc(h_matrix_ref.bits * h_matrix_ref.cols, sizeof(*dec_di_blk));
+    char *dec_do_blk = (char *)calloc(h_matrix_ref.bits * h_matrix_ref.cols, sizeof(*dec_do_blk));
+    vec_set(dec_init, h_matrix_ref.cols);
 
-    variable_nodes vn;
-    check_nodes cn;
-    s_likelihood_levels likelihood_levels;
+    cn_msg_cpu **cn_c_mem = (cn_msg_cpu **)calloc(h_matrix_ref.rows, sizeof(*cn_c_mem));
+    for (int i = 0; i < h_matrix_ref.rows; i++)
+        cn_c_mem[i] = (cn_msg_cpu *)calloc(h_matrix_ref.bits, sizeof(*cn_c_mem[i]));
+
+    cn_msg_cpu *cn_c_updt_cur = (cn_msg_cpu *)calloc(h_matrix_ref.bits, sizeof(*cn_c_updt_cur));
+    cn_msg_cpu *cn_c_sel_cur = NULL;
+    cn_msg_cpu *cn_c_sel_pre = NULL;
+    float **cn_q_mem = (float **)calloc(h_matrix_ref.cols, sizeof(*cn_q_mem));
+    for (int i = 0; i < h_matrix_ref.cols; i++)
+        cn_q_mem[i] = (float *)calloc(h_matrix_ref.bits, sizeof(*cn_q_mem[i]));
+
+    float *cn_q_sel_pre = NULL;
+    float *cn_r_new_pre = (float *)calloc(h_matrix_ref.bits, sizeof(*cn_r_new_pre));
+    float *cn_app_pre = (float *)calloc(h_matrix_ref.bits, sizeof(*cn_app_pre));
+    float *cn_app_cur = (float *)calloc(h_matrix_ref.bits, sizeof(*cn_app_cur));
+    float *cn_q_sel_cur = (float *)calloc(h_matrix_ref.bits, sizeof(*cn_q_sel_cur));
+    float *cn_r_old_cur = (float *)calloc(h_matrix_ref.bits, sizeof(*cn_r_old_cur));
+    float *cn_q_updt_cur = (float *)calloc(h_matrix_ref.bits, sizeof(*cn_q_updt_cur));
+    (void)cn_q_sel_cur;
+
+    int **cn_q_sign = (int **)calloc(5 * h_matrix_ref.cols, sizeof(*cn_q_sign));
+    for (int i = 0; i < 5 * h_matrix_ref.cols; i++)
+        cn_q_sign[i] = (int *)calloc(h_matrix_ref.bits, sizeof(*cn_q_sign[i]));
+
+    int **e_pre = (int **)calloc(h_matrix_ref.rows, sizeof(*e_pre));
+    for (int i = 0; i < h_matrix_ref.rows; i++)
+        e_pre[i] = (int *)calloc(h_matrix_ref.cols, sizeof(*e_pre[i]));
+
     ldpc_decoder_output decoder_output;
-    s_512_bits prng_512;
-    uint64_t syndrome_weight_delayed;
-    uint64_t syndrome_weight_r[4] = {0, 0, 0, 0};
+    printf("use CPU decoder by cdeng\n");
 
-    cn = config_check_nodes(h_matrix_ref, hard_codeword);
-    syndrome_weight = check_node_weight(cn);
+    for (int i = 0; i < h_matrix_ref.rows; i++) {
+        for (int j = 0; j < h_matrix_ref.cols; j++)
+            e_pre[i][j] = -1;
+    }
 
-#ifdef ASPEN
-    clock_cycles = (h_matrix_ref.cols) + 1;
-#else
-    clock_cycles = (2 * h_matrix_ref.cols) + 1;
-#endif
+    for (int i = 0; i < h_matrix_ref.cols; i++) {
+        int tmp_pre = -1;
+        int first_layer = -1;
+        for (int j = 0; j < h_matrix_ref.rows; j++) {
+            if ((h_matrix_ref.occupied[j][i] == 1) || ((h_matrix_ref.fade[j][i] == 1) && h_matrix_ref.extra_bytes_of_parity > 0)) {
+                e_pre[j][i] = tmp_pre;
+                tmp_pre = j;
+                if (first_layer < 0)
+                    first_layer = j;
+            }
+        }
+        e_pre[first_layer][i] = tmp_pre;
+    }
 
-    if (syndrome_weight == 0)
-        finished = 1;
+    for (int idx = 0; idx < h_matrix_ref.cols * 8; idx += 1) {
+        const auto col_idx = idx / 8;
+        const auto word_idx = idx % 8;
+        const auto hard_bits = decoder_input.corrupted_codeword.hard.cols[col_idx][word_idx];
+        const auto soft_bits_0 = decoder_input.corrupted_codeword.soft0.cols[col_idx][word_idx];
+        const auto soft_bits_1 = decoder_input.corrupted_codeword.soft1.cols[col_idx][word_idx];
 
-    decoder_output.syndrome_weight_before = syndrome_weight;
-    syndrome_weight_delayed = syndrome_weight;
-
-    likelihood_levels = compute_likelihood_levels(decoder_input.nand_strobes, ldpc_decoder_parameters, syndrome_weight, h_matrix_ref.rows);
-
-    for (j = 0; j < h_matrix_ref.cols; j++) {
-        for (k = 0; k < h_matrix_ref.bits; k++) {
-            int tt = k / 64, ttt = k % 64;
-            uint64_t aaa = (decoder_input.corrupted_codeword.soft0.cols[j][tt] >> ttt) & 0x1;
-            uint64_t bbb = (decoder_input.corrupted_codeword.soft1.cols[j][tt] >> ttt) & 0x1;
-            uint64_t soft_data = aaa | (bbb << 1);
-
-            vn.likelihood[j][k] = likelihood_levels.level[soft_data];
+        for (int bit_idx = 0; bit_idx < 64; bit_idx++) {
+            const bool hard = (hard_bits & (1UL << bit_idx));
+            const bool sb0 = (soft_bits_0 & (1UL << bit_idx));
+            const bool sb1 = (soft_bits_1 & (1UL << bit_idx));
+            const auto llr_index = (hard << 2) | (sb1 << 1) | sb0;
+            cn_q_mem[col_idx][word_idx * 64 + bit_idx] = ldpc_decoder_parameters.llr_table[llr_index];
+            dec_di_blk[col_idx * h_matrix_ref.bits + word_idx * 64 + bit_idx] = llr_index;
         }
     }
 
-    while (iteration < decoder_input.iteration_limit && !finished) {
-        for (j = 0; j < h_matrix_ref.cols; j++) {
-            printf("iteration= %llu, col= %llu\n", static_cast<unsigned long long>(iteration), static_cast<unsigned long long>(j));
-            clock_cycles++;
+    vec_copy(dec_di_blk, dec_do_blk, 0, 0, h_matrix_ref.rows);
 
-            if ((iteration == decoder_input.post_iteration) && (j == 0)) {
-                for (i = 0; i < 512; i++) {
-                    prng_512.b[i] = (prng_init[int(i / 16)] >> (i % 16)) & 1;
-                }
-            } else if (iteration >= decoder_input.post_iteration) {
-                prng_512 = lfsr_512_bit(prng_512);
+    for (int itr = 0; itr < (int)decoder_input.iteration_limit && ((ldec_early_term_en == 0) || (cw_fail == 1)); itr++) {
+        cir_cnt = 0;
+
+        for (int layer = 0; layer < h_matrix_ref.rows && ((ldec_early_term_en == 0) || (cw_fail == 1)); layer++) {
+            hd_init = (vec_sum(dec_init, h_matrix_ref.cols) != 0);
+            cn_c_sel_cur = cn_c_mem[layer];
+
+            for (int i = 0; i < h_matrix_ref.bits; i++) {
+                cn_c_updt_cur[i].min1_val = 100000;
+                cn_c_updt_cur[i].min2_val = 100000;
+                cn_c_updt_cur[i].min1_pos = 0;
+                cn_c_updt_cur[i].sign_tot = 1;
             }
 
-            syndrome_weight_r[3] = syndrome_weight_r[2];
-            syndrome_weight_r[2] = syndrome_weight_r[1];
-            syndrome_weight_r[1] = syndrome_weight_r[0];
-            syndrome_weight_r[0] = syndrome_weight;
+            hd_updated = 0;
+            vec_clr(layer_synd, h_matrix_ref.bits);
 
-            syndrome_weight_delayed = (j <= 3) ? syndrome_weight_r[2] : syndrome_weight_r[3];
-            syndrome_weight = check_node_weight(cn);
-
-            hamming_weight_lt_circ_thr = (iteration >= decoder_input.post_iteration) && (syndrome_weight_delayed < ldpc_decoder_parameters.syndrome_weight_thr_qc);
-            hamming_weight_lt_post_thr = (iteration >= decoder_input.post_iteration) && (syndrome_weight_delayed < ldpc_decoder_parameters.syndrome_weight_thr_post);
-
-            post_trigger1 = hamming_weight_lt_circ_thr && ((iteration % 16) < ldpc_decoder_parameters.post_ratio) && ldpc_decoder_parameters.post_process_en;
-            post_trigger2 = hamming_weight_lt_post_thr && ((iteration % 16) >= ldpc_decoder_parameters.post_ratio) && ldpc_decoder_parameters.post_process_en;
-
-            auto start_time = std::chrono::steady_clock::now();
-
-            uint64_t row_mask[LDPC_M][8] = {0};
-            uint64_t vn_flip_mask[8];
-
-            for (int word_idx = 0; word_idx < 8; word_idx++) {
-                vn_flip_mask[word_idx] = vn.flipped[j][word_idx];
-                vn.flipped[j][word_idx] = 0;
-            }
-
-            uint64_t active_rows[5] = {LDPC_M, LDPC_M, LDPC_M, LDPC_M, LDPC_M};
-            uint64_t active_row_count = 0;
-
-            for (i = 0; i < h_matrix_ref.rows; i++) {
-                int idx = h_matrix_ref.operational_h_matrix[i][j];
-                h_matrix::range curr_range = h_matrix_ref.tile_ranges[idx];
-
-                if (curr_range.active_count == 0)
+            for (col = 0; col < h_matrix_ref.cols; col++) {
+                if (((h_matrix_ref.occupied[layer][col] == 0) && (h_matrix_ref.fade[layer][col] == 0)) || ((h_matrix_ref.fade[layer][col] == 1) && (h_matrix_ref.extra_bytes_of_parity == 0)))
                     continue;
 
-                active_rows[active_row_count] = i;
-                active_row_count++;
+                cn_q_sel_pre = cn_q_mem[col];
+                layer_pre = e_pre[layer][col];
+                cn_c_sel_pre = cn_c_mem[layer_pre];
 
-                mask_range_512(row_mask[i], curr_range.offset, curr_range.active_count);
-                printf("print row mask[%llu] =", static_cast<unsigned long long>(i));
-                for (int ii = 0; ii < 8; ii++)
-                    printf(" %016llx ", row_mask[i][7 - ii]);
-                printf("\n");
+                update_node(cn_q_sel_pre, cn_c_sel_pre, cn_r_new_pre, cn_app_pre, layer_pre, col);
+                update_hd(dec_init, col, layer, layer_pre, cn_app_pre, cn_app_cur, vn_dec_hd, hd_updated, dec_do_blk, cn_dec_hd, layer_synd);
+                update_node_next(cn_r_old_cur, cn_c_sel_cur, cn_q_updt_cur, cn_app_pre, cn_app_cur, ldpc_decoder_parameters.finite_mode, cir_cnt, layer, col, cn_q_sign, cn_q_mem, cn_c_updt_cur);
+                cir_cnt++;
             }
 
-            const uint64_t base_mask_word = 0x0101010101010101ULL;
-            const bool base_aggr_condition = (decoder_input.soft_bits > 0) && (likelihood_levels.min < ldpc_decoder_parameters.likelihood_thr);
+            for (int i = 0; i < h_matrix_ref.bits; i++) {
+                cn_c_mem[layer][i].min1_val = cn_c_updt_cur[i].min1_val * ldpc_decoder_parameters.alpha;
+                cn_c_mem[layer][i].min2_val = cn_c_updt_cur[i].min2_val * ldpc_decoder_parameters.alpha;
 
-            for (unsigned bit_idx = 0; bit_idx < 8; bit_idx++) {
-                const uint64_t active_mask = base_mask_word << bit_idx;
-                printf("bit_idx, active_mask=%d   %llx\n", bit_idx, active_mask);
-
-                uint64_t row_mask_m[8];
-                uint64_t cn_sample_temp[8];
-                uint64_t adder_aligned[8];
-                uint64_t weight_word[8] = {0};
-
-                // I. Accumulate weight from all check_node rows
-                for (uint64_t row_num = 0; row_num < active_row_count; row_num++) {
-                    i = active_rows[row_num];
-                    // 1) Limit the mask to active bit locations of this run.
-                    for (int word_idx = 0; word_idx < 8; word_idx++)
-                        cn_sample_temp[word_idx] = row_mask[i][word_idx] & active_mask;
-
-                    printf("print cn_sample_temp[%llu] =", static_cast<unsigned long long>(i));
-                    for (int ii = 0; ii < 8; ii++)
-                        printf(" %016llx ", cn_sample_temp[7 - ii]);
-                    printf("\n");
-                    // 2) shift by m offset
-                    rotate_left_512(cn_sample_temp, row_mask_m, h_matrix_ref.element[i][j]);
-
-                    // 3) sample cn[i]
-                    for (int word_idx = 0; word_idx < 8; word_idx++)
-                        cn_sample_temp[word_idx] = row_mask_m[word_idx] & cn.rows[i][word_idx];
-
-                    // 4) shift back to align weight sums. Have additional left shift so we can align all with adder base.
-                    rotate_left_512(cn_sample_temp, adder_aligned, -h_matrix_ref.element[i][j] + bit_idx);
-
-                    // 5) Accumulate results into weights
-                    for (int word_idx = 0; word_idx < 8; word_idx++)
-                        weight_word[word_idx] += adder_aligned[word_idx];
+                if (ldpc_decoder_parameters.finite_mode == 1) {
+                    cn_c_mem[layer][i].min1_val = (float)Sat_Quan((double)cn_c_mem[layer][i].min1_val, ldpc_decoder_parameters.finite_c_max, ldpc_decoder_parameters.finite_c_min, ldpc_decoder_parameters.finite_c_num, ldpc_decoder_parameters.finite_f_num);
+                    cn_c_mem[layer][i].min2_val = (float)Sat_Quan((double)cn_c_mem[layer][i].min2_val, ldpc_decoder_parameters.finite_c_max, ldpc_decoder_parameters.finite_c_min, ldpc_decoder_parameters.finite_c_num, ldpc_decoder_parameters.finite_f_num);
                 }
 
-                if (base_aggr_condition) {
-                    for (int word_idx = 0; word_idx < 8; word_idx++) {
-                        uint64_t curr_aggr = vn_flip_mask[word_idx] & active_mask;
-                        uint8_t *aggr_ptr = (uint8_t *)&curr_aggr;
-                        uint8_t *weight_ptr = (uint8_t *)&weight_word[word_idx];
-
-                        for (int byte_idx = 0; byte_idx < 8; byte_idx++) {
-                            const bool update_weight = (aggr_ptr[byte_idx] != 0) && (weight_ptr[byte_idx] > 0);
-                            weight_ptr[byte_idx] += update_weight * (weight_ptr[byte_idx] - 1);
-                        }
-                    }
-                }
-
-                update_vn_planar(vn.flipped[j], (uint8_t *)weight_word, &vn.likelihood[j][0], likelihood_levels, prng_512.b, post_trigger1, post_trigger2, bit_idx);
+                cn_c_mem[layer][i].min1_pos = cn_c_updt_cur[i].min1_pos;
+                cn_c_mem[layer][i].sign_tot = cn_c_updt_cur[i].sign_tot;
             }
 
-            for (int word_idx = 0; word_idx < 8; word_idx++)
-                vn_flip_mask[word_idx] ^= vn.flipped[j][word_idx];
-
-            for (uint64_t row_num = 0; row_num < active_row_count; row_num++) {
-                i = active_rows[row_num];
-                uint64_t vn_flip_mask_m_aligned[8];
-
-                for (int word_idx = 0; word_idx < 8; word_idx++)
-                    row_mask[i][word_idx] &= vn_flip_mask[word_idx];
-
-                rotate_left_512(row_mask[i], vn_flip_mask_m_aligned, h_matrix_ref.element[i][j]);
-
-                for (int word_idx = 0; word_idx < 8; word_idx++)
-                    cn.rows[i][word_idx] ^= vn_flip_mask_m_aligned[word_idx];
+            layer_synd_wt = vec_sum(layer_synd, h_matrix_ref.bits);
+            if (hd_init == 1) {
+                hd_stable_cnt = 0;
+                synd_pass_cnt = 0;
+            } else if ((hd_updated == 0) && (layer_synd_wt == 0)) {
+                hd_stable_cnt++;
+                synd_pass_cnt++;
+            } else {
+                hd_stable_cnt = 0;
+                synd_pass_cnt = 0;
             }
 
-            auto end_time = std::chrono::steady_clock::now();
+            if ((synd_pass_cnt >= h_matrix_ref.rows) && (hd_stable_cnt >= (h_matrix_ref.rows - 1))) {
+                cw_fail = 0;
+                decoder_output.iterations = itr;
+            }
         }
-
-        finished = (check_node_weight(cn) == 0);
-        clock_cycles++;
-        iteration++;
     }
 
-    decoder_output.iterations = iteration;
+    if ((cw_fail == 1) || (ldec_early_term_en == 0))
+        decoder_output.iterations = decoder_input.iteration_limit;
+
     decoder_output.clock_cycles = clock_cycles;
-    decoder_output.syndrome_weight_after = check_node_weight(cn);
-    decoder_output.failure = (decoder_output.syndrome_weight_after != 0);
+    decoder_output.syndrome_weight_after = layer_synd_wt;
+    decoder_output.failure = cw_fail;
 
-    for (j = 0; j < h_matrix_ref.cols; j++) {
-        for (int word_idx = 0; word_idx < 8; word_idx++)
-            decoder_output.total_errors += __builtin_popcountll(vn.flipped[j][word_idx]);
-    }
+    free(dec_init);
+    for (int i = 0; i < h_matrix_ref.rows; i++)
+        free(cn_c_mem[i]);
+    free(cn_c_mem);
+    free(cn_c_updt_cur);
+    for (int i = 0; i < h_matrix_ref.cols; i++)
+        free(cn_q_mem[i]);
+    free(cn_q_mem);
+    free(cn_r_new_pre);
+    free(cn_app_pre);
+    free(cn_app_cur);
+    free(cn_q_sel_cur);
+    free(cn_r_old_cur);
+    free(cn_q_updt_cur);
+    for (int i = 0; i < 5 * h_matrix_ref.cols; i++)
+        free(cn_q_sign[i]);
+    free(cn_q_sign);
+    for (int i = 0; i < h_matrix_ref.rows; i++)
+        free(e_pre[i]);
+    free(e_pre);
+    free(layer_synd);
+    free(cn_dec_hd);
+    free(vn_dec_hd);
 
+    printf("decode fail=%d, iter=%d\n", cw_fail, decoder_output.iterations);
     return decoder_output;
-}
-
-void decoder::update_vn_planar(uint64_t *vn_flipped, const uint8_t *weight_word, unsigned char *vn_likelihood, const s_likelihood_levels &likelihood_levels, const bool *prng_512, bool post_trigger1, bool post_trigger2, int bit_offset) {
-    for (int weight_idx = 0; weight_idx < 64; weight_idx++) {
-        const auto k = weight_idx * 8 + bit_offset;
-        const auto curr_likelihood = vn_likelihood[k];
-        const bool flipped_prev = (curr_likelihood >= likelihood_levels.flip_thr);
-        int likelihood_new = flipped_prev ? curr_likelihood - weight_word[weight_idx] : curr_likelihood + weight_word[weight_idx] - 1;
-
-        if (post_trigger1 && prng_512[k] && (likelihood_new <= likelihood_levels.flip_thr)) {
-            likelihood_new = likelihood_levels.flip_thr - (likelihood_new < likelihood_levels.flip_thr) + (likelihood_new == likelihood_levels.flip_thr);
-        }
-
-        likelihood_new += post_trigger2 && prng_512[k] && !flipped_prev && (weight_word[weight_idx] == 1) && (likelihood_new == (likelihood_levels.flip_thr - 1));
-
-        if (likelihood_new <= likelihood_levels.min)
-            likelihood_new = likelihood_levels.min;
-        else if (likelihood_new >= likelihood_levels.max)
-            likelihood_new = likelihood_levels.max;
-
-        vn_likelihood[k] = likelihood_new;
-
-        const uint64_t new_active = (likelihood_new >= likelihood_levels.flip_thr) ? UNIT : 0ULL;
-        vn_flipped[k / 64] |= new_active << (k % 64);
-    }
-}
-
-s_likelihood_levels decoder::compute_likelihood_levels(int strobes, decoder::ldpc_decoder_params ldpc_decoder_parameters, int syndrome_weight, int rows) {
-    s_likelihood_levels likelihood_levels;
-    int address;
-    int delta[4];
-    int delta_sum;
-    int delta_total;
-    int coef[4];
-    int weak_minus_strong;
-    const unsigned VN_BITS = decoder::ldpc_decoder_params::VN_BITS;
-
-    likelihood_levels.max = (1U << VN_BITS) - 1;
-    likelihood_levels.min = 1;
-    likelihood_levels.flip_thr = (VN_BITS == 3) ? likelihood_levels.max - 3 : likelihood_levels.max - 7;
-    likelihood_levels.weak = likelihood_levels.flip_thr - 4;
-    likelihood_levels.strong = likelihood_levels.weak;
-    likelihood_levels.level[0] = likelihood_levels.weak;
-    likelihood_levels.level[1] = likelihood_levels.weak;
-    likelihood_levels.level[2] = likelihood_levels.weak;
-    likelihood_levels.level[3] = likelihood_levels.weak;
-
-    if (strobes > 0) {
-        address = syndrome_weight >> 5;
-        if (address >= 64)
-            address = 63;
-
-        int coef_index = 0;
-        if (rows == 7)
-            coef_index = 1;
-        if (rows == 8)
-            coef_index = 2;
-        if (rows == 9)
-            coef_index = 3;
-        if (rows == 10)
-            coef_index = 4;
-        if (rows == 11)
-            coef_index = 5;
-        if (rows == 12)
-            coef_index = 6;
-        if (rows == 13)
-            coef_index = 7;
-
-        coef[0] = ldpc_decoder_parameters.likelihood_init_coef_all[coef_index][0];
-        coef[1] = ldpc_decoder_parameters.likelihood_init_coef_all[coef_index][1];
-        coef[2] = ldpc_decoder_parameters.likelihood_init_coef_all[coef_index][2];
-        coef[3] = ldpc_decoder_parameters.likelihood_init_coef_all[coef_index][3];
-
-        delta[0] = (address >= 0) ? (coef[0] * (address - 0)) : 0;
-        delta[1] = (address >= 8) ? (coef[1] * (address - 8)) : 0;
-        delta[2] = (address >= 16) ? (coef[2] * (address - 16)) : 0;
-        delta[3] = (address >= 24) ? (coef[3] * (address - 24)) : 0;
-
-        delta_sum = delta[0] + delta[1] + delta[2] + delta[3];
-        delta_total = (VN_BITS == 8) ? ((delta_sum >> 1) + (delta_sum >> 2)) : ((delta_sum >> 2) + (delta_sum >> 3));
-        likelihood_levels.strong = likelihood_levels.weak - delta_total;
-
-        if (likelihood_levels.strong < likelihood_levels.min)
-            likelihood_levels.strong = likelihood_levels.min;
-
-        likelihood_levels.level[0] = likelihood_levels.strong;
-        likelihood_levels.level[1] = likelihood_levels.level[0];
-        likelihood_levels.level[2] = likelihood_levels.level[3];
-
-        if (strobes > 3) {
-            likelihood_levels.level[1] = likelihood_levels.level[0] + ldpc_decoder_parameters.likelihood_init_fraction[1];
-            likelihood_levels.level[2] = likelihood_levels.level[3] - ldpc_decoder_parameters.likelihood_init_fraction[2];
-            weak_minus_strong = likelihood_levels.level[3] - likelihood_levels.level[0];
-
-            if (weak_minus_strong >= 8)
-                likelihood_levels.min = likelihood_levels.strong;
-        }
-    }
-
-    std::cout << ":: likelihood levels"
-              << "\n"
-              << "level[0]:" << likelihood_levels.level[0] << "\n"
-              << "level[1]:" << likelihood_levels.level[1] << "\n"
-              << "level[2]:" << likelihood_levels.level[2] << "\n"
-              << "level[3]:" << likelihood_levels.level[3] << "\n"
-              << "Flip thr: " << likelihood_levels.flip_thr << "\n"
-              << "\n";
-
-    return likelihood_levels;
-}
-
-s_512_bits decoder::lfsr_512_bit(s_512_bits data_in) {
-    s_512_bits data_out;
-    int i;
-    bool bit0;
-
-    bit0 = data_in.b[0];
-    for (i = 0; i < 512; i++) {
-        if (i == 511)
-            data_out.b[i] = bit0;
-        else if ((i == 509) || (i == 506) || (i == 503))
-            data_out.b[i] = data_in.b[i + 1] ^ bit0;
-        else
-            data_out.b[i] = data_in.b[i + 1];
-    }
-
-    return data_out;
 }
 
 void logger::log_elapsed_time(const std::chrono::steady_clock::time_point &start_time, const std::chrono::steady_clock::time_point &end_time) {
@@ -401,7 +423,7 @@ void logger::log_elapsed_time(const std::chrono::steady_clock::time_point &start
         double sum = 0;
         for (const auto &elem : time_keeper)
             sum += elem;
-        std::cout << " -> Decoder Elapsed time: " << (double)sum / time_keeper.size() << " us\n";
+        std::cout << "  > Decoder Elapsed time: " << (double)sum / time_keeper.size() << " us\n";
         time_keeper.clear();
     }
 
@@ -410,17 +432,13 @@ void logger::log_elapsed_time(const std::chrono::steady_clock::time_point &start
 
 void logger::print_accumulated_stats(uint64_t accumulated_cw_count, ldpc_decoder_output &decode_stats) {
     double cw_count = accumulated_cw_count;
-
-    if (cw_count == 0)
-        cw_count = 1;
-
     std::cout << "===== Codeword Decoding Stats =====\n"
-              << " - codewords:" << accumulated_cw_count << "\n"
-              << " - failures:" << decode_stats.failure << "\n"
-              << " - iterations:" << decode_stats.iterations << "\n"
-              << " - Avg.clock_cycles:" << decode_stats.clock_cycles / cw_count << "\n"
-              << " ->Avg. syndrome_weight_before: " << decode_stats.syndrome_weight_before / cw_count << "\n"
-              << " ->Avg. syndrome_weight_after:" << decode_stats.syndrome_weight_after / cw_count << "\n"
+              << " - codewords: " << accumulated_cw_count << "\n"
+              << " - failures: " << decode_stats.failure << "\n"
+              << " - iterations: " << decode_stats.iterations << "\n"
+              << " -> Avg. clock_cycles: " << decode_stats.clock_cycles / cw_count << "\n"
+              << " -> Avg. syndrome_weight_before: " << decode_stats.syndrome_weight_before / cw_count << "\n"
+              << " -> Avg. syndrome_weight_after: " << decode_stats.syndrome_weight_after / cw_count << "\n"
               << " -> Avg. iterations: " << decode_stats.iterations / cw_count << "\n"
               << " -> Failure rate: " << (double)decode_stats.failure / cw_count << "\n"
               << "\n";
@@ -428,48 +446,35 @@ void logger::print_accumulated_stats(uint64_t accumulated_cw_count, ldpc_decoder
 
 void logger::print_accumulated_stats(uint64_t accumulated_cw_count, decoder_output_acc &decode_stats) {
     double cw_count = accumulated_cw_count;
+    double total_iter_pass_only = (decode_stats.iterations - logger::ITER_LIMIT * decode_stats.failure);
+    double cw_pass_count = (cw_count - decode_stats.failure);
 
-    if (cw_count == 0)
-        cw_count = 1;
-
-    double cw_pass_count = cw_count - decode_stats.failure;
-    double total_iter_pass_only = decode_stats.iterations - logger::ITER_LIMIT * decode_stats.failure;
-    double fail_count = decode_stats.failure;
-
-    if (cw_pass_count == 0)
-        cw_pass_count = 1;
-    if (fail_count == 0)
-        fail_count = 1;
-
-    std::cout << "==== Codeword Decoding Stats ====\n"
-              << " - codewords:" << accumulated_cw_count << "\n"
-              << " - failures:" << decode_stats.failure << "\n"
-              << " - iterations:" << decode_stats.iterations << "\n"
-              << " - sum syndrome_weight_after:" << decode_stats.syndrome_weight_after << "\n"
-              << " - Avg.clock_cycles:" << decode_stats.clock_cycles / cw_count << "\n"
-              << " ->Avg. syndrome_weight_before: " << decode_stats.syndrome_weight_before / cw_count << "\n"
-              << " ->Avg. syndrome_weight_after: " << decode_stats.syndrome_weight_after / cw_count << "\n"
-              << " -> Avg. syndrome_weight_after (Fail only): " << (double)decode_stats.syndrome_weight_after / fail_count << "\n"
-              << " -> Avg. iterations:" << decode_stats.iterations / cw_count << "\n"
+    std::cout << "===== Codeword Decoding Stats =====\n"
+              << " - codewords: " << accumulated_cw_count << "\n"
+              << " - failures: " << decode_stats.failure << "\n"
+              << " - iterations: " << decode_stats.iterations << "\n"
+              << " - syndrome_weight_after: " << decode_stats.syndrome_weight_after << "\n"
+              << " -> Avg. clock_cycles: " << decode_stats.clock_cycles / cw_count << "\n"
+              << " -> Avg. syndrome_weight_before: " << decode_stats.syndrome_weight_before / cw_count << "\n"
+              << " -> Avg. syndrome_weight_after: " << decode_stats.syndrome_weight_after / cw_count << "\n"
+              << " -> Avg. syndrome_weight_after(Fail only): " << (double)decode_stats.syndrome_weight_after / decode_stats.failure << "\n"
+              << " -> Avg. iterations: " << decode_stats.iterations / cw_count << "\n"
               << " -> Avg. iterations (Pass only): " << total_iter_pass_only / cw_pass_count << "\n"
               << " -> Failure rate: " << (double)decode_stats.failure / cw_count << "\n"
               << "\n";
 }
 
 void logger::print_iter_stats(uint32_t *iter_info) {
-    std::cout << "\n-------------------------------- ITER INFO ------------------------------\n";
-
-    for (int i = 0, j = 0; i < logger::MAX_ITER; i++) {
+    std::cout << "===== ITER INFO =====\n";
+    for (int i = 0, j = 0; i < (int)logger::MAX_ITER; i++) {
         if (iter_info[i] != 0) {
             std::stringstream ss;
-            ss << i << ":" << iter_info[i] << ",";
+            ss << i << ": " << iter_info[i] << ", ";
             std::cout << std::left << std::setw(20) << ss.str();
             j++;
-
             if (j % 8 == 0)
                 std::cout << "\n";
         }
     }
-
     return;
 }

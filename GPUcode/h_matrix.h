@@ -8,7 +8,6 @@
 #define LDPC_U 67
 #define LDPC_N (LDPC_M + LDPC_U)
 #define LDPC_P 512
-#define LDPC_Pm1 511
 
 #define DEFAULT_MATRIX 0
 
@@ -39,12 +38,12 @@ struct h_matrix {
     bool occupied[LDPC_M][LDPC_N];
     bool fade[LDPC_M][LDPC_N];
     bool last_row_active_bits[LDPC_N][LDPC_P];
+    bool mask[LDPC_N][LDPC_P];
     bool parity_column[LDPC_N];
     int bits_in_last_column;
 
     struct range {
-        unsigned short active_count;
-        unsigned short offset;
+        unsigned short active_count, offset;
     };
 
     unsigned char operational_h_matrix[LDPC_M][LDPC_N];

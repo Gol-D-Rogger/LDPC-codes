@@ -106,7 +106,6 @@ h_matrix::h_matrix(const int bytes_of_userdata, const int bytes_of_parity, int m
 
     this->extra_bits_of_parity = this->extra_bytes_of_parity << 3;
     this->extra_bits_of_userdata = this->extra_bytes_of_userdata << 3;
-    this->bits_in_last_column = this->extra_bits_of_userdata;
 
     if (VERBOSITY > 0)
         std::printf("#MATRIX: BITS: %4d ROWS: %2d COLS: %3d BYTES_OF_USERDATA: %5d BYTES_OF_PARITY: %4d EXTRA_BYTES_OF_USERDATA: %5d EXTRA_BYTES_OF_PARITY: %4d\n", this->bits, this->rows, this->cols, this->bytes_of_userdata, this->bytes_of_parity, this->extra_bytes_of_userdata, this->extra_bytes_of_parity);
@@ -116,7 +115,7 @@ h_matrix::h_matrix(const int bytes_of_userdata, const int bytes_of_parity, int m
     int rw_min[LDPC_M + 1];
     float rw_avg[LDPC_M + 1];
     bool ldpc_matrix_occupied[LDPC_M][LDPC_M][LDPC_N];
-    bool ldpc_matrix_fade[LDPC_M][LDPC_M][LDPC_N];
+    int ldpc_matrix_fade[LDPC_M][LDPC_M][LDPC_N];
 
     for (k = 0; k < LDPC_M; k++) {
         for (i = 0; i < LDPC_M; i++) {
@@ -138,10 +137,11 @@ h_matrix::h_matrix(const int bytes_of_userdata, const int bytes_of_parity, int m
 
     srand(1);
 
+    bool use_location;
     for (i = 0; i < LDPC_L; i++) {
         for (j = LDPC_N - LDPC_L; j < LDPC_N; j++) {
             k = LDPC_N - 1 - j;
-            bool use_location = (k % LDPC_L) != i;
+            use_location = (k % LDPC_L) != i;
             if ((i == (LDPC_L - 1)) && (j == (LDPC_N - 1)))
                 use_location = 0;
 
@@ -155,6 +155,7 @@ h_matrix::h_matrix(const int bytes_of_userdata, const int bytes_of_parity, int m
     for (i = 0; i < LDPC_L; i++) {
         for (j = 0; j < LDPC_U; j++) {
             bool use_location = base_use_location(i, j);
+
             if (use_location) {
                 ldpc_matrix_occupied[LDPC_L - 1][i][j] = 1;
                 rw[LDPC_L - 1][i]++;
@@ -183,7 +184,6 @@ h_matrix::h_matrix(const int bytes_of_userdata, const int bytes_of_parity, int m
             rw[k][i] = 0;
             for (j = 0; j < LDPC_N; j++) {
                 ldpc_matrix_occupied[k][i][j] = ldpc_matrix_occupied[k - 1][i][j];
-                ldpc_matrix_fade[k][i][j] = ldpc_matrix_fade[k - 1][i][j];
                 rw[k][i] += ldpc_matrix_occupied[k][i][j];
             }
         }
@@ -282,8 +282,8 @@ h_matrix::h_matrix(const int bytes_of_userdata, const int bytes_of_parity, int m
     for (i = 0; i < this->rows; i++) {
         for (j = 0; j < this->cols; j++) {
             if (j < (this->cols - this->rows)) {
-                this->fade[i][j] = ldpc_matrix_fade[this->rows - 1][i][j];
                 this->occupied[i][j] = ldpc_matrix_occupied[this->rows - 1][i][j];
+                this->fade[i][j] = ldpc_matrix_fade[this->rows - 1][i][j];
             } else {
                 this->occupied[i][j] = ldpc_matrix_occupied[this->rows - 1][i][LDPC_N - this->cols + j];
                 this->fade[i][j] = ldpc_matrix_fade[this->rows - 1][i][LDPC_N - this->cols + j];
@@ -320,30 +320,10 @@ h_matrix::h_matrix(const int bytes_of_userdata, const int bytes_of_parity, int m
     for (i = 0; i < this->rows; i++)
         this->wraparound[i] = (this->bits + this->first_element[i] - this->last_element[i]) % this->bits;
 
-    for (j = 0; j < LDPC_N; j++) {
-        for (k = 0; k < LDPC_P; k++)
-            this->last_row_active_bits[j][k] = 0;
-    }
-
-    int active_bits_of_parity = this->extra_bits_of_parity == 0 ? 512 : this->extra_bits_of_parity;
-    for (j = 0; j < this->cols; j++) {
-        if (this->occupied[this->rows - 1][j]) {
-            for (k = 0; k < this->bits && k < LDPC_P; k++) {
-                bit = (k + this->bits - this->element[this->rows - 1][j]) % this->bits;
-                if (bit < active_bits_of_parity)
-                    this->last_row_active_bits[j][k] = 1;
-            }
-        }
-    }
-
     std::printf("[H_MATRIX] :: H-matrix with size %dB x %dB configured. [matrix_sel : %d]\n", bytes_of_userdata, bytes_of_parity, matrix_sel);
 
-    FILE *fp_fade = NULL;
-    FILE *fp_occu = NULL;
-    FILE *fp_h = NULL;
-    char pchk_file[100];
-    char occupy_file[100];
-    char fade_file[100];
+    FILE *fp_fade, *fp_occu, *fp_h;
+    char pchk_file[100], occupy_file[100], fade_file[100];
 
     if (mx_cnfg == 0) {
         std::sprintf(pchk_file, "./matrice/matrix/LDPC_%dx%dex512_w4_dense5_QC_H.txt", this->rows, this->cols);
@@ -355,7 +335,7 @@ h_matrix::h_matrix(const int bytes_of_userdata, const int bytes_of_parity, int m
         std::sprintf(fade_file, "./rand_matrix/fade/LDPC_%dx%dex512_w4_dense5_QC_H_fade_30_0.txt", this->rows, this->cols);
     }
 
-    if ((mx_cnfg == 0) || (mx_cnfg == 1)) {
+    if ((mx_cnfg == 1) || (mx_cnfg == 0)) {
         std::printf("use customized matrix, mx_cnfg=%d\n", mx_cnfg);
         std::printf("fade_file= %s\n", fade_file);
         std::printf("occupy_file= %s\n", occupy_file);
@@ -368,25 +348,46 @@ h_matrix::h_matrix(const int bytes_of_userdata, const int bytes_of_parity, int m
         if (fp_fade && fp_h && fp_occu) {
             for (i = 0; i < this->rows; i++) {
                 for (j = 0; j < this->cols; j++) {
-                    int fade_val = 0;
-                    int occupied_val = 0;
-                    int element_val = -1;
-                    std::fscanf(fp_fade, "%d", &fade_val);
-                    std::fscanf(fp_occu, "%d", &occupied_val);
-                    std::fscanf(fp_h, "%d", &element_val);
-                    this->fade[i][j] = fade_val;
-                    this->occupied[i][j] = occupied_val;
-                    this->element[i][j] = element_val;
+                    fscanf(fp_fade, "%d", &this->fade[i][j]);
+                    fscanf(fp_occu, "%d", &this->occupied[i][j]);
+                    fscanf(fp_h, "%d", &this->element[i][j]);
                 }
             }
         }
+        fclose(fp_fade); fclose(fp_h); fclose(fp_occu);
+    }
 
-        if (fp_fade)
-            std::fclose(fp_fade);
-        if (fp_h)
-            std::fclose(fp_h);
-        if (fp_occu)
-            std::fclose(fp_occu);
+    for (j = 0; j < 80; j++)
+    {
+        for (k = 0; k < this->bits; k++)
+            this->mask[j][k] = 0;
+    }
+    if (this->extra_bits_of_parity > 0) {
+        for (j = 0; j < this->cols; j++) {
+            if (this->occupied[this->rows - 1][j]) {
+                for (k = 0; k < this->bits; k++) {
+                    bit = (k + this->bits - this->element[this->rows - 1][j]) % this->bits;
+                    if ((bit < this->extra_bits_of_parity) || (this->extra_bits_of_parity == 0))
+                        this->mask[j][k] = 1;
+                }
+            }
+        }
+    }
+
+    for (j = 0; j < LDPC_N; j++) {
+        for (k = 0; k < LDPC_P; k++)
+            this->last_row_active_bits[j][k] = 0;
+    }
+
+    int active_bits_of_parity = this->extra_bits_of_parity == 0 ? 512 : this->extra_bits_of_parity;
+    for (j = 0; j < this->cols; j++) {
+        if (this->occupied[this->rows - 1][j]) {
+            for (k = 0; k < this->bits; k++) {
+                bit = (k + this->bits - this->element[this->rows - 1][j]) % this->bits;
+                if (bit < active_bits_of_parity)
+                    this->last_row_active_bits[j][k] = 1;
+            }
+        }
     }
 
     this->setup_range_operational_matrix();
@@ -472,9 +473,11 @@ void h_matrix::setup_range_operational_matrix(void) {
             range curr_range = {0, 0};
             bool head_found = false;
 
-            for (k = 0; k < bits && k < LDPC_P; k++) {
+            for (k = 0; k < bits; k++) {
                 do_not_use_this_bit = false;
                 do_not_use_this_bit = do_not_use_this_bit || ((extra_bits_of_parity > 0) && (j == (cols - rows)) && (k >= extra_bits_of_parity));
+                do_not_use_this_bit = do_not_use_this_bit || ((extra_bits_of_userdata > 0) && (j == (cols - rows - 1)) && (k >= extra_bits_of_userdata));
+
                 if (do_not_use_this_bit)
                     continue;
 

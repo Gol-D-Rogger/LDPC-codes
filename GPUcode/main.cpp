@@ -19,7 +19,7 @@ struct program_config {
     uint64_t total_codewords = 5000000;
     uint64_t max_failure_count = 100;
     int bytes_of_userdata = 4112;
-    int bytes_of_parity = 672;
+    int bytes_of_parity = 472;
     int nand_strobes = 7;
     int err_inj_mode = 0;
     int iteration_limit = 32;
@@ -33,9 +33,8 @@ struct program_config {
     int llr_tot_bit = 7;
     int llr_frac_bit = 3;
     float vref[7] = {0, 0.15, -0.15, 0.3, -0.3, 0.5, -0.5};
-    float hd0_llr = 1.875;
-    float hd1_llr = -1.875;
-    double rber = 0.022;
+    float hd0_llr = 1.875; float hd1_llr = -1.875;
+    double rber = 0.015;
     double target_distribution_rber = 0.025;
     bool save_decode_fail_data = false;
     bool GPU_mode = true;
@@ -69,10 +68,10 @@ int program_config::parse_args(int argc, char **argv) {
                     err_inj_mode = std::stoi(value);
                 else if (key == "iteration_limit")
                     iteration_limit = std::stoi(value);
-                else if (key == "post_iteration")
-                    post_iteration = std::stoi(value);
-                else if (key == "post_ratio")
-                    post_ratio = std::stoi(value);
+                // else if (key == "post_iteration")
+                //     post_iteration = std::stoi(value);
+                // else if (key == "post_ratio")
+                //     post_ratio = std::stoi(value);
                 else if (key == "mx_cnfg")
                     mx_cnfg = std::stoi(value);
                 else if (key == "rber")
@@ -95,8 +94,6 @@ int program_config::parse_args(int argc, char **argv) {
                     llr_tot_bit = std::stoi(value);
                 else if (key == "llr_frac_bit")
                     llr_frac_bit = std::stoi(value);
-                else if (key == "alpha")
-                    alpha = std::stof(value);
                 else {
                     std::cerr << "Unknown argument: " << key << std::endl;
                     exit(0);
@@ -182,23 +179,24 @@ class configurator {
 
         host_decoder_info_struct.nand_strobes = ldpc_decoder_input_ptr->nand_strobes;
         host_decoder_info_struct.soft_bits = ldpc_decoder_input_ptr->soft_bits;
+        host_decoder_info_struct.post_iteration = ldpc_decoder_input_ptr->post_iteration;
         host_decoder_info_struct.iteration_limit = ldpc_decoder_input_ptr->iteration_limit;
         std::printf("host_decoder_info_struct.iteration_limit = %d\n", host_decoder_info_struct.iteration_limit);
 
         host_decoder_info_struct.VN_BITS = decoder_ptr->ldpc_decoder_parameters.VN_BITS;
         host_decoder_info_struct.post_process_en = decoder_ptr->ldpc_decoder_parameters.post_process_en;
-        host_decoder_info_struct.syndrome_weight_thr_qc = decoder_ptr->ldpc_decoder_parameters.syndrome_weight_thr_qc;
-        host_decoder_info_struct.syndrome_weight_thr_post = decoder_ptr->ldpc_decoder_parameters.syndrome_weight_thr_post;
-        host_decoder_info_struct.likelihood_thr = decoder_ptr->ldpc_decoder_parameters.likelihood_thr;
-        host_decoder_info_struct.post_ratio = decoder_ptr->ldpc_decoder_parameters.post_ratio;
-        std::memcpy(host_decoder_info_struct.likelihood_init_coef_all, decoder_ptr->ldpc_decoder_parameters.likelihood_init_coef_all, sizeof(host_decoder_info_struct.likelihood_init_coef_all));
-        std::memcpy(host_decoder_info_struct.likelihood_init_fraction, decoder_ptr->ldpc_decoder_parameters.likelihood_init_fraction, sizeof(host_decoder_info_struct.likelihood_init_fraction));
+        // host_decoder_info_struct.syndrome_weight_thr_qc = decoder_ptr->ldpc_decoder_parameters.syndrome_weight_thr_qc;
+        // host_decoder_info_struct.syndrome_weight_thr_post = decoder_ptr->ldpc_decoder_parameters.syndrome_weight_thr_post;
+        // host_decoder_info_struct.likelihood_thr = decoder_ptr->ldpc_decoder_parameters.likelihood_thr;
+        // host_decoder_info_struct.post_ratio = decoder_ptr->ldpc_decoder_parameters.post_ratio;
+        // std::memcpy(host_decoder_info_struct.likelihood_init_coef_all, decoder_ptr->ldpc_decoder_parameters.likelihood_init_coef_all, sizeof(host_decoder_info_struct.likelihood_init_coef_all));
+        // std::memcpy(host_decoder_info_struct.likelihood_init_fraction, decoder_ptr->ldpc_decoder_parameters.likelihood_init_fraction, sizeof(host_decoder_info_struct.likelihood_init_fraction));
 
         for (int i = 0; i < error_injector::MAX_THRESHOLDS; i++)
             host_decoder_info_struct.error_region_prob[i] = error_injector_ptr->error_region_prob[i];
 
         host_decoder_info_struct.max = (1ULL << host_decoder_info_struct.VN_BITS) - 1;
-        host_decoder_info_struct.flip_thr = decoder_ptr->ldpc_decoder_parameters.likelihood_thr;
+        host_decoder_info_struct.flip_thr = (host_decoder_info_struct.VN_BITS == 3) ? host_decoder_info_struct.max - 3 : host_decoder_info_struct.max - 7;
 
         for (int i = 0; i < h_matrix_ptr->rows; i++) {
             for (int j = 0; j < h_matrix_ptr->cols; j++)
@@ -223,8 +221,8 @@ class configurator {
 
         host_decoder_info_struct.bits = h_matrix_ptr->bits;
         host_decoder_info_struct.extra_bytes_of_parity = h_matrix_ptr->extra_bytes_of_parity;
-        host_decoder_info_struct.extra_bytes_of_userdata = h_matrix_ptr->extra_bytes_of_userdata;
         host_decoder_info_struct.extra_bits_of_parity = h_matrix_ptr->extra_bits_of_parity;
+        host_decoder_info_struct.extra_bytes_of_userdata = h_matrix_ptr->extra_bytes_of_userdata;
 
         for (int i = 0; i < h_matrix_ptr->rows; i++) {
             for (int j = 0; j < h_matrix_ptr->cols; j++) {
