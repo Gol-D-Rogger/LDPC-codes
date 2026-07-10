@@ -2697,7 +2697,7 @@ void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt) {
         break;
       }
 
-      if (source_ok)
+      if (source_ok)  
         break;
     }
 
@@ -2770,7 +2770,6 @@ void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt) {
       src_col = h_matrix.cols - 1 - j;
       k = src_col;
       h_matrix.parity_column[j] = (j < h_matrix.rows);
-      h_matrix.bits_in_last_column = 8 * 20;
       for (i = 0; i < h_matrix.rows; i++) {
         if (h_matrix.occupied[i][src_col] || h_matrix.fade[i][src_col]) {
           h_matrix.element[i][k] = h_matrix_index[i];
@@ -2801,8 +2800,6 @@ void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt) {
       h_matrix.wrap_num_deltas[i] =
           (row_nz_cnt[i] > 0) ? (row_nz_cnt[i] - 1) : 0;
     }
-
-    h_matrix.bits_in_last_column = 8 * 20;
 
     printf("[LDPC] Loaded external matrix from %s (source_cols=%d, crop_payload=%d)\n",
            source_desc, source_cols, h_matrix.cols - h_matrix.rows);
@@ -3041,6 +3038,28 @@ void ldpc_packet::ldpc_ibex_parameters(
   (void)ldpc_early_term_6;
 }
 
+void ldpc_packet::ldpc_apply_sdlite_llr_override() {
+  if (!reg_sdlite_llr_config_en)
+    return;
+
+  int cfg_len = 0;
+  if (rd_num == 3)
+    cfg_len = 4;
+  else if (rd_num == 5)
+    cfg_len = 6;
+  else if (rd_num == 7)
+    cfg_len = 8;
+  else
+    return;
+
+  if ((llr_tbl == NULL) || (bin_num < cfg_len))
+    return;
+
+  const double scale = pow(2, -1 * finite_f_num);
+  for (int i = 0; i < cfg_len; i++)
+    llr_tbl[i] = (float)(reg_sdlite_llr_table[i] * scale);
+}
+
 // LDPC decoder config
 void ldpc_packet::ldpc_dec_config(int max_fdec_itr, int fdec_col_skip,
                                   int max_ldec_itr, float dec_alpha,
@@ -3048,19 +3067,15 @@ void ldpc_packet::ldpc_dec_config(int max_fdec_itr, int fdec_col_skip,
                                   const float *dec_beta_pms,
                                   float dec_point1, float dec_point2,
                                   int dec_pms_lut_len, int fin_mode,
-                                  int fin_q_num, int fin_r_num, int fin_f_num,
-                                  int sdlite_llr_config, int sdlite_llr0,
-                                  int sdlite_llr1, int sdlite_llr2,
-                                  int sdlite_llr3) {
+                                  int fin_q_num, int fin_r_num,
+                                  int fin_f_num) {
   // syndrome weight
   init_synd_wt_min = hm_m;
   init_synd_wt_max = 0;
 
-  reg_sdlite_llr_config = sdlite_llr_config;
-  reg_sdlite_llr0 = sdlite_llr0;
-  reg_sdlite_llr1 = sdlite_llr1;
-  reg_sdlite_llr2 = sdlite_llr2;
-  reg_sdlite_llr3 = sdlite_llr3;
+  reg_sdlite_llr_config_en = 0;
+  for (int i = 0; i < 8; i++)
+    reg_sdlite_llr_table[i] = 0;
 
   // layer config
   if (max_ldec_itr > 0) {
@@ -4280,18 +4295,7 @@ void ldpc_packet::ldpc_dec_layer() {
   cw_miscorr = 0;
   vec_copy(dec_di_blk, dec_do_blk, 0, 0, hm_n);
 
-  if (reg_sdlite_llr_config) {
-    if (llr_tbl != NULL && bin_num >= 4) {
-      llr_tbl[0] = reg_sdlite_llr0 * pow(2, -1 * finite_f_num);
-      llr_tbl[1] = reg_sdlite_llr1 * pow(2, -1 * finite_f_num);
-      llr_tbl[2] = reg_sdlite_llr2 * pow(2, -1 * finite_f_num);
-      llr_tbl[3] = reg_sdlite_llr3 * pow(2, -1 * finite_f_num);
-    } else {
-      printf("[LDPC WARN] SDLite LLR override ignored (llr_tbl=%p bin_num=%d, "
-             "need >=4)\n",
-             llr_tbl, bin_num);
-    }
-  }
+  ldpc_apply_sdlite_llr_override();
 
   {
     char *hard_init = (char *)calloc(hm_n, sizeof(*hard_init));
@@ -4639,18 +4643,7 @@ void ldpc_packet::ldpc_dec_layer2() {
   cw_miscorr = 0;
   vec_copy(dec_di_blk, dec_do_blk, 0, 0, hm_n);
 
-  if (reg_sdlite_llr_config) {
-    if (llr_tbl != NULL && bin_num >= 4) {
-      llr_tbl[0] = reg_sdlite_llr0 * pow(2, -1 * finite_f_num);
-      llr_tbl[1] = reg_sdlite_llr1 * pow(2, -1 * finite_f_num);
-      llr_tbl[2] = reg_sdlite_llr2 * pow(2, -1 * finite_f_num);
-      llr_tbl[3] = reg_sdlite_llr3 * pow(2, -1 * finite_f_num);
-    } else {
-      printf("[ldpc warn] sdlite llr override ignored (llr_tbl=%p bin_num=%d, "
-             "need >=4)\n",
-             llr_tbl, bin_num);
-    }
-  }
+  ldpc_apply_sdlite_llr_override();
 
   // {
   //   char *hard_init = (char *)calloc(hm_n, sizeof(*hard_init));
@@ -5274,18 +5267,7 @@ void ldpc_packet::ldpc_dec_pms() {
   cw_miscorr = 0;
   vec_copy(dec_di_blk, dec_do_blk, 0, 0, hm_n);
 
-  if (reg_sdlite_llr_config) {
-    if (llr_tbl != NULL && bin_num >= 4) {
-      llr_tbl[0] = reg_sdlite_llr0 * pow(2, -1 * finite_f_num);
-      llr_tbl[1] = reg_sdlite_llr1 * pow(2, -1 * finite_f_num);
-      llr_tbl[2] = reg_sdlite_llr2 * pow(2, -1 * finite_f_num);
-      llr_tbl[3] = reg_sdlite_llr3 * pow(2, -1 * finite_f_num);
-    } else {
-      printf("[ldpc warn] sdlite llr override ignored (llr_tbl=%p bin_num=%d, "
-             "need >=4)\n",
-             llr_tbl, bin_num);
-    }
-  }
+  ldpc_apply_sdlite_llr_override();
 
   {
     char *hard_init = (char *)calloc(hm_n, sizeof(*hard_init));
@@ -5809,22 +5791,27 @@ void ldpc_packet::ldpc_dec_pms() {
 
 int ldpc_packet::ldpc_pms_ind(float min1, float min2) {
   int ind;
-  if ((min1 <= point1) && (min2 <= point2))
-    ind = 0;
-  else if ((min1 <= point1) && (min2 > point1) && (min2 <= point2))
-    ind = 1;
-  else if ((min1 <= point1) && (min2 > point2))
-    ind = 2;
-  else if ((min1 > point1) && (min1 < point2) && (min2 > point1) && (min2 <= point2))
-    ind = 3;
-  else if ((min1 > point1) && (min1 < point2) && (min2 >= point2))
-    ind = 4;
-  else if ((min1 >= point2) && (min2 >= point2))
+  if (min1 <= point1)
+  {
+    if (min2 <= point1)
+      ind = 0;
+    else if (min2 <= point2)
+      ind = 1;
+    else
+      ind = 2;
+  }
+  else if (min1 <= point2)
+  {
+    if (min2 <= point2)
+      ind = 3;
+    else
+      ind = 4;
+  }
+  else
     ind = 5;
 
   return ind;
 }
-
 
 void ldpc_packet::ldpc_dec_skip() {
   for (int i = 0; i < hm_n; i++)
@@ -5903,8 +5890,8 @@ void ldpc_packet::ldpc_dec_bf_ibex(
   s_hard_codeword soft_codeword;
   s_variable_nodes vn;
   s_check_nodes cn;
-  s_check_nodes cn_delay1;
-  s_check_nodes cn_delay2;
+  // s_check_nodes cn_delay1;
+  // s_check_nodes cn_delay2;
   s_check_nodes cn_shifted;
   s_likelihood_levels likelihood_levels;
   s_256_bits prng_256;
@@ -5980,8 +5967,8 @@ void ldpc_packet::ldpc_dec_bf_ibex(
   }
 
   cn = f_check_nodes(h_matrix, hard_codeword);
-  cn_delay1 = cn;
-  cn_delay2 = cn;
+  // cn_delay1 = cn;
+  // cn_delay2 = cn;
   if (VERBOSITY > 0) {
     printf("[LDPC DEBUG] Starting BF decoding with max %d iterations.\n",
            fdec_max_itr);
@@ -6118,8 +6105,9 @@ void ldpc_packet::ldpc_dec_bf_ibex(
          (give_up == 0)) {
     // Treat syndrome calculation as the standalone iteration before this pass:
     // col0/col1 read this snapshot, and col2 first sees col0's live update.
-    cn_delay1 = cn;
-    cn_delay2 = cn;
+    // Temporarily disable cn_delay for weight calculation debug.
+    // cn_delay1 = cn;
+    // cn_delay2 = cn;
     dvc_log_bf_ibex_sw(sw_delta_fp, iteration, "iter_pre", -1, syndrome_weight);
     dvc_log_bf_ibex_row_sw(row_sw_fp, iteration, "iter_pre", -1, h_matrix, cn);
 #ifdef _LDPC_DBG_DUMP
@@ -6152,11 +6140,7 @@ void ldpc_packet::ldpc_dec_bf_ibex(
       syndrome_weight_r[2] = syndrome_weight_r[1];
       syndrome_weight_r[1] = syndrome_weight_r[0];
       syndrome_weight_r[0] = syndrome_weight;
-      if (iteration == 1)
-        syndrome_weight_delayed =
-            (j <= 3) ? syndrome_weight_r[0] : syndrome_weight_r[4];
-      else
-        syndrome_weight_delayed = syndrome_weight_r[4];
+      syndrome_weight_delayed = syndrome_weight_r[3];
 
       if (VERBOSITY > 0)
         printf("### C++ ITERATION %4d, COLUMN %2d, SYNDROME WEIGHT: %4d "
@@ -6210,7 +6194,8 @@ void ldpc_packet::ldpc_dec_bf_ibex(
       // (ldpc_decoder_input.post_iteration + 100)); be_aggressive =
       // (ldpc_decoder_input.soft_bits > 0) && (likelihood_levels.min <
       // ldpc_decoder_parameters.likelihood_thr);
-      const s_check_nodes &cn_for_weight = cn_delay2;
+      // const s_check_nodes &cn_for_weight = cn_delay2;
+      const s_check_nodes &cn_for_weight = cn;
       for (k = 0; k < h_matrix.bits; k++) {
         look = 0;
         do_not_use_this_bit = 0;
@@ -6437,8 +6422,8 @@ void ldpc_packet::ldpc_dec_bf_ibex(
                            syndrome_weight);
       }
       dvc_log_bf_ibex_row_sw(row_sw_fp, iteration, "col_post", j, h_matrix, cn);
-      cn_delay2 = cn_delay1;
-      cn_delay1 = cn;
+      // cn_delay2 = cn_delay1;
+      // cn_delay1 = cn;
       if (syndrome_weight == 0) {
         ldpc_decoder_output.col_cnt = j;
         finished = 1;

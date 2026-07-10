@@ -271,11 +271,8 @@ struct ldpc_packet : ch_packet
     float finite_c_min;
 
     // SDLite LLR override (DV config passthrough)
-    int reg_sdlite_llr_config;
-    int reg_sdlite_llr0;
-    int reg_sdlite_llr1;
-    int reg_sdlite_llr2;
-    int reg_sdlite_llr3;
+    int reg_sdlite_llr_config_en;
+    int reg_sdlite_llr_table[8];
 
     // data block
     char *usr_blk;
@@ -308,8 +305,8 @@ struct ldpc_packet : ch_packet
 
     void ldpc_config(int, int, int, int, int);
     void ldpc_dec_config(int, int, int, float, const float *, const float *,
-                         float, float, int, int, int, int, int, int, int, int,
-                         int, int);
+                         float, float, int, int, int, int, int);
+    void ldpc_apply_sdlite_llr_override();
     void ldpc_gen_gm();
     void ldpc_clean();
     void ldpc_ibex_phck(s_h_matrix);

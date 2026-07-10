@@ -394,6 +394,12 @@ void dsp_packet::mcrc_chk()
 
 void dsp_packet::ecc_encoder()
 {
+    if (ch_sel == ALL_ZERO)
+    {
+        vec_clr(tx_blk, blk_len);
+        return;
+    }
+
     mcrc_gen();
     if (cir_sz == 256)
         ldpc_encoder();
@@ -404,6 +410,7 @@ void dsp_packet::ecc_encoder()
 void dsp_packet::ecc_decoder(enum fc_dec_mode fc_mode)
 {
     enum dec_model dec_mode;
+    const bool skip_mcrc = (ch_sel == ALL_ZERO);
     
     rdec_used = 0;
 
@@ -412,7 +419,10 @@ void dsp_packet::ecc_decoder(enum fc_dec_mode fc_mode)
     {
         dec_mode = SKIP;
         ldpc_decoder(dec_mode);
-        mcrc_chk();
+        if (skip_mcrc)
+            mcrc_err = 0;
+        else
+            mcrc_chk();
     }
 
     // fast decoding
@@ -420,21 +430,40 @@ void dsp_packet::ecc_decoder(enum fc_dec_mode fc_mode)
     {
         dec_mode = BF_P3;
         ldpc_decoder(dec_mode);
-        mcrc_chk();
+        if (skip_mcrc)
+            mcrc_err = 0;
+        else
+            mcrc_chk();
     }
     
     if ((fc_mode == FC_FDEC_G2) || (fc_mode == FC_MIX_G2))
     {
         dec_mode = BF_G2;
         ldpc_decoder(dec_mode);
-        mcrc_chk();
+        if (skip_mcrc)
+            mcrc_err = 0;
+        else
+            mcrc_chk();
     }
 
     if (fc_mode == FC_IBEX)
     {
         dec_mode = BF_IBEX;
         ldpc_decoder(dec_mode);
-        mcrc_chk();
+        if (skip_mcrc)
+            mcrc_err = 0;
+        else
+            mcrc_chk();
+    }
+
+    if (fc_mode == FC_EBF)
+    {
+        dec_mode = BF_EBF;
+        ldpc_decoder(dec_mode);
+        if (skip_mcrc)
+            mcrc_err = 0;
+        else
+            mcrc_chk();
     }
 
     // retry decoding only
@@ -443,7 +472,10 @@ void dsp_packet::ecc_decoder(enum fc_dec_mode fc_mode)
         rdec_used = 1;
         dec_mode = LAYER;
         ldpc_decoder(dec_mode);
-        mcrc_chk();
+        if (skip_mcrc)
+            mcrc_err = 0;
+        else
+            mcrc_chk();
     }
 
     if (fc_mode == FC_RDEC2)
@@ -451,7 +483,10 @@ void dsp_packet::ecc_decoder(enum fc_dec_mode fc_mode)
         rdec_used = 1;
         dec_mode = LAYER_G2;
         ldpc_decoder(dec_mode);
-        mcrc_chk();
+        if (skip_mcrc)
+            mcrc_err = 0;
+        else
+            mcrc_chk();
     }
 
     // mix decoding after fast decoding failed
@@ -473,7 +508,10 @@ void dsp_packet::ecc_decoder(enum fc_dec_mode fc_mode)
 
             dec_mode = LAYER;
             ldpc_decoder(dec_mode);
-            mcrc_chk();
+            if (skip_mcrc)
+                mcrc_err = 0;
+            else
+                mcrc_chk();
         }
     }
 }

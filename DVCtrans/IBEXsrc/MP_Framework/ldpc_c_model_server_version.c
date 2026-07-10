@@ -37,6 +37,10 @@ static int g_post_iter = 0;
 static int g_max_iter = 0;
 static int g_nand_strobes = 1;
 static int g_sd_err_inj_dump_seq = 0;
+static int g_ch_llr_mode = 0;
+static float g_llr0_val = 0.0f;
+static float g_llr1_val = 0.0f;
+static int g_llr_tot_num = 0;
 
 static const int kFiniteFracBits = 3;
 static const float kFiniteFracScale = 8.0f;
@@ -786,6 +790,19 @@ static void dvc_dump_sd_rd_planes_hex_rows_fp(FILE *fp, const int *rd_data, int 
     }
 }
 
+static void dvc_export_llr_tbl_int(ch_packet *pckt, int *llr_tbl, int llr_cnt)
+{
+    if (!llr_tbl || (llr_cnt <= 0))
+        return;
+
+    for (int i = 0; i < llr_cnt; i++) {
+        if (pckt && pckt->llr_tbl && (i < pckt->bin_num))
+            llr_tbl[i] = (int)(pckt->llr_tbl[i] * kFiniteFracScale);
+        else
+            llr_tbl[i] = 0;
+    }
+}
+
 extern "C"
 void ldpc_config(int h_m,
                  int h_n,
@@ -811,11 +828,8 @@ void ldpc_config(int h_m,
                  int sd_num,
                  svOpenArrayHandle v_ref_sv,
                  int debug,
-                 int sdlite_llr_config,
-                 int sdlite_llr0,
-                 int sdlite_llr1,
-                 int sdlite_llr2,
-                 int sdlite_llr3,
+                 int sdlite_llr_config_en,
+                 svOpenArrayHandle sdlite_llr_sv,
                  int dv_user_data_bytes,
                  int dv_parity_bytes,
                  int post_iter,
@@ -874,6 +888,10 @@ void ldpc_config(int h_m,
     }
     const float m_llr0 = (float)llr0 / kFiniteFracScale;
     const float m_llr1 = (float)llr1 / kFiniteFracScale;
+    g_ch_llr_mode = ch_llr_mode;
+    g_llr0_val = m_llr0;
+    g_llr1_val = m_llr1;
+    g_llr_tot_num = finite_r_num;
 
     g_bm_m = h_m;
     g_bm_n = h_n;
@@ -972,8 +990,14 @@ void ldpc_config(int h_m,
     sim_pckt->ch_llr_gen(m_llr0, m_llr1, finite_r_num, kFiniteFracBits);
 
     // decoder config
-    sim_pckt->ldpc_dec_config(fdec_max_itr, 0, ldec_max_itr, m_alpha, alpha_pms, beta_pms, m_point1, m_point2, LDPC_PMS_LUT_SIZE, 1, finite_q_num, finite_r_num, kFiniteFracBits, sdlite_llr_config,
-                              sdlite_llr0, sdlite_llr1, sdlite_llr2, sdlite_llr3);
+    sim_pckt->ldpc_dec_config(fdec_max_itr, 0, ldec_max_itr, m_alpha, alpha_pms, beta_pms, m_point1, m_point2,
+                              LDPC_PMS_LUT_SIZE, 1, finite_q_num, finite_r_num, kFiniteFracBits);
+    sim_pckt->reg_sdlite_llr_config_en = sdlite_llr_config_en;
+    int *sdlite_llr = (int *)svGetArrayPtr(sdlite_llr_sv);
+    if (sdlite_llr != NULL) {
+        for (int i = 0; i < 8; i++)
+            sim_pckt->reg_sdlite_llr_table[i] = sdlite_llr[i];
+    }
 
     // IBEX BF decoder parameter passthrough (DV-side ldpc_decoder_inv style).
     // NOTE: input-related fields (e.g. corrupted codeword) will be set per-decode via `ldpc_ibex_input`.
@@ -984,6 +1008,61 @@ void ldpc_config(int h_m,
                                    ldpc_early_term_3, ldpc_early_term_4, ldpc_early_term_5, ldpc_early_term_6);
 
     g_configured = 1;
+}
+
+extern "C"
+void sd_llr_tbl_gen(int sd_num,
+                    svOpenArrayHandle v_ref_sv,
+                    svOpenArrayHandle llr_tbl_sv)
+{
+    if (!sim_pckt || !g_configured) {
+        printf("[DVC IBEX ERROR] sd_llr_tbl_gen called before ldpc_config.\n");
+        return;
+    }
+
+    int *llr_tbl = (int *)svGetArrayPtr(llr_tbl_sv);
+    const int llr_cnt = svHigh(llr_tbl_sv, 1) + 1;
+    if (!llr_tbl || (llr_cnt <= 0))
+        return;
+
+    int rd_num = sd_num;
+    if (rd_num < 1)
+        rd_num = 1;
+    if (rd_num > 127)
+        rd_num = 127;
+
+    int *v_ref = (int *)svGetArrayPtr(v_ref_sv);
+    if (!v_ref) {
+        dvc_export_llr_tbl_int(NULL, llr_tbl, llr_cnt);
+        return;
+    }
+
+    float vref[128] = {0.0f};
+    for (int i = 0; i < rd_num; i++)
+        vref[i] = (float)v_ref[i] / 1000.0f;
+
+    ch_packet llr_pckt;
+    llr_pckt.info_len = sim_pckt->info_len;
+    llr_pckt.blk_len = sim_pckt->blk_len;
+    llr_pckt.ch_sel = sim_pckt->ch_sel;
+    llr_pckt.VN_BITS = sim_pckt->VN_BITS;
+    llr_pckt.snr = sim_pckt->snr;
+    llr_pckt.snr_code = sim_pckt->snr_code;
+    llr_pckt.awgn_sigma = sim_pckt->awgn_sigma;
+
+    if (g_ch_llr_mode == 0)
+        llr_pckt.ch_llr_alloc(MANUAL, rd_num, vref);
+    else if (g_ch_llr_mode == 1)
+        llr_pckt.ch_llr_alloc(VENDOR0, log2(rd_num + 1), vref);
+    else if (g_ch_llr_mode == 2)
+        llr_pckt.ch_llr_alloc(VENDOR1, log2(rd_num + 1), vref);
+    else
+        llr_pckt.ch_llr_alloc(MANUAL, rd_num, vref);
+
+    llr_pckt.ch_llr_gen(g_llr0_val, g_llr1_val, g_llr_tot_num,
+                        kFiniteFracBits);
+    dvc_export_llr_tbl_int(&llr_pckt, llr_tbl, llr_cnt);
+    llr_pckt.ch_llr_clean();
 }
 
 extern "C"
@@ -1751,12 +1830,7 @@ extern "C" void sd_err_inj(svOpenArrayHandle tx_data_sv,
     }
 
     // 6) LLR table (scaled by kFiniteFracScale for fixed-point export), fill up to 128 elements
-    for (int i = 0; i < 128; i++) {
-        if (sim_pckt->llr_tbl && (i < sim_pckt->bin_num))
-            llr_tbl[i] = (int)(sim_pckt->llr_tbl[i] * kFiniteFracScale);
-        else
-            llr_tbl[i] = 0;
-    }
+    dvc_export_llr_tbl_int(sim_pckt, llr_tbl, 128);
 
     // 7) split_bin / bin_id outputs (fill rest with 0)
     for (int i = 0; i < 128; i++) {

@@ -23,6 +23,7 @@ enum dec_model
     BF_P3 = 3,
     BF_G2 = 4,
     BF_IBEX = 5,
+    BF_EBF = 6,
     LAYER = 8,
     LAYER_G2 = 9,
 };

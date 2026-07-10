@@ -893,8 +893,8 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
   s_hard_codeword hard_codeword;
   s_variable_nodes vn;
   s_check_nodes cn;
-  s_check_nodes cn_delay1;
-  s_check_nodes cn_delay2;
+  // s_check_nodes cn_delay1;
+  // s_check_nodes cn_delay2;
   s_check_nodes cn_ref;
   s_likelihood_levels likelihood_levels;
   s_256_bits prng_256;
@@ -1010,8 +1010,8 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
     rotate_cn_row(&cn.r[i], h_matrix.bits, first_shift);
     accum_rot[i] = first_shift;
   }
-  cn_delay1 = cn;
-  cn_delay2 = cn;
+  // cn_delay1 = cn;
+  // cn_delay2 = cn;
   if (diag_ab) {
     printf("[DIAG] Initial rotation applied. Verifying syndrome equivalence...\n");
     for (int i = 0; i < h_matrix.rows; i++) {
@@ -1090,16 +1090,22 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
   if (!finished) {
     for (int idx = 0; idx < 5; idx++)
       syndrome_weight_r[idx] = syndrome_weight;
+    // RTL spends the first two clocks of iteration-1 col0 while still in
+    // iteration 0, then the remaining two clocks at the start of iteration 1.
+    for (int sw_clk = 0; sw_clk < 2; sw_clk++) {
+      syndrome_weight_r[4] = syndrome_weight_r[3];
+      syndrome_weight_r[3] = syndrome_weight_r[2];
+      syndrome_weight_r[2] = syndrome_weight_r[1];
+      syndrome_weight_r[1] = syndrome_weight_r[0];
+      syndrome_weight_r[0] = syndrome_weight;
+    }
+    clock_cycles += 2;
     iteration = 1;
   }
   const int post_start_iteration =
       (ldpc_decoder_input.post_iteration < 1) ? 1
                                               : ldpc_decoder_input.post_iteration;
-  // Real RTL advances the delayed-syndrome pipeline per clock. Boundary
-  // columns (col0 / last col) consume two clocks, so warmup and steady-state
-  // tap selection must track a global syndrome-delay clock index rather than
-  // the column index alone.
-  int sw_delay_clock_idx = 0;
+  // int sw_delay_clock_idx = 0;
 
   for (int j = 0; j < h_matrix.cols; j++) {
     for (int k = 0; k < h_matrix.bits; k++) {
@@ -1134,13 +1140,34 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
   while ((iteration < ldpc_decoder_input.iteration_limit) && !finished) {
     // Initial syndrome calculation is iteration 0.  At each real iteration,
     // col0/col1 read this settled snapshot; col2 first sees col0's update.
-    cn_delay1 = cn;
-    cn_delay2 = cn;
+    // Temporarily disable cn_delay for weight calculation debug.
+    // cn_delay1 = cn;
+    // cn_delay2 = cn;
     log_bf_ibex_sw_rtl(sw_delta_fp, iteration, "iter_pre", -1,
                        syndrome_weight);
     log_bf_ibex_row_sw_rtl(row_sw_fp, iteration, "iter_pre", -1, h_matrix, cn);
     for (int j = 0; j < h_matrix.cols; j++) {
-      clock_cycles++;
+      // Advance the syndrome-weight FIFO by RTL clock slots, not logical cols.
+      const int last_col = h_matrix.cols - 1;
+      const bool odd_col_count = ((h_matrix.cols & 1) != 0);
+      const bool init_col0_hold = (iteration == 1) && (j == 0);
+      const bool last_col_hold = (iteration >= 1) && (j == last_col);
+      const bool steady_col0_hold =
+          odd_col_count && (iteration >= 3) && (j == 0);
+      const bool sample_before_shift = false;
+
+      int sw_shift_cycles = 1;
+      if (init_col0_hold || last_col_hold || steady_col0_hold)
+        sw_shift_cycles = 2;
+
+      int sw_pre_shift_cycles = sw_shift_cycles;
+      int sw_post_shift_cycles = 0;
+      if (last_col_hold) {
+        sw_pre_shift_cycles = 1;
+        sw_post_shift_cycles = sw_shift_cycles - 1;
+      }
+
+      clock_cycles += sw_shift_cycles;
 
       if ((iteration == post_start_iteration) && (j == 0)) {
         for (int i = 0; i < 256; i++)
@@ -1157,24 +1184,24 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
         dump_bf_ibex_rtl_cn_prng512(dbg_prng512_fp, prng_512, iteration, j);
 #endif
 
-      // Boundary columns occupy two RTL clocks after post-iteration starts.
-      // Advance the delayed-syndrome FIFO once per consumed clock and sample
-      // the last phase as the effective sw_dly for this column.
-      const bool extra_sw_clock =
-          (iteration >= ldpc_decoder_input.post_iteration) &&
-          ((j == 0) || (j == (h_matrix.cols - 1)));
-      const int sw_shift_cycles = extra_sw_clock ? 2 : 1;
       int sw_dly_sample = syndrome_weight_delayed;
-      for (int sw_clk = 0; sw_clk < sw_shift_cycles; ++sw_clk) {
+      if (sample_before_shift)
+        sw_dly_sample = syndrome_weight_r[4];
+
+      const int sw_sample_clk =
+          steady_col0_hold ? (sw_pre_shift_cycles - 1) : 0;
+      for (int sw_clk = 0; sw_clk < sw_pre_shift_cycles; sw_clk++) {
         syndrome_weight_r[4] = syndrome_weight_r[3];
         syndrome_weight_r[3] = syndrome_weight_r[2];
         syndrome_weight_r[2] = syndrome_weight_r[1];
         syndrome_weight_r[1] = syndrome_weight_r[0];
         syndrome_weight_r[0] = syndrome_weight;
-        sw_dly_sample =
-            (sw_delay_clock_idx < 4) ? syndrome_weight_r[3]
-                                     : syndrome_weight_r[4];
-        sw_delay_clock_idx++;
+
+        // A held RTL column can occupy multiple clocks.  Use the first clock's
+        // syndw for the column behavior while still advancing the FIFO through
+        // all consumed clocks for subsequent columns.
+        if (!sample_before_shift && (sw_clk == sw_sample_clk))
+          sw_dly_sample = syndrome_weight_r[4];
       }
       syndrome_weight_delayed = sw_dly_sample;
 
@@ -1232,7 +1259,8 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
       int col_aggressive_cnt = 0;
       int col_flipchg_cnt = 0;
       unsigned char col_unsat_cnt[LDPC_MAX_CIRC_BITS] = {0};
-      const s_check_nodes &cn_for_weight = cn_delay2;
+      // const s_check_nodes &cn_for_weight = cn_delay2;
+      const s_check_nodes &cn_for_weight = cn;
       for (int k = 0; k < h_matrix.bits; k++) {
         bool do_not_use_this_bit = false;
         do_not_use_this_bit |= ((h_matrix.extra_bits_of_parity > 0) &&
@@ -1422,13 +1450,20 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
       for (int i = 0; i < h_matrix.rows; i++) {
         if (rtl_view.shift[i][j] >= 0) {
           rotate_cn_row(&cn.r[i], h_matrix.bits, h_matrix.delta[i]);
-          rotate_cn_row(&cn_delay1.r[i], h_matrix.bits, h_matrix.delta[i]);
-          rotate_cn_row(&cn_delay2.r[i], h_matrix.bits, h_matrix.delta[i]);
+          // rotate_cn_row(&cn_delay1.r[i], h_matrix.bits, h_matrix.delta[i]);
+          // rotate_cn_row(&cn_delay2.r[i], h_matrix.bits, h_matrix.delta[i]);
           accum_rot[i] = (accum_rot[i] + h_matrix.delta[i]) % h_matrix.bits;
         }
       }
 
       syndrome_weight = f_check_node_weight(h_matrix, cn);
+      for (int sw_clk = 0; sw_clk < sw_post_shift_cycles; sw_clk++) {
+        syndrome_weight_r[4] = syndrome_weight_r[3];
+        syndrome_weight_r[3] = syndrome_weight_r[2];
+        syndrome_weight_r[2] = syndrome_weight_r[1];
+        syndrome_weight_r[1] = syndrome_weight_r[0];
+        syndrome_weight_r[0] = syndrome_weight;
+      }
 #ifdef _LDPC_DBG_DUMP
       dump_cn_synd_snapshot_rtl(dbg_trace_fp, h_matrix, rtl_view, cn, accum_rot,
                                 iteration, j, "post_delta", syndrome_weight,
@@ -1439,8 +1474,8 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
                            syndrome_weight);
       log_bf_ibex_row_sw_rtl(row_sw_fp, iteration, "col_post", j, h_matrix, cn);
       ldpc_decoder_output.col_cnt = j;
-      cn_delay2 = cn_delay1;
-      cn_delay1 = cn;
+      // cn_delay2 = cn_delay1;
+      // cn_delay1 = cn;
       if (syndrome_weight == 0) {
         finished = true;
         break;
@@ -1493,7 +1528,6 @@ void ldpc_packet::ldpc_dec_bf_ibex_rtl_cn(
     }
 #endif
 
-    clock_cycles++;
     iteration++;
   }
 

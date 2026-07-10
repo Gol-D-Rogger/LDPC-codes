@@ -2,10 +2,12 @@
 #include <cstdint>
 #include <cstring>
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 
 #include "finite_lib.h"
@@ -64,6 +66,203 @@ struct dvc_glibc_rand31 {
     return out;
   }
 };
+
+void matrix_abs_path(const char *path, char *out, size_t out_sz) {
+  if (out_sz == 0)
+    return;
+  out[0] = '\0';
+
+  if (path == nullptr || path[0] == '\0') {
+    snprintf(out, out_sz, "<internal/generated>");
+    return;
+  }
+
+  char resolved[PATH_MAX];
+  if (realpath(path, resolved) != nullptr) {
+    snprintf(out, out_sz, "%s", resolved);
+    return;
+  }
+
+  if (path[0] == '/') {
+    snprintf(out, out_sz, "%s", path);
+    return;
+  }
+
+  const char *rel_path = path;
+  while (rel_path[0] == '.' && rel_path[1] == '/')
+    rel_path += 2;
+
+  char cwd[PATH_MAX];
+  if (getcwd(cwd, sizeof(cwd)) != nullptr)
+    snprintf(out, out_sz, "%s/%s", cwd, rel_path);
+  else
+    snprintf(out, out_sz, "%s", rel_path);
+}
+
+void print_matrix_abs_path(const char *label, const char *path) {
+  char abs_path[PATH_MAX * 2];
+  matrix_abs_path(path, abs_path, sizeof(abs_path));
+  printf("[LDPC] %s: %s\n", label, abs_path);
+}
+
+double ebf_lfsr8_next_prob(unsigned char &state) {
+  if (state == 0)
+    state = 1;
+  const bool feedback = (state & 0x80u) != 0;
+  state = static_cast<unsigned char>(state << 1);
+  if (feedback)
+    state ^= 0x71u;
+  return static_cast<double>(state) / 256.0;
+}
+
+bool load_external_matrix_ibex(s_h_matrix &hm) {
+  if (hm.rows != 8 || hm.cols != 73 || hm.bits != 512)
+    return false;
+
+  const char *matrix_variant = getenv("IBEX_MATRIX_VARIANT");
+  if (matrix_variant != nullptr && strcmp(matrix_variant, "original_internal") == 0) {
+    printf("[LDPC] Matrix variant selected: original_internal\n");
+    return false;
+  }
+  if (matrix_variant != nullptr && strcmp(matrix_variant, "newframe") != 0) {
+    printf("[LDPC] Unsupported IBEX_MATRIX_VARIANT: %s\n", matrix_variant);
+    exit(1);
+  }
+  printf("[LDPC] Matrix variant selected: newframe\n");
+
+  const char *occu_path =
+      "/Users/roggerzwl/Project/LDPCProject/BF2_Opti/IBEX_newframe/matrix/occupied_matrix/"
+      "LDPC_8x73ex512_w4_dense5_occupied_1_1.txt";
+  const char *fade_path =
+      "/Users/roggerzwl/Project/LDPCProject/BF2_Opti/IBEX_newframe/matrix/fade_matrix/"
+      "LDPC_8x73ex512_w4_dense5_fade_1_1.txt";
+  const char *elem_path =
+      "/Users/roggerzwl/Project/LDPCProject/BF2_Opti/IBEX_newframe/matrix/matrix/"
+      "LDPC_8x73ex512_w4_dense5_QC_H_1_1.txt";
+
+  FILE *fp_occu = fopen(occu_path, "r");
+  FILE *fp_fade = fopen(fade_path, "r");
+  FILE *fp_elem = fopen(elem_path, "r");
+  if (fp_elem == nullptr || fp_occu == nullptr || fp_fade == nullptr) {
+    if (fp_elem)
+      fclose(fp_elem);
+    if (fp_occu)
+      fclose(fp_occu);
+    if (fp_fade)
+      fclose(fp_fade);
+    return false;
+  }
+
+  printf("[LDPC] Matrix source: external IBEX matrix files\n");
+  print_matrix_abs_path("Matrix element path (absolute)", elem_path);
+  print_matrix_abs_path("Matrix occupied path (absolute)", occu_path);
+  print_matrix_abs_path("Matrix fade path (absolute)", fade_path);
+
+  for (int row = 0; row < hm.rows; row++) {
+    hm.row_weight[row] = 0;
+    hm.first_element[row] = 0;
+    hm.last_element[row] = 0;
+    hm.wraparound[row] = 0;
+    hm.wrap_base[row] = 0;
+    hm.wrap_num_deltas[row] = 0;
+  }
+
+  for (int col = 0; col < hm.cols; col++) {
+    hm.col_weight[col] = 0;
+    hm.parity_column[col] = (col < hm.rows);
+    for (int bit = 0; bit < hm.bits; bit++)
+      hm.mask[col][bit] = false;
+  }
+
+  for (int row = 0; row < hm.rows; row++) {
+    for (int col = 0; col < hm.cols; col++) {
+      hm.element[row][col] = -1;
+      hm.occupied[row][col] = false;
+      hm.fade[row][col] = false;
+    }
+  }
+
+  int elem = 0;
+  int occ = 0;
+  int fade = 0;
+  for (int row = 0; row < hm.rows; row++) {
+    for (int col = 0; col < hm.cols; col++) {
+      if (fscanf(fp_elem, "%d", &elem) != 1 || fscanf(fp_occu, "%d", &occ) != 1 ||
+          fscanf(fp_fade, "%d", &fade) != 1) {
+        fclose(fp_elem);
+        fclose(fp_occu);
+        fclose(fp_fade);
+        printf("[LDPC] Error reading external IBEX-layout matrix at row %d col %d\n", row, col);
+        exit(1);
+      }
+      hm.element[row][col] = elem;
+      hm.occupied[row][col] = ((occ != 0) && (elem >= 0));
+      hm.fade[row][col] = ((fade != 0) && (elem >= 0));
+    }
+  }
+  fclose(fp_elem);
+  fclose(fp_occu);
+  fclose(fp_fade);
+
+  hm.bits_in_last_column = 8 * 20;
+
+  for (int row = 0; row < hm.rows; row++) {
+    bool row_seen = false;
+    for (int j = 0; j < hm.cols; j++) {
+      const int col = hm.cols - 1 - j;
+      if (hm.occupied[row][col] || hm.fade[row][col]) {
+        if (!row_seen) {
+          hm.last_element[row] = hm.element[row][col];
+          row_seen = true;
+        }
+        hm.first_element[row] = hm.element[row][col];
+      }
+    }
+  }
+
+  for (int row = 0; row < hm.rows; row++) {
+    for (int col = 0; col < hm.cols; col++) {
+      if (hm.occupied[row][col]) {
+        hm.row_weight[row]++;
+        hm.col_weight[col]++;
+      }
+    }
+  }
+
+  for (int row = 0; row < hm.rows; row++) {
+    hm.wraparound[row] = (hm.bits + hm.first_element[row] - hm.last_element[row]) % hm.bits;
+    const int init_base = (hm.first_element[row] - hm.delta[row] + hm.bits) % hm.bits;
+    for (int bit = 0; bit < hm.bits; bit++) {
+      const int shift_base = init_base + bit;
+      for (int delta_num = 0; delta_num < 50; delta_num++) {
+        if ((hm.last_element[row] + shift_base + delta_num * hm.delta[row] + bit) % hm.bits == shift_base) {
+          hm.wrap_num_deltas[row] = delta_num;
+          hm.wrap_base[row] = shift_base;
+          bit = hm.bits;
+          break;
+        }
+      }
+    }
+  }
+
+  if (hm.extra_bits_of_parity > 0) {
+    for (int col = 0; col < hm.cols; col++) {
+      if (!hm.occupied[hm.rows - 1][col])
+        continue;
+      for (int bit = 0; bit < hm.bits; bit++) {
+        const int shifted_bit = (bit + hm.bits - hm.element[hm.rows - 1][col]) % hm.bits;
+        if (shifted_bit < hm.extra_bits_of_parity)
+          hm.mask[col][bit] = true;
+      }
+    }
+  }
+
+  return true;
+}
+
+bool load_external_ibex_matrix(s_h_matrix &hm) {
+  return load_external_matrix_ibex(hm);
+}
 } // namespace
 
 static void dvc_bins_to_hard_bits(const char *bins,
@@ -168,12 +367,15 @@ void ldpc_packet::ldpc_rd_phck(char *pchk_file) {
   qc_bm = mod2sparse_allocate(bm_m, bm_n);
   qc_hm = mod2sparse_allocate(hm_m, hm_n);
 
-  printf("[LDPC] Porting H matrix from %s ...\n", pchk_file);
+  char abs_path[PATH_MAX * 2];
+  matrix_abs_path(pchk_file, abs_path, sizeof(abs_path));
+  printf("[LDPC] Matrix file used (absolute): %s\n", abs_path);
+  printf("[LDPC] Porting H matrix from %s ...\n", abs_path);
 
   fp = fopen(pchk_file, "r");
 
   if (fp == NULL) {
-    printf("[LDPC] Error opening file %s \n", pchk_file);
+    printf("[LDPC] Error opening file %s \n", abs_path);
     exit(0);
   }
 
@@ -2254,6 +2456,7 @@ void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt, char *pchk_f
 
   // read parity check matrix
   if (sc == 256) {
+    printf("[LDPC] Matrix source: external pchk file\n");
     ldpc_rd_phck(pchk_file);
 
     // G matrices
@@ -2305,6 +2508,29 @@ void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt, char *pchk_f
              h_matrix.bits, h_matrix.rows, h_matrix.cols, h_matrix.bytes_of_userdata, h_matrix.bytes_of_parity,
              h_matrix.extra_bytes_of_userdata, h_matrix.extra_bytes_of_parity);
 
+    h_matrix.delta[0] = 0;
+    h_matrix.delta[1] = 13;
+    h_matrix.delta[2] = 19;
+    h_matrix.delta[3] = 29;
+    h_matrix.delta[4] = 41;
+    h_matrix.delta[5] = 67;
+    h_matrix.delta[6] = 73;
+    h_matrix.delta[7] = 79;
+    h_matrix.delta[8] = 91;
+    h_matrix.delta[9] = 97;
+    h_matrix.delta[10] = 103;
+    h_matrix.delta[11] = 111;
+    h_matrix.delta[12] = 119;
+
+    if (load_external_matrix_ibex(h_matrix)) {
+      ldpc_ibex_phck(h_matrix);
+      goto ldpc_config_dump;
+    }
+
+    printf("[LDPC] Matrix source: <generated in memory>\n");
+    printf("[LDPC] Matrix file used: <none>\n");
+
+    {
     int mx[13][80];
     int my[13][80];
     int rw[13][80] = {};
@@ -2650,8 +2876,11 @@ void ldpc_packet::ldpc_config(int m, int n, int sc, int st, int wt, char *pchk_f
     // f_print_h_matrix(h_matrix);
 
     ldpc_ibex_phck(h_matrix);
+    }
   }
 
+ldpc_config_dump:
+  (void)0;
 #ifdef _LDPC_DUMP
   rdec_cmem_cont_thrshd = 10;
   rdec_hdmem_cont_thrshd = 6;
@@ -3337,13 +3566,13 @@ s_hard_codeword ldpc_packet::f_ldpc_encode(s_hard_codeword ldpc_encoder_input, s
 
 void ldpc_packet::ldpc_decoder(enum dec_model dec_mode) {
   // add 0 padding
-  if (dec_mode != BF_IBEX && dec_mode != LAYER_G2) {
+  if (dec_mode != BF_IBEX && dec_mode != LAYER_G2 && dec_mode != BF_EBF) {
     vec_copy(det_blk, dec_di_blk, 0, 0, info_len);
     for (int i = 0; i < pad_len; i++)
       dec_di_blk[info_len + i] = max_llr_bin;
     vec_copy(det_blk, dec_di_blk, info_len, hm_k, hm_m);
   }
-  if (dec_mode == LAYER_G2) {
+  if (dec_mode == LAYER_G2 || dec_mode == BF_EBF) {
     vec_copy(det_blk, dec_di_blk, 0, 0, info_len);
     for (int i = 0; i < pad_len; i++)
       dec_di_blk[info_len + i] = max_llr_bin;
@@ -3369,12 +3598,23 @@ void ldpc_packet::ldpc_decoder(enum dec_model dec_mode) {
     const int valid_parity_bits_in_first_parity_column = h_matrix.bits - skip_parity_bits_in_first_parity_column;
     const int parity_bits_in_det = blk_len - info_len;
 
-    if (valid_parity_bits_in_first_parity_column > 0) {
-      vec_copy(det_blk, dec_di_blk, info_len, hm_k, valid_parity_bits_in_first_parity_column);
-    }
+    
+    if (dec_mode == BF_EBF) {
+      for (int i = 0; i < skip_parity_bits_in_first_parity_column; i++)
+        dec_di_blk[hm_k + i] = max_llr_bin;
 
-    for (int i = 0; i < skip_parity_bits_in_first_parity_column; i++)
-      dec_di_blk[hm_k + valid_parity_bits_in_first_parity_column + i] = max_llr_bin;
+      if (valid_parity_bits_in_first_parity_column > 0) {
+        vec_copy(det_blk, dec_di_blk, info_len, hm_k + skip_parity_bits_in_first_parity_column,
+                 valid_parity_bits_in_first_parity_column);
+      }
+    } else {
+      if (valid_parity_bits_in_first_parity_column > 0) {
+        vec_copy(det_blk, dec_di_blk, info_len, hm_k, valid_parity_bits_in_first_parity_column);
+      }
+
+      for (int i = 0; i < skip_parity_bits_in_first_parity_column; i++)
+        dec_di_blk[hm_k + valid_parity_bits_in_first_parity_column + i] = max_llr_bin;
+    }
 
     const int remaining_parity_bits = parity_bits_in_det - valid_parity_bits_in_first_parity_column;
     if (remaining_parity_bits > 0) {
@@ -3399,15 +3639,21 @@ void ldpc_packet::ldpc_decoder(enum dec_model dec_mode) {
     ldpc_dec_layer2(h_matrix);
   else if (dec_mode == BF_IBEX)
     ldpc_dec_bf_ibex(ldpc_decoder_input, ldpc_decoder_parameters, h_matrix);
+  else if (dec_mode == BF_EBF)
+    ldpc_dec_ebf();
 
   // remove padding
-  if (dec_mode != BF_IBEX && dec_mode != LAYER_G2) {
+  if (dec_mode != BF_IBEX && dec_mode != LAYER_G2 && dec_mode != BF_EBF) {
     vec_copy(dec_do_blk, dec_blk, 0, 0, info_len);
     vec_copy(dec_do_blk, dec_blk, hm_k, info_len, hm_m);
   } else {
     vec_copy(dec_do_blk, dec_blk, 0, 0, info_len);
     if (h_matrix.extra_bits_of_parity > 0) {
-      vec_copy(dec_do_blk, dec_blk, hm_k, info_len, h_matrix.extra_bits_of_parity);
+      if (dec_mode == BF_EBF)
+        vec_copy(dec_do_blk, dec_blk, hm_k + h_matrix.unused_bytes_of_parity * 8, info_len,
+                 h_matrix.extra_bits_of_parity);
+      else
+        vec_copy(dec_do_blk, dec_blk, hm_k, info_len, h_matrix.extra_bits_of_parity);
       vec_copy(dec_do_blk, dec_blk, hm_k + cir_sz, info_len + h_matrix.extra_bits_of_parity, (bm_m - 1) * cir_sz);
     } else {
       vec_copy(dec_do_blk, dec_blk, hm_k, info_len, hm_m);
@@ -3772,6 +4018,263 @@ void ldpc_packet::ldpc_dec_bf2(int p_num, int col_skip_itr) {
   free(cn_synd_new);
   free(cn_synd_old);
 } // ldpc_dec_bf2
+
+void ldpc_packet::ldpc_dec_ebf() {
+  const bool use_ibex_layout = h_matrix.rows == bm_m && h_matrix.cols == bm_n && h_matrix.bits == cir_sz;
+  const bool is_qc512_8x73 = use_ibex_layout && h_matrix.rows == 8 && h_matrix.cols == 73 && h_matrix.bits == 512;
+  const int sw_pd = (hm_n <= 2048 || is_qc512_8x73) ? 0 : 10;
+  const int low_p_cnt_h_thod = (hm_n <= 2048 || is_qc512_8x73) ? 10 : 20;
+  const int p0_pct = 20;
+  const int p1_pct = 10;
+
+  auto edge_active = [&](int row, int col, int bit) -> bool {
+    if (!use_ibex_layout || row < 0 || row >= h_matrix.rows || col < 0 || col >= h_matrix.cols ||
+        bit < 0 || bit >= h_matrix.bits || h_matrix.element[row][col] < 0)
+      return false;
+
+    if (h_matrix.extra_bytes_of_parity == 0)
+      return h_matrix.occupied[row][col];
+
+    if (!h_matrix.occupied[row][col] && !h_matrix.fade[row][col])
+      return false;
+
+    const int shortened_bits = h_matrix.unused_bytes_of_parity << 3;
+    const int first_parity_col = h_matrix.cols - h_matrix.rows;
+
+    if (row == 0 && bit < shortened_bits)
+      return false;
+
+    if (h_matrix.fade[row][col] && bit >= shortened_bits)
+      return false;
+
+    if (col == first_parity_col && bit < shortened_bits)
+      return false;
+
+    return true;
+  };
+
+  char *flip_bit = (char *)calloc(hm_n, sizeof(*flip_bit));
+  char *dcd_bit = (char *)calloc(cir_sz, sizeof(*dcd_bit));
+  char *cn_synd_mem = (char *)calloc(hm_m, sizeof(*cn_synd_mem));
+  char *cn_tmp = (char *)calloc(cir_sz, sizeof(*cn_tmp));
+  char *cn_synd_old = (char *)calloc(cir_sz, sizeof(*cn_synd_old));
+  char *cn_synd_new = (char *)calloc(cir_sz, sizeof(*cn_synd_new));
+  char *cn_synd_sel = (char *)calloc(cir_sz, sizeof(*cn_synd_sel));
+  char *vn_synd_sel = (char *)calloc(cir_sz, sizeof(*vn_synd_sel));
+  char *vn_synd_cnt = (char *)calloc(cir_sz, sizeof(*vn_synd_cnt));
+  int *sk = (int *)calloc(cir_sz, sizeof(*sk));
+
+  cw_fail = 1;
+  cw_miscorr = 0;
+  cnvg_itr = 0;
+  cnvg_lyr = bm_n - 1;
+  fina_synd_wt = 0;
+  fdec_cyc_num = 0;
+  fdec_cyc_org = 0;
+
+  vec_copy(dec_di_blk, dec_do_blk, 0, 0, hm_n);
+  vec_clr(cn_synd_mem, hm_m);
+
+  if (use_ibex_layout) {
+    for (int col = 0; col < bm_n; col++) {
+      for (int bit = 0; bit < cir_sz; bit++) {
+        if (dec_do_blk[col * cir_sz + bit] == 0)
+          continue;
+        for (int row = 0; row < bm_m; row++) {
+          if (!edge_active(row, col, bit))
+            continue;
+          const int synd_bit = (bit + cir_sz - h_matrix.element[row][col]) % cir_sz;
+          cn_synd_mem[row * cir_sz + synd_bit] ^= 1;
+        }
+      }
+    }
+  } else {
+    for (int col = 0; col < bm_n; col++) {
+      char *vn_col = dec_do_blk + col * cir_sz;
+      for (mod2entry *e = mod2sparse_first_in_col(qc_bm, col); !mod2sparse_at_end(e);
+           e = mod2sparse_next_in_col(e)) {
+        vec_shift(vn_col, cn_tmp, cir_sz, -e->shift);
+        vec_copy(cn_synd_mem, cn_synd_old, e->row * cir_sz, 0, cir_sz);
+        vec_mod2_add(cn_tmp, cn_synd_old, cn_synd_new, cir_sz);
+        vec_copy(cn_synd_new, cn_synd_mem, 0, e->row * cir_sz, cir_sz);
+      }
+    }
+  }
+
+  fdec_cyc_num += bm_n;
+  fdec_cyc_org += bm_n;
+
+  int check_sum = vec_sum(cn_synd_mem, hm_m);
+  if (check_sum == 0) {
+    cw_fail = 0;
+    fina_synd_wt = 0;
+  }
+
+  int iter_used = 0;
+  int low_p_cnt_h = 63;
+  unsigned char ebf_lfsr_state = 1;
+
+  for (int iter = 0; iter < fdec_max_itr && cw_fail == 1; iter++) {
+    iter_used = iter + 1;
+    int low_p_cnt = 0;
+    double p0 = 1.0;
+    double p1 = (iter >= 4) ? 0.45 : 0.95;
+
+    if (check_sum == 0) {
+      cw_fail = 0;
+      fina_synd_wt = 0;
+      break;
+    }
+
+    for (int col = 0; col < bm_n && cw_fail == 1; col++) {
+      int dv = 0;
+
+      if (use_ibex_layout) {
+        for (int bit = 0; bit < cir_sz; bit++) {
+          int count = 0;
+          int bit_degree = 0;
+          for (int row = 0; row < bm_m; row++) {
+            if (!edge_active(row, col, bit))
+              continue;
+            bit_degree++;
+            const int synd_bit = (bit + cir_sz - h_matrix.element[row][col]) % cir_sz;
+            count += cn_synd_mem[row * cir_sz + synd_bit] ? 1 : 0;
+          }
+          sk[bit] = count;
+          if (bit_degree > dv)
+            dv = bit_degree;
+        }
+      } else {
+        vec_clr(vn_synd_cnt, cir_sz);
+        for (mod2entry *e = mod2sparse_first_in_col(qc_bm, col); !mod2sparse_at_end(e);
+             e = mod2sparse_next_in_col(e)) {
+          dv++;
+          vec_copy(cn_synd_mem, cn_synd_sel, e->row * cir_sz, 0, cir_sz);
+          vec_shift(cn_synd_sel, vn_synd_sel, cir_sz, e->shift);
+          vec_incr(vn_synd_cnt, vn_synd_sel, cir_sz);
+        }
+        for (int bit = 0; bit < cir_sz; bit++)
+          sk[bit] = (int)vn_synd_cnt[bit];
+      }
+
+      fdec_cyc_num++;
+      fdec_cyc_org++;
+
+      int Th = dv;
+      int Th2 = dv;
+      if (iter > 0) {
+        Th = dv - 1;
+        Th2 = dv - 1;
+      }
+      if (check_sum < dv * 5 || low_p_cnt_h < low_p_cnt_h_thod) {
+        Th = dv - 1;
+        Th2 = dv - 2;
+      }
+
+      if (Th2 <= dv - 2) {
+        p0 = static_cast<double>(p0_pct) / 100.0;
+        p1 = static_cast<double>(p1_pct) / 100.0;
+      }
+
+      const int y_wt = (check_sum <= dv * sw_pd) ? 1 : 2;
+      const double rand_val = ebf_lfsr8_next_prob(ebf_lfsr_state);
+      bool col_has_flip = false;
+      vec_clr(dcd_bit, cir_sz);
+
+      for (int bit = 0; bit < cir_sz; bit++) {
+        const int idx = col * cir_sz + bit;
+        const int energy = sk[bit] + (flip_bit[idx] ? y_wt : 0);
+        const int tmpsk = sk[bit];
+        bool flip = false;
+
+        if (tmpsk >= Th2) {
+          if (tmpsk >= Th2 + 1) {
+            if (tmpsk == dv)
+              flip = true;
+            else if (tmpsk == dv - 1)
+              flip = rand_val < 0.9;
+            else
+              flip = true;
+          } else {
+            if (tmpsk == dv)
+              flip = true;
+            else
+              flip = rand_val < p0;
+          }
+
+          if (low_p_cnt < 63)
+            low_p_cnt++;
+        } else if (energy >= Th) {
+          if (energy >= Th + 1)
+            flip = true;
+          else
+            flip = rand_val < p1;
+        }
+
+        if (flip) {
+          dcd_bit[bit] = 1;
+          flip_bit[idx] ^= 1;
+          col_has_flip = true;
+        }
+      }
+
+      if (col_has_flip) {
+        for (int bit = 0; bit < cir_sz; bit++) {
+          if (!dcd_bit[bit])
+            continue;
+
+          dec_do_blk[col * cir_sz + bit] ^= 1;
+
+          if (use_ibex_layout) {
+            for (int row = 0; row < bm_m; row++) {
+              if (!edge_active(row, col, bit))
+                continue;
+              const int synd_bit = (bit + cir_sz - h_matrix.element[row][col]) % cir_sz;
+              const int idx = row * cir_sz + synd_bit;
+              check_sum += cn_synd_mem[idx] ? -1 : 1;
+              cn_synd_mem[idx] ^= 1;
+            }
+          } else {
+            for (mod2entry *e = mod2sparse_first_in_col(qc_bm, col); !mod2sparse_at_end(e);
+                 e = mod2sparse_next_in_col(e)) {
+              const int synd_bit = (bit + cir_sz - e->shift) % cir_sz;
+              const int idx = e->row * cir_sz + synd_bit;
+              check_sum += cn_synd_mem[idx] ? -1 : 1;
+              cn_synd_mem[idx] ^= 1;
+            }
+          }
+        }
+
+        if (check_sum == 0) {
+          cw_fail = 0;
+          fina_synd_wt = 0;
+          cnvg_itr = iter;
+          cnvg_lyr = col;
+        }
+      }
+    }
+
+    low_p_cnt_h = low_p_cnt;
+  }
+
+  if (cw_fail == 1)
+    fina_synd_wt = vec_sum(cn_synd_mem, hm_m);
+  if (cw_fail == 0)
+    fina_synd_wt = 0;
+  if (iter_used > 0 && cnvg_itr == 0)
+    cnvg_itr = iter_used - 1;
+
+  free(flip_bit);
+  free(dcd_bit);
+  free(cn_synd_mem);
+  free(cn_tmp);
+  free(cn_synd_old);
+  free(cn_synd_new);
+  free(cn_synd_sel);
+  free(vn_synd_sel);
+  free(vn_synd_cnt);
+  free(sk);
+}
 
 // gen3 layer decoder
 void ldpc_packet::ldpc_dec_layer() {
@@ -4388,12 +4891,11 @@ void ldpc_packet::ldpc_dec_layer2(s_h_matrix h_matrix) {
             sign_tmp = (cn_q_updt_cur[i] >= 0) ? 1 : -1;
             val_tmp = cn_q_updt_cur[i] * sign_tmp;
           } else {
-            if (h_matrix.occupied[e->row][e->col] && (e->row == (h_matrix.rows - 1)) &&
-                (!h_matrix.mask[e->col][(i + e->shift) % cir_sz])) {
-              sign_tmp = 1;
-              val_tmp = 100000;
-            }
-            if (h_matrix.fade[e->row][e->col] && (h_matrix.mask[e->col][(i + e->shift) % cir_sz])) {
+            const bool inactive_edge =
+                (h_matrix.occupied[e->row][e->col] && (e->row == (h_matrix.rows - 1)) &&
+                 (!h_matrix.mask[e->col][(i + e->shift) % cir_sz])) ||
+                (h_matrix.fade[e->row][e->col] && (h_matrix.mask[e->col][(i + e->shift) % cir_sz]));
+            if (inactive_edge) {
               sign_tmp = 1;
               val_tmp = 100000;
             } else {

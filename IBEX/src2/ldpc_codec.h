@@ -18,6 +18,7 @@ enum dec_model
     BF_P3 = 3,
     BF_G2 = 4,
     BF_IBEX = 5,
+    BF_EBF = 6,
     LAYER = 8,
     LAYER_G2 = 9,
 };
@@ -324,6 +325,7 @@ struct ldpc_packet : ch_packet
 
     // LDPC IBEX BF decoder
     void ldpc_dec_bf_ibex(s_ldpc_decoder_input, s_ldpc_decoder_parameters, s_h_matrix);
+    void ldpc_dec_ebf();
     // void ldpc_dec_bf_ibex_2bit(s_ldpc_decoder_input, s_ldpc_decoder_parameters, s_h_matrix);
 
     // LDPC layer decoder

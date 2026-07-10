@@ -59,7 +59,7 @@ int main (int argc, char **argv)
     H_N = h_n*h_sc;
     H_K = h_k*h_sc;
 
-    if (dec_mode == FC_IBEX || dec_mode == FC_RDEC2)
+    if (dec_mode == FC_IBEX || dec_mode == FC_RDEC2 || dec_mode == FC_EBF)
     {
         dsp_info_len =bytes_of_userdata*8;
         dsp_pad_len = H_K - dsp_info_len;
@@ -86,7 +86,7 @@ int main (int argc, char **argv)
     printf("MCRC size       : 4B\n");
     printf("ECC user data   : %dB\n", dsp_info_len/8);
     printf("ECC padding     : %dB\n", dsp_pad_len/8);
-    if (dec_mode == FC_IBEX || dec_mode == FC_RDEC2)
+    if (dec_mode == FC_IBEX || dec_mode == FC_RDEC2 || dec_mode == FC_EBF)
     {
         printf("ECC parity      : %dB\n", bytes_of_parity);
         printf("IBEX VN_BITS    : %d\n", VN_BITS);
@@ -144,7 +144,7 @@ int main (int argc, char **argv)
     printf("[SIM] Start simulation @ ");
     print_time();
     
-    for (sim_cnt=0; (((sim_cnt<max_sim_num)||(max_sim_num==0)) || sim_err<max_err_num); sim_cnt++)
+    for (sim_cnt=0; ((max_sim_num==0 || sim_cnt<max_sim_num) || sim_err<max_err_num); sim_cnt++)
     {
 #ifdef _SIM_DEBUG
         printf("[SIM DEBUG] Packet %d\n", sim_cnt);
@@ -183,7 +183,11 @@ int main (int argc, char **argv)
         }
         else if (sim_mode==LDPC_SIM)
         {
-            if (dec_mode != FC_IBEX && dec_mode != FC_RDEC2)
+            if (ch_mode == ALL_ZERO)
+            {
+                vec_clr(sim_pckt->wr_rand_blk, dsp_src_len);
+            }
+            else if (dec_mode != FC_IBEX && dec_mode != FC_RDEC2 && dec_mode != FC_EBF)
             {
                 for (int i=0; i<dsp_src_len; i++)
                 {
@@ -218,7 +222,10 @@ int main (int argc, char **argv)
 #ifdef _SIM_DEBUG
         printf("[SIM DEBUG] encoding packet %d\n", sim_cnt);
 #endif
-        sim_pckt->ecc_encoder();
+        if (ch_mode == ALL_ZERO)
+            vec_clr(sim_pckt->tx_blk, dsp_blk_len);
+        else
+            sim_pckt->ecc_encoder();
 
 #ifdef _SIM_DEBUG
         printf("[SIM DEBUG] trasmitting packet %d\n", sim_cnt);
@@ -409,7 +416,8 @@ int main (int argc, char **argv)
         ldec_itr_tot += (i+1)*ldec_cnvg_itr[i];
     }
 
-    if ((dec_mode == FC_FDEC) || (dec_mode==FC_FDEC_G2) || (dec_mode==FC_MIX) || (dec_mode==FC_MIX_G2))
+    if ((dec_mode == FC_FDEC) || (dec_mode==FC_FDEC_G2) || (dec_mode==FC_MIX) || (dec_mode==FC_MIX_G2) ||
+        (dec_mode == FC_EBF))
     {
         printf("[STATISTICS] Fast Decoder average iteration: %f\n", fdec_itr_tot*1.0/sim_cnt);
         printf("[STATISTICS] Fast Decoder saves %f cycles from column skip\n", (100-100.0*fdec_cyc_tot/fdec_cyc_org));
@@ -460,7 +468,7 @@ int main (int argc, char **argv)
             printf("-------------------------------------------------------------------------------------\n");
         }
     }
-    else
+    else if (dec_mode == FC_IBEX)
     {
         printf("-------------------------------------------------------------------------------------\n");
         for (int i=0; i<max_iter+1; i++)
@@ -506,7 +514,7 @@ void read_arg(int argc, char **argv)
     char junk;
     int matrix_id = 0;  // 添加矩阵编号变量
 
-    if (!(sim_sel=argv[1]) || !(config_file=argv[2]) || !(ch_sel=argv[3]))
+    if (argc < 4 || !(sim_sel=argv[1]) || !(config_file=argv[2]) || !(ch_sel=argv[3]))
         print_usage();
 
     if (strcmp(sim_sel, "FC")==0)
@@ -533,11 +541,11 @@ void read_arg(int argc, char **argv)
 
     if (ch_mode != CLEAN)
     {
-        if ((!argv[4] || sscanf(argv[4], "%f%c", &ch_para, &junk) != 1))
+        if ((argc <= 4 || !argv[4] || sscanf(argv[4], "%f%c", &ch_para, &junk) != 1))
             print_usage();
         
         // 添加矩阵编号参数检查
-        if (argv[5] && sscanf(argv[5], "%d%c", &matrix_id, &junk) == 1)
+        if (argc > 5 && argv[5] && sscanf(argv[5], "%d%c", &matrix_id, &junk) == 1)
         {
             // 将矩阵编号设置为全局变量或传递给配置函数
             h_matrix_id = matrix_id;
@@ -549,7 +557,7 @@ void read_arg(int argc, char **argv)
 
         // 矩阵目录（可选第6参），否则环境变量 LDPC_MATRIX_DIR，否则默认 ./matrix
         const char *md_env = getenv("LDPC_MATRIX_DIR");
-        if (argv[6])
+        if (argc > 6 && argv[6])
             strncpy(matrix_dir, argv[6], sizeof(matrix_dir)-1), matrix_dir[sizeof(matrix_dir)-1]='\0';
         else if (md_env)
             strncpy(matrix_dir, md_env, sizeof(matrix_dir)-1), matrix_dir[sizeof(matrix_dir)-1]='\0';
@@ -559,7 +567,7 @@ void read_arg(int argc, char **argv)
     else
     {
         // CLEAN模式也可以接收矩阵编号
-        if (argv[4] && sscanf(argv[4], "%d%c", &matrix_id, &junk) == 1)
+        if (argc > 4 && argv[4] && sscanf(argv[4], "%d%c", &matrix_id, &junk) == 1)
         {
             h_matrix_id = matrix_id;
         }
@@ -570,7 +578,7 @@ void read_arg(int argc, char **argv)
 
         // 矩阵目录：第5参（CLEAN 少一个 ch_para），或环境变量，或默认
         const char *md_env = getenv("LDPC_MATRIX_DIR");
-        if (argv[5])
+        if (argc > 5 && argv[5])
             strncpy(matrix_dir, argv[5], sizeof(matrix_dir)-1), matrix_dir[sizeof(matrix_dir)-1]='\0';
         else if (md_env)
             strncpy(matrix_dir, md_env, sizeof(matrix_dir)-1), matrix_dir[sizeof(matrix_dir)-1]='\0';
@@ -658,6 +666,9 @@ void read_config_file()
     {
         h_m = (bytes_of_parity+63)/64;
         h_n = (bytes_of_userdata+63)/64 + h_m;
+        int matrix_number = (h_matrix_id > 0) ? h_matrix_id : 1;
+        snprintf(pchk_file, sizeof(pchk_file), "%s/matrix/LDPC_%dx%dex%d_w%d_dense%d_QC_H_%d_1.txt",
+                 matrix_dir, h_m, h_n, h_sc, h_wt, h_dense, matrix_number);
         printf("LDPC DEBUG %d %d\n", h_m, h_n);
     }
 
@@ -692,6 +703,8 @@ void read_config_file()
         dec_mode = FC_MIX_G2;
     else if (strcmp(dec_sel, "FC_IBEX")==0)
         dec_mode = FC_IBEX;
+    else if (strcmp(dec_sel, "FC_EBF")==0)
+        dec_mode = FC_EBF;
 
     // 0. Maximum LDPC BF decoding iteration
     fscanf(fp, "%d", &fdec_max_itr);
@@ -849,6 +862,8 @@ void read_config_file()
         printf("Fast (GEN2) + retry decoder (HD only)\n");
     else if (dec_mode==FC_IBEX)
         printf("IBEX LDPC decoder (%d-bit soft data)\n", sd_num);
+    else if (dec_mode==FC_EBF)
+        printf("EBF LDPC decoder (HD only)\n");
 
     if (dec_mode != FC_IBEX)
     {
