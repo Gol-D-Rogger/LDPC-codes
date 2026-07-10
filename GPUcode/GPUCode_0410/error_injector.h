@@ -21,6 +21,8 @@ struct error_injector {
     int final_parity_col_bits = 0;
     int final_udata_col_bits = 0;
     int codeword_size = 0;
+    int bytes_of_userdata = 0;
+    int bytes_of_parity = 0;
 
     double thresholds[MAX_THRESHOLDS];
     double error_region_prob[MAX_THRESHOLDS];
@@ -30,10 +32,11 @@ struct error_injector {
     std::mt19937 gen;
 
     error_injector();
-    error_injector(int insertion_mode, int strobes, double rber, int soft_bits, int parity_col_idx, int final_udata_col_bits, int final_parity_col_bits, int codeword_size, double target_distribution_rber = DEFAULT_TARGET_DIST_RBER);
+    error_injector(int insertion_mode, int strobes, double rber, int soft_bits, int parity_col_idx, int final_udata_col_bits, int final_parity_col_bits, int codeword_size, int bytes_of_userdata, int bytes_of_parity, double target_distribution_rber = DEFAULT_TARGET_DIST_RBER);
 
     void set_error_region_probs_tbench(double rber);
     void set_error_region_probs_cmodel(double rber);
+    bool bit_active(int col_idx, int bit_idx) const;
     void inject_normal_distribution_errors(decoder_input_cw &cw);
     void inject_fixed_count_errors(decoder_input_cw &cw);
 

@@ -93,6 +93,17 @@ void ch_llr_alloc(int sd_bit, const float *vref_in, int llr_tot_bit, int llr_fra
     int rd_num = sd_num;
     int bin_num = rd_num + 1;
     int max_llr_bin = 0;
+    awgn_sigma = (float)rber_to_sigma((double)rber);
+
+    if (sd_bit <= 1) {
+        for (int i = 0; i < 4; i++)
+            llr_tbl_return[i] = hd0_llr;
+        for (int i = 4; i < 8; i++)
+            llr_tbl_return[i] = hd1_llr;
+        printf("final LLR table=%f %f %f %f %f %f %f %f\n", llr_tbl_return[0], llr_tbl_return[1], llr_tbl_return[2], llr_tbl_return[3], llr_tbl_return[4], llr_tbl_return[5], llr_tbl_return[6], llr_tbl_return[7]);
+        return;
+    }
+
     float *vref = (float *)std::calloc(rd_num, sizeof(*vref));
     for (int i = 0; i < rd_num; i++)
         vref[i] = vref_in[i];
@@ -104,7 +115,6 @@ void ch_llr_alloc(int sd_bit, const float *vref_in, int llr_tot_bit, int llr_fra
     char *sd_asc_ord = (char *)std::calloc(rd_num + 1, sizeof(*sd_asc_ord));
     int *bin_distr = (int *)std::calloc(bin_num, sizeof(*bin_distr));
 
-    awgn_sigma = (float)rber_to_sigma((double)rber);
     float awgn_sigma_sqaure = awgn_sigma * awgn_sigma;
 
     int llr_tot_num = llr_tot_bit;
@@ -164,7 +174,7 @@ void ch_llr_alloc(int sd_bit, const float *vref_in, int llr_tot_bit, int llr_fra
         // Step 3. Determine soft data from NAND.
         int **nand_read;
 
-        nand_read = (int **)std::calloc(rd_num + 1, sizeof(**nand_read));
+        nand_read = (int **)std::calloc(rd_num + 1, sizeof(*nand_read));
         for (int i = 0; i <= rd_num; i++)
             nand_read[i] = (int *)std::calloc(rd_num, sizeof(*nand_read[i]));
 

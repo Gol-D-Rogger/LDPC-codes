@@ -12,7 +12,7 @@ error_injector::error_injector() {
     return;
 }
 
-error_injector::error_injector(int insertion_mode, int strobes, double rber, int soft_bits, int parity_col_idx, int final_udata_col_bits, int final_parity_col_bits, int codeword_size, double target_distribution_rber) {
+error_injector::error_injector(int insertion_mode, int strobes, double rber, int soft_bits, int parity_col_idx, int final_udata_col_bits, int final_parity_col_bits, int codeword_size, int bytes_of_userdata, int bytes_of_parity, double target_distribution_rber) {
     this->insertion_mode = insertion_mode;
     this->strobes = strobes;
     this->rber = rber;
@@ -20,6 +20,8 @@ error_injector::error_injector(int insertion_mode, int strobes, double rber, int
     this->final_udata_col_bits = final_udata_col_bits;
     this->final_parity_col_bits = final_parity_col_bits;
     this->codeword_size = codeword_size;
+    this->bytes_of_userdata = bytes_of_userdata;
+    this->bytes_of_parity = bytes_of_parity;
     this->target_distribution_rber = target_distribution_rber;
     this->num_soft_bits = soft_bits;
 
@@ -79,6 +81,14 @@ error_injector::error_injector(int insertion_mode, int strobes, double rber, int
     return;
 }
 
+bool error_injector::bit_active(int col_idx, int bit_idx) const {
+    const int bits_per_col = codeword::WORD_COUNT * codeword::WORD_SIZE;
+    if (col_idx < parity_col_idx)
+        return (col_idx * bits_per_col + bit_idx) < (bytes_of_userdata * 8);
+
+    return ((col_idx - parity_col_idx) * bits_per_col + bit_idx) < (bytes_of_parity * 8);
+}
+
 void error_injector::inject_normal_distribution_errors(decoder_input_cw &cw) {
     const uint64_t UNIT = 1;
     std::uniform_real_distribution<double> dist(0.0f, 1.0f);
@@ -91,9 +101,7 @@ void error_injector::inject_normal_distribution_errors(decoder_input_cw &cw) {
 
             for (unsigned bit_idx = 0; bit_idx < 64; bit_idx++) {
                 int k = word_idx * 64 + bit_idx;
-                bool blank_bit = false;
-                blank_bit = blank_bit || ((final_udata_col_bits > 0) && (col_idx == parity_col_idx - 1) && (k >= final_udata_col_bits));
-                blank_bit = blank_bit || ((final_parity_col_bits > 0) && (col_idx == parity_col_idx) && (k >= final_parity_col_bits));
+                bool blank_bit = !bit_active(col_idx, k);
 
                 double vn = blank_bit ? 1.00 : dist(gen);
 
@@ -129,7 +137,8 @@ void error_injector::inject_normal_distribution_errors(decoder_input_cw &cw) {
 void error_injector::inject_fixed_count_errors(decoder_input_cw &cw) {
     const uint64_t UNIT = 1;
     uint64_t total_bits = (uint64_t)codeword_size * 64 * codeword::WORD_COUNT;
-    uint64_t num_errors_to_inject = static_cast<uint64_t>(std::round(rber * total_bits));
+    uint64_t active_bits = (uint64_t)(bytes_of_userdata + bytes_of_parity) * 8;
+    uint64_t num_errors_to_inject = static_cast<uint64_t>(std::round(rber * active_bits));
 
     if (num_errors_to_inject > total_bits)
         num_errors_to_inject = total_bits;
@@ -145,9 +154,7 @@ void error_injector::inject_fixed_count_errors(decoder_input_cw &cw) {
         int word_idx = (linear_bit_pos % (64 * codeword::WORD_COUNT)) / 64;
         int bit_in_word_pos = linear_bit_pos % 64;
         int k = word_idx * 64 + bit_in_word_pos;
-        bool blank_bit = false;
-        blank_bit = blank_bit || ((final_udata_col_bits > 0) && (col_idx == parity_col_idx - 1) && (k >= final_udata_col_bits));
-        blank_bit = blank_bit || ((final_parity_col_bits > 0) && (col_idx == parity_col_idx) && (k >= final_parity_col_bits));
+        bool blank_bit = !bit_active(col_idx, k);
 
         if (!blank_bit) {
             cw.hard.cols[col_idx][word_idx] ^= (UNIT << bit_in_word_pos);
@@ -256,9 +263,9 @@ void error_injector::set_error_region_probs_cmodel(double rber) {
         delta[1] = 0.500;
         break;
     case 7:
-        delta[0] = 0.210;
-        delta[1] = 0.420;
-        delta[2] = 0.630;
+        delta[0] = 0.150;
+        delta[1] = 0.300;
+        delta[2] = 0.500;
         break;
     default:
         delta[0] = 0;

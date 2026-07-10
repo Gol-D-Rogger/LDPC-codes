@@ -113,7 +113,7 @@ __host__ int execute_gpu_kernel(const uint64_t TOTAL_CODEWORDS, const uint64_t M
     int bypass_errinj = 0;
     const int SM_COUNT = detail_kernel_occupancy(ldpc_decode_kernel, "ldpc_decode_kernel");
 
-    const uint64_t MAX_MEM_CODEWORDS = SM_COUNT * 500;
+    const uint64_t MAX_MEM_CODEWORDS = SM_COUNT * 40;
     uint64_t BATCH_SIZE = std::min(TOTAL_CODEWORDS, MAX_MEM_CODEWORDS);
     if (BATCH_SIZE == 0)
         BATCH_SIZE = 1;
@@ -235,7 +235,7 @@ __device__ inline __half Sat_Quan(__half x, __half Max_V, __half Min_V, int m, i
 __device__ inline int Quantize(__half x, int m, int k) {
     int t, t1;
     t = 1 << k;
-    t = (int)(x * _int2half_rn(t) + (x > _half(0.0) ? _half(0.5) : _half(-0.5)));
+    t = (int)(x * __int2half_rn(t) + (x > __half(0.0) ? __half(0.5) : __half(-0.5)));
     t1 = (1 << m) - 1;
     t1 = t1 & t;
     return t1;
@@ -292,12 +292,12 @@ __global__ void ldpc_decode_kernel(decoder_input_cw *input_cw, ldpc_decoder_outp
     __half alpha = __float2half(decoder_global_info.alpha);
     bool finite_mode = decoder_global_info.finite_mode;
 
-    if (bypass_errinj == 0)
+    if (bypass_errinj == 0) {
+#ifdef USE_REGION_INJECT
+        inject_normal_errors(&input_cw[cw_id]);
+#else
         inject_normal_errors2(&input_cw[cw_id]);
-
-    for (int i = 0; i < decoder_global_info.cols; i++) {
-        for (int j = lane_id; j < 8; j++)
-            cw_workspace[cw_id].vn.dec_do_blk.cols[i][j] = 0;
+#endif
     }
 
     if (lane_id == 0) {
@@ -311,6 +311,8 @@ __global__ void ldpc_decode_kernel(decoder_input_cw *input_cw, ldpc_decoder_outp
         const auto hard_bits = input_cw[cw_id].hard.cols[col_idx][word_idx];
         const auto soft_bits_0 = input_cw[cw_id].soft0.cols[col_idx][word_idx];
         const auto soft_bits_1 = input_cw[cw_id].soft1.cols[col_idx][word_idx];
+
+        cw_workspace[cw_id].vn.dec_do_blk.cols[col_idx][word_idx] = hard_bits;
 
         for (int bit_idx = 0; bit_idx < 64; bit_idx++) {
             const bool hard = (hard_bits & (1UL << bit_idx));
@@ -576,7 +578,7 @@ __device__ inline uint16_t rotate_right_512_deng(uint16_t word, unsigned r) {
     const unsigned w = r >> 4;
     const unsigned b = r & 15;
     uint16_t curr = __shfl_sync(0xffffffff, word, (lane + w) & 31);
-    uint16_t next = __shfl_sync(0xffffffff, curr_word, (lane + w + 1) & 31);
+    uint16_t next = __shfl_sync(0xffffffff, word, (lane + w + 1) & 31);
 
     return (curr >> b) | (next << (16 - b));
 }
@@ -626,6 +628,14 @@ __device__ inline void print_512cn_msg(cn_msg *a) {
     }
 }
 
+__device__ inline bool codeword_bit_active(int col_idx, int bit_idx) {
+    const int parity_start_col = decoder_global_info.cols - decoder_global_info.rows;
+    if (col_idx < parity_start_col)
+        return (col_idx * decoder_global_info.bits + bit_idx) < (decoder_global_info.bytes_of_userdata * 8);
+
+    return ((col_idx - parity_start_col) * decoder_global_info.bits + bit_idx) < (decoder_global_info.bytes_of_parity * 8);
+}
+
 __device__ void inject_normal_errors(decoder_input_cw *input_cw) {
     const int lane_id = threadIdx.x & 31;
     const float rber = decoder_global_info.error_region_prob[0];
@@ -641,6 +651,10 @@ __device__ void inject_normal_errors(decoder_input_cw *input_cw) {
         uint64_t soft1_pattern = 0;
 
         for (unsigned bit_idx = 0; bit_idx < 64; bit_idx++) {
+            const int bit_in_col = word_idx * 64 + bit_idx;
+            if (!codeword_bit_active(col_idx, bit_in_col))
+                continue;
+
             float vn = curand_uniform(&localState);
             if (vn < rber)
                 error_pattern |= codec_support::UNIT << bit_idx;
@@ -684,50 +698,45 @@ __device__ void inject_normal_errors2(decoder_input_cw *input_cw) {
     const auto idx_limit = decoder_global_info.cols * codeword::WORD_COUNT;
 
     __syncwarp();
-    const char extra_words_of_userdata = decoder_global_info.extra_bytes_of_userdata >> 3;
-    const char extra_words_of_parity = decoder_global_info.extra_bytes_of_parity >> 3;
-    const char last_udata_col = decoder_global_info.cols - decoder_global_info.rows - 1;
-    const char first_p_col = last_udata_col + 1;
 
     for (int i = lane_id; i < idx_limit; i += WARP_SIZE) {
         const auto col_idx = i / codeword::WORD_COUNT;
         const auto word_idx = i % codeword::WORD_COUNT;
-        const bool mask = ((col_idx == last_udata_col) && (word_idx >= extra_words_of_userdata)) || ((col_idx == first_p_col) && (word_idx >= extra_words_of_parity));
         uint64_t error_pattern = 0;
         uint64_t soft0_pattern = 0;
         uint64_t soft1_pattern = 0;
 
-        if (mask) {
-            input_cw->hard.cols[col_idx][word_idx] = error_pattern;
-            input_cw->soft0.cols[col_idx][word_idx] = soft0_pattern;
-            input_cw->soft1.cols[col_idx][word_idx] = soft1_pattern;
-        } else {
-            uint64_t bit = 1ULL;
-            for (unsigned bit_idx = 0; bit_idx < 64; bit_idx += 2) {
-                float2 r = curand_normal2(&localState);
-                float vn0 = 1.0f + decoder_global_info.awgn_sigma * r.x;
-                float vn1 = 1.0f + decoder_global_info.awgn_sigma * r.y;
+        uint64_t bit = 1ULL;
+        for (unsigned bit_idx = 0; bit_idx < 64; bit_idx += 2) {
+            float2 r = curand_normal2(&localState);
+            float vn0 = 1.0f + decoder_global_info.awgn_sigma * r.x;
+            float vn1 = 1.0f + decoder_global_info.awgn_sigma * r.y;
 
 #pragma unroll
-                for (int k = 0; k < 2; k++) {
-                    float vn = (k == 0) ? vn0 : vn1;
-                    float avn = fabsf(vn);
-                    bool e = (vn < decoder_global_info.vref[0]);
-                    bool s1 = (vn < decoder_global_info.vref[3]) & (vn > decoder_global_info.vref[4]);
-                    bool c1 = (avn > decoder_global_info.vref[3]) & (avn < decoder_global_info.vref[5]);
-                    bool s0 = (avn < decoder_global_info.vref[1]) | c1;
-
-                    error_pattern |= (uint64_t)e * bit;
-                    soft1_pattern |= (uint64_t)s1 * bit;
-                    soft0_pattern |= (uint64_t)s0 * bit;
+            for (int k = 0; k < 2; k++) {
+                const int bit_in_col = word_idx * 64 + bit_idx + k;
+                if (!codeword_bit_active(col_idx, bit_in_col)) {
                     bit <<= 1;
+                    continue;
                 }
-            }
 
-            input_cw->hard.cols[col_idx][word_idx] = error_pattern;
-            input_cw->soft0.cols[col_idx][word_idx] = soft0_pattern;
-            input_cw->soft1.cols[col_idx][word_idx] = soft1_pattern;
+                float vn = (k == 0) ? vn0 : vn1;
+                float avn = fabsf(vn);
+                bool e = (vn < decoder_global_info.vref[0]);
+                bool s1 = (vn < decoder_global_info.vref[3]) & (vn > decoder_global_info.vref[4]);
+                bool c1 = (avn > decoder_global_info.vref[3]) & (avn < decoder_global_info.vref[5]);
+                bool s0 = (avn < decoder_global_info.vref[1]) | c1;
+
+                error_pattern |= (uint64_t)e * bit;
+                soft1_pattern |= (uint64_t)s1 * bit;
+                soft0_pattern |= (uint64_t)s0 * bit;
+                bit <<= 1;
+            }
         }
+
+        input_cw->hard.cols[col_idx][word_idx] = error_pattern;
+        input_cw->soft0.cols[col_idx][word_idx] = soft0_pattern;
+        input_cw->soft1.cols[col_idx][word_idx] = soft1_pattern;
     }
 
     d_states[state_idx] = localState;
@@ -766,7 +775,7 @@ __device__ inline void update_node(int layer_pre, int col, decoder_workspace *cw
 
         __half cn_q_sel_pre = cw_workspace[cw_id].vn.cn_q_mem[col][i];
 #ifdef USE_CN_MSG
-        cosnt cn_msg cn_c_sel_pre = cw_workspace[cw_id].vn.cn_c_mem[layer_pre][i];
+        const cn_msg cn_c_sel_pre = cw_workspace[cw_id].vn.cn_c_mem[layer_pre][i];
 #else
         cn_msg cn_c_sel_pre;
         cn_c_sel_pre.min1_val = cw_workspace[cw_id].vn.cn_c_mem_min1_val[layer_pre][i];
@@ -891,7 +900,7 @@ __device__ inline void update_node_next(int cir_cnt, int layer, int col, Optimiz
             int use_min2 = (cn_c_sel_cur.min1_pos == col);
 
             __half diff = __hsub(cn_c_sel_cur.min2_val, cn_c_sel_cur.min1_val);
-            __half val = __hfma(__int2half_rn(use_min2), diff, cn_c_sel_cur.min1_val);
+            __half val = cn_c_sel_cur.min1_val + __int2half_rn(use_min2) * diff;
 
             cn_r_old = __hmul(val, __int2half_rn(sign));
             const __half cn_app_cur = cw_shared_mem->cn_app_pre[(i + shift_val1) & P_SIZEm1];
@@ -950,7 +959,7 @@ __device__ inline void update_node_next(int cir_cnt, int layer, int col, Optimiz
             int sign = ((bit << 1) - 1) * cn_c_sel_cur.sign_tot;
             int use_min2 = (cn_c_sel_cur.min1_pos == col);
             __half diff = __hsub(cn_c_sel_cur.min2_val, cn_c_sel_cur.min1_val);
-            __half val = __hfma(__int2half_rn(use_min2), diff, cn_c_sel_cur.min1_val);
+            __half val = cn_c_sel_cur.min1_val + __int2half_rn(use_min2) * diff;
 
             cn_r_old = __hmul(val, __int2half_rn(sign));
             const bool spec_cond = (occu_cond && !mask_bit) || (fade && mask_bit);

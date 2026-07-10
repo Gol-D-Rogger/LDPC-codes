@@ -6,6 +6,10 @@
 
 #include "rand.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void vec_clr(char*, int);
 void vec_clr_int(int*, int);
 void vec_set(char*, int);
@@ -23,3 +27,7 @@ int vec_find(char*, int, int, int*);
 
 void vec_copy_fill(char*, int, char*, int, int, int, char);
 void vec_mask(char*, int, int, char);
+
+#ifdef __cplusplus
+}
+#endif

@@ -1,9 +1,51 @@
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "h_matrix.h"
 
 namespace {
+bool custom_matrix_files_exist(const char *matrix_dir, int rows, int cols, const char *suffix) {
+    char pchk_file[512], occupy_file[512], fade_file[512];
+    std::snprintf(pchk_file, sizeof(pchk_file), "%s/matrix/LDPC_%dx%dex512_w4_dense5_QC_H%s.txt", matrix_dir, rows, cols, suffix);
+    std::snprintf(occupy_file, sizeof(occupy_file), "%s/occupied_matrix/LDPC_%dx%dex512_w4_dense5_occupied%s.txt", matrix_dir, rows, cols, suffix);
+    std::snprintf(fade_file, sizeof(fade_file), "%s/fade_matrix/LDPC_%dx%dex512_w4_dense5_fade%s.txt", matrix_dir, rows, cols, suffix);
+
+    FILE *fp_h = std::fopen(pchk_file, "r");
+    FILE *fp_occu = std::fopen(occupy_file, "r");
+    FILE *fp_fade = std::fopen(fade_file, "r");
+    bool ok = fp_h && fp_occu && fp_fade;
+
+    if (fp_h)
+        std::fclose(fp_h);
+    if (fp_occu)
+        std::fclose(fp_occu);
+    if (fp_fade)
+        std::fclose(fp_fade);
+
+    return ok;
+}
+
+int detect_custom_matrix_cols(const char *matrix_dir, int rows, int natural_cols) {
+    if (!matrix_dir || matrix_dir[0] == '\0')
+        return natural_cols;
+
+    for (int cols = natural_cols; cols <= LDPC_N; ++cols) {
+        if (custom_matrix_files_exist(matrix_dir, rows, cols, "_1_1") || custom_matrix_files_exist(matrix_dir, rows, cols, "_1"))
+            return cols;
+    }
+
+    return natural_cols;
+}
+
+bool matrix_bit_active(const h_matrix *matrix, int col, int bit) {
+    const int parity_start_col = matrix->cols - matrix->rows;
+    if (col < parity_start_col)
+        return (col * matrix->bits + bit) < (matrix->bytes_of_userdata * 8);
+
+    return ((col - parity_start_col) * matrix->bits + bit) < (matrix->bytes_of_parity * 8);
+}
+
 void zero_h_matrix(h_matrix *matrix) {
     matrix->rows = 0;
     matrix->cols = 0;
@@ -70,7 +112,7 @@ h_matrix::h_matrix() {
     return;
 }
 
-h_matrix::h_matrix(const int bytes_of_userdata, const int bytes_of_parity, int mx_cnfg) {
+h_matrix::h_matrix(const int bytes_of_userdata, const int bytes_of_parity, int mx_cnfg, const char *matrix_dir) {
     zero_h_matrix(this);
 
     int VERBOSITY = 0;
@@ -87,22 +129,21 @@ h_matrix::h_matrix(const int bytes_of_userdata, const int bytes_of_parity, int m
     this->cols = (this->bits == 1024) ? ((bytes_of_userdata + 127) >> 7) : ((bytes_of_userdata + 63) >> 6);
     this->cols += this->rows;
 
+    int natural_cols = this->cols;
+    this->cols = detect_custom_matrix_cols(matrix_dir, this->rows, natural_cols);
+    if (this->cols != natural_cols)
+        std::printf("[H_MATRIX] :: Using custom matrix dimensions %dx%d for %dB userdata.\n", this->rows, this->cols, bytes_of_userdata);
+
     this->bytes_of_userdata = bytes_of_userdata;
     this->bytes_of_parity = bytes_of_parity;
     this->min_rows = LDPC_L;
     this->max_rows = LDPC_M;
 
-    this->unused_bytes_of_parity = (this->rows * (this->bits >> 3)) - this->bytes_of_parity;
-    if (this->unused_bytes_of_parity != 0)
-        this->extra_bytes_of_parity = (this->bits >> 3) - this->unused_bytes_of_parity;
-    else
-        this->extra_bytes_of_parity = 0;
-
-    this->unused_bytes_of_userdata = ((this->cols - this->rows) * (this->bits >> 3)) - this->bytes_of_userdata;
-    if (this->unused_bytes_of_userdata != 0)
-        this->extra_bytes_of_userdata = (this->bits >> 3) - this->unused_bytes_of_userdata;
-    else
-        this->extra_bytes_of_userdata = 0;
+    const int bytes_per_col = this->bits >> 3;
+    this->unused_bytes_of_parity = (this->rows * bytes_per_col) - this->bytes_of_parity;
+    this->extra_bytes_of_parity = this->bytes_of_parity % bytes_per_col;
+    this->unused_bytes_of_userdata = ((this->cols - this->rows) * bytes_per_col) - this->bytes_of_userdata;
+    this->extra_bytes_of_userdata = this->bytes_of_userdata % bytes_per_col;
 
     this->extra_bits_of_parity = this->extra_bytes_of_parity << 3;
     this->extra_bits_of_userdata = this->extra_bytes_of_userdata << 3;
@@ -322,10 +363,14 @@ h_matrix::h_matrix(const int bytes_of_userdata, const int bytes_of_parity, int m
 
     std::printf("[H_MATRIX] :: H-matrix with size %dB x %dB configured. [matrix_sel : %d]\n", bytes_of_userdata, bytes_of_parity, matrix_sel);
 
-    FILE *fp_fade, *fp_occu, *fp_h;
-    char pchk_file[100], occupy_file[100], fade_file[100];
+    FILE *fp_fade = nullptr, *fp_occu = nullptr, *fp_h = nullptr;
+    char pchk_file[512], occupy_file[512], fade_file[512];
 
-    if (mx_cnfg == 0) {
+    if (matrix_dir && matrix_dir[0] != '\0') {
+        std::snprintf(pchk_file, sizeof(pchk_file), "%s/matrix/LDPC_%dx%dex512_w4_dense5_QC_H_1_1.txt", matrix_dir, this->rows, this->cols);
+        std::snprintf(occupy_file, sizeof(occupy_file), "%s/occupied_matrix/LDPC_%dx%dex512_w4_dense5_occupied_1_1.txt", matrix_dir, this->rows, this->cols);
+        std::snprintf(fade_file, sizeof(fade_file), "%s/fade_matrix/LDPC_%dx%dex512_w4_dense5_fade_1_1.txt", matrix_dir, this->rows, this->cols);
+    } else if (mx_cnfg == 0) {
         std::sprintf(pchk_file, "./matrice/matrix/LDPC_%dx%dex512_w4_dense5_QC_H.txt", this->rows, this->cols);
         std::sprintf(occupy_file, "./matrice/occupy/LDPC_%dx%dex512_w4_dense5_occupied.txt", this->rows, this->cols);
         std::sprintf(fade_file, "./matrice/fade/LDPC_%dx%dex512_w4_dense5_fade.txt", this->rows, this->cols);
@@ -335,7 +380,7 @@ h_matrix::h_matrix(const int bytes_of_userdata, const int bytes_of_parity, int m
         std::sprintf(fade_file, "./rand_matrix/fade/LDPC_%dx%dex512_w4_dense5_QC_H_fade_30_0.txt", this->rows, this->cols);
     }
 
-    if ((mx_cnfg == 1) || (mx_cnfg == 0)) {
+    if ((mx_cnfg == 1) || (mx_cnfg == 0) || (matrix_dir && matrix_dir[0] != '\0')) {
         std::printf("use customized matrix, mx_cnfg=%d\n", mx_cnfg);
         std::printf("fade_file= %s\n", fade_file);
         std::printf("occupy_file= %s\n", occupy_file);
@@ -345,16 +390,49 @@ h_matrix::h_matrix(const int bytes_of_userdata, const int bytes_of_parity, int m
         fp_h = std::fopen(pchk_file, "r");
         fp_occu = std::fopen(occupy_file, "r");
 
+        if ((!fp_fade || !fp_h || !fp_occu) && matrix_dir && matrix_dir[0] != '\0') {
+            if (fp_fade)
+                fclose(fp_fade);
+            if (fp_h)
+                fclose(fp_h);
+            if (fp_occu)
+                fclose(fp_occu);
+            std::snprintf(pchk_file, sizeof(pchk_file), "%s/matrix/LDPC_%dx%dex512_w4_dense5_QC_H_1.txt", matrix_dir, this->rows, this->cols);
+            std::snprintf(occupy_file, sizeof(occupy_file), "%s/occupied_matrix/LDPC_%dx%dex512_w4_dense5_occupied_1.txt", matrix_dir, this->rows, this->cols);
+            std::snprintf(fade_file, sizeof(fade_file), "%s/fade_matrix/LDPC_%dx%dex512_w4_dense5_fade_1.txt", matrix_dir, this->rows, this->cols);
+            std::printf("[H_MATRIX] :: Retrying matrix_dir with _1.txt suffix.\n");
+            std::printf("fade_file= %s\n", fade_file);
+            std::printf("occupy_file= %s\n", occupy_file);
+            std::printf("element file= %s\n", pchk_file);
+            fp_fade = std::fopen(fade_file, "r");
+            fp_h = std::fopen(pchk_file, "r");
+            fp_occu = std::fopen(occupy_file, "r");
+        }
+
         if (fp_fade && fp_h && fp_occu) {
             for (i = 0; i < this->rows; i++) {
                 for (j = 0; j < this->cols; j++) {
-                    fscanf(fp_fade, "%d", &this->fade[i][j]);
-                    fscanf(fp_occu, "%d", &this->occupied[i][j]);
-                    fscanf(fp_h, "%d", &this->element[i][j]);
+                    int fade_val = 0;
+                    int occupied_val = 0;
+                    int element_val = -1;
+                    fscanf(fp_fade, "%d", &fade_val);
+                    fscanf(fp_occu, "%d", &occupied_val);
+                    fscanf(fp_h, "%d", &element_val);
+                    this->fade[i][j] = (fade_val != 0);
+                    this->occupied[i][j] = (occupied_val != 0);
+                    this->element[i][j] = (short)element_val;
                 }
             }
+            std::printf("[H_MATRIX] :: Loaded custom matrix files.\n");
+        } else {
+            std::printf("[H_MATRIX] :: Failed to open custom matrix files; keeping generated matrix.\n");
         }
-        fclose(fp_fade); fclose(fp_h); fclose(fp_occu);
+        if (fp_fade)
+            fclose(fp_fade);
+        if (fp_h)
+            fclose(fp_h);
+        if (fp_occu)
+            fclose(fp_occu);
     }
 
     for (j = 0; j < 80; j++)
@@ -475,8 +553,7 @@ void h_matrix::setup_range_operational_matrix(void) {
 
             for (k = 0; k < bits; k++) {
                 do_not_use_this_bit = false;
-                do_not_use_this_bit = do_not_use_this_bit || ((extra_bits_of_parity > 0) && (j == (cols - rows)) && (k >= extra_bits_of_parity));
-                do_not_use_this_bit = do_not_use_this_bit || ((extra_bits_of_userdata > 0) && (j == (cols - rows - 1)) && (k >= extra_bits_of_userdata));
+                do_not_use_this_bit = !matrix_bit_active(this, j, k);
 
                 if (do_not_use_this_bit)
                     continue;

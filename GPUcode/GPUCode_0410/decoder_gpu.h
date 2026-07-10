@@ -44,6 +44,8 @@ struct device_global_info_struct {
     bool prng_verilog_mode;
 
     uint16_t bits;
+    int bytes_of_userdata;
+    int bytes_of_parity;
     uint16_t element[LDPC_M][LDPC_N];
     char fade[LDPC_M][LDPC_N];
     char occupied[LDPC_M][LDPC_N];

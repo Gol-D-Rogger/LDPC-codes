@@ -50,7 +50,7 @@ struct h_matrix {
     range tile_ranges[2 * LDPC_N];
 
     h_matrix();
-    h_matrix(const int bytes_of_userdata, const int bytes_of_parity, int matrix_sel = DEFAULT_MATRIX);
+    h_matrix(const int bytes_of_userdata, const int bytes_of_parity, int matrix_sel = DEFAULT_MATRIX, const char *matrix_dir = nullptr);
     void print(void);
     void setup_range_operational_matrix(void);
 };

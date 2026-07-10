@@ -311,7 +311,7 @@ ldpc_decoder_output decoder::decode_planar(const ldpc_decoder_input &decoder_inp
         }
     }
 
-    vec_copy(dec_di_blk, dec_do_blk, 0, 0, h_matrix_ref.rows);
+    vec_copy(dec_di_blk, dec_do_blk, 0, 0, h_matrix_ref.cols * h_matrix_ref.bits);
 
     for (int itr = 0; itr < (int)decoder_input.iteration_limit && ((ldec_early_term_en == 0) || (cw_fail == 1)); itr++) {
         cir_cnt = 0;

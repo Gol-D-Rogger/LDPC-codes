@@ -13,10 +13,19 @@ CPU_SRCS := \
 	codec_support.cpp \
 	decoder.cpp \
 	main.cpp \
-	calc_llr.cpp
+	calc_llr.cpp \
+	vec_op.c \
+	decoder_gpu_stub.cpp
 
 CUDA_SRCS := \
-	$(CPU_SRCS) \
+	codeword.cpp \
+	h_matrix.cpp \
+	error_injector.cpp \
+	codec_support.cpp \
+	decoder.cpp \
+	main.cpp \
+	calc_llr.cpp \
+	vec_op.c \
 	decoder_gpu.cu
 
 .PHONY: all cpu_build cuda_build run debug clean

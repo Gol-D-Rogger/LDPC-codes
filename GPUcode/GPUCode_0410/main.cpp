@@ -32,13 +32,14 @@ struct program_config {
     int finite_c_num = 7;
     int llr_tot_bit = 7;
     int llr_frac_bit = 3;
-    float vref[7] = {0, 0.15, -0.15, 0.3, -0.3, 0.5, -0.5};
+    float vref[7] = {0, 0.15, -0.15, 0.30, -0.30, 0.50, -0.50};
     float hd0_llr = 1.875; float hd1_llr = -1.875;
     double rber = 0.015;
     double target_distribution_rber = 0.025;
     bool save_decode_fail_data = false;
     bool GPU_mode = true;
     float alpha = 0.625;
+    std::string matrix_dir;
 
     int parse_args(int argc, char **argv);
 };
@@ -74,6 +75,8 @@ int program_config::parse_args(int argc, char **argv) {
                 //     post_ratio = std::stoi(value);
                 else if (key == "mx_cnfg")
                     mx_cnfg = std::stoi(value);
+                else if (key == "matrix_dir")
+                    matrix_dir = value;
                 else if (key == "rber")
                     rber = std::stod(value);
                 else if (key == "target_distribution_rber")
@@ -129,10 +132,12 @@ class configurator {
         base_matrix_cols = config.bytes_of_userdata / 64 + ((config.bytes_of_userdata % 64) != 0);
         base_matrix_cols = base_matrix_rows + base_matrix_cols;
 
-        h_matrix_ptr = new h_matrix(config.bytes_of_userdata, config.bytes_of_parity, config.mx_cnfg);
+        h_matrix_ptr = new h_matrix(config.bytes_of_userdata, config.bytes_of_parity, config.mx_cnfg, config.matrix_dir.c_str());
+        base_matrix_rows = h_matrix_ptr->rows;
+        base_matrix_cols = h_matrix_ptr->cols;
 
         int parity_col_idx = base_matrix_cols - base_matrix_rows;
-        error_injector_ptr = new error_injector(config.err_inj_mode, config.nand_strobes, config.rber, soft_bits, parity_col_idx, h_matrix_ptr->extra_bits_of_userdata, h_matrix_ptr->extra_bits_of_parity, base_matrix_cols, config.target_distribution_rber);
+        error_injector_ptr = new error_injector(config.err_inj_mode, config.nand_strobes, config.rber, soft_bits, parity_col_idx, h_matrix_ptr->extra_bits_of_userdata, h_matrix_ptr->extra_bits_of_parity, base_matrix_cols, config.bytes_of_userdata, config.bytes_of_parity, config.target_distribution_rber);
 
         std::printf("initialize decoder\n");
         decoder_ptr = new decoder(*h_matrix_ptr, config.nand_strobes, config.post_ratio);
@@ -162,6 +167,10 @@ class configurator {
         std::cout << " - nand_strobes: " << config_ref.nand_strobes << "\n";
         std::cout << " - max_failure_count: " << config_ref.max_failure_count << "\n";
         std::cout << " - rber: " << config_ref.rber << "\n";
+        std::cout << " - vref: ";
+        for (int i = 0; i < 7; ++i)
+            std::cout << config_ref.vref[i] << (i == 6 ? "\n" : ", ");
+        std::cout << " - matrix_dir: " << (config_ref.matrix_dir.empty() ? "(default)" : config_ref.matrix_dir) << "\n";
         std::cout << " - save_decode_fail_data: " << config_ref.save_decode_fail_data << "\n";
         std::cout << " -> base_matrix_rows: " << base_matrix_rows << "\n";
         std::cout << " -> base_matrix_cols: " << base_matrix_cols << "\n";
@@ -220,6 +229,8 @@ class configurator {
         }
 
         host_decoder_info_struct.bits = h_matrix_ptr->bits;
+        host_decoder_info_struct.bytes_of_userdata = h_matrix_ptr->bytes_of_userdata;
+        host_decoder_info_struct.bytes_of_parity = h_matrix_ptr->bytes_of_parity;
         host_decoder_info_struct.extra_bytes_of_parity = h_matrix_ptr->extra_bytes_of_parity;
         host_decoder_info_struct.extra_bits_of_parity = h_matrix_ptr->extra_bits_of_parity;
         host_decoder_info_struct.extra_bytes_of_userdata = h_matrix_ptr->extra_bytes_of_userdata;
